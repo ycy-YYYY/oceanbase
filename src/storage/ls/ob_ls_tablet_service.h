@@ -187,6 +187,7 @@ public:
       const share::SCN &create_scn,
       const int64_t snapshot_version,
       const ObCreateTabletSchema &create_tablet_schema,
+      const lib::Worker::CompatMode &compat_mode,
       ObTabletHandle &tablet_handle);
   int create_transfer_in_tablet(
       const share::ObLSID &ls_id,
@@ -415,7 +416,7 @@ public:
   int build_tablet_iter(ObLSTabletFastIter &iter, const bool except_ls_inner_tablet = false);
 
   // migration section
-  typedef common::ObFunction<int(const obrpc::ObCopyTabletInfo &tablet_info)> HandleTabletMetaFunc;
+  typedef common::ObFunction<int(const obrpc::ObCopyTabletInfo &tablet_info, const ObTabletHandle &tablet_handle)> HandleTabletMetaFunc;
   int ha_scan_all_tablets(const HandleTabletMetaFunc &handle_tablet_meta_f);
   int trim_rebuild_tablet(
       const ObTabletID &tablet_id,
@@ -434,6 +435,9 @@ public:
   int get_all_tablet_ids(const bool except_ls_inner_tablet, common::ObIArray<ObTabletID> &tablet_id_array);
 
   int flush_mds_table(int64_t recycle_scn);
+
+  // for transfer check tablet write stop
+  int check_tablet_no_active_memtable(const ObIArray<ObTabletID> &tablet_list, bool &has);
 protected:
   virtual int prepare_dml_running_ctx(
       const common::ObIArray<uint64_t> *column_ids,
@@ -541,6 +545,7 @@ private:
   int refresh_tablet_addr(
       const share::ObLSID &ls_id,
       const common::ObTabletID &tablet_id,
+      const ObUpdateTabletPointerParam &param,
       ObTabletHandle &tablet_handle);
   int inner_remove_tablet(
       const share::ObLSID &ls_id,
@@ -649,6 +654,11 @@ private:
       ObObj &old_obj,
       ObLobLocatorV2 &delta_lob,
       ObObj &obj);
+  static int set_lob_storage_params(
+      ObDMLRunningCtx &run_ctx,
+      const ObColDesc &column,
+      ObLobAccessParam &lob_param);
+
   static int process_lob_row(
       ObTabletHandle &tablet_handle,
       ObDMLRunningCtx &run_ctx,

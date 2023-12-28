@@ -257,7 +257,7 @@ int ObLogSubPlanFilter::do_re_est_cost(EstimateCostInfo &param, double &card, do
     cost_info.rows_ = ObJoinOrder::calc_single_parallel_rows(cost_info.rows_, param.need_parallel_);
     ObOptimizerContext &opt_ctx = get_plan()->get_optimizer_context();
     ObSubplanFilterCostInfo info(cost_infos, get_onetime_idxs(), get_initplan_idxs());
-    if (OB_FAIL(ObOptEstCost::cost_subplan_filter(info, op_cost, opt_ctx.get_cost_model_type()))) {
+    if (OB_FAIL(ObOptEstCost::cost_subplan_filter(info, op_cost, opt_ctx))) {
       LOG_WARN("failed to calculate  the cost of subplan filter", K(ret));
     } else {
       cost = op_cost + cost_info.cost_;
@@ -537,6 +537,15 @@ int ObLogSubPlanFilter::check_and_set_das_group_rescan()
     LOG_WARN("unexpected null", K(ret));
   } else if (OB_FAIL(session_info->get_nlj_batching_enabled(enable_das_group_rescan_))) {
     LOG_WARN("failed to get enable batch variable", K(ret));
+  } else {
+    omt::ObTenantConfigGuard tenant_config(TENANT_CONF(session_info->get_effective_tenant_id()));
+    if (tenant_config.is_valid()) {
+      enable_das_group_rescan_ = tenant_config->_enable_spf_batch_rescan;
+      LOG_TRACE("trace disable hash groupby in second stage for three-stage",
+        K(enable_das_group_rescan_));
+    } else {
+      enable_das_group_rescan_ = false;
+    }
   }
   // check use batch
   for (int64_t i = 1; OB_SUCC(ret) && enable_das_group_rescan_ && i < get_num_of_child(); i++) {

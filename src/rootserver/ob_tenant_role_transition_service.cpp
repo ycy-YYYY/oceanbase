@@ -433,8 +433,8 @@ int ObTenantRoleTransitionService::do_switch_access_mode_to_append(
       LOG_WARN("Tenant status changed by concurrent operation, switch to primary not allowed",
                KR(ret), K(tenant_info), K(cur_tenant_info));
       LOG_USER_ERROR(OB_OP_NOT_ALLOW, "tenant status changed by concurrent operation, switch to primary");
-    } else if (OB_FAIL(ObAllTenantInfoProxy::update_tenant_role(
-            tenant_id_, &trans, tenant_info.get_switchover_epoch(),
+    } else if (OB_FAIL(ObAllTenantInfoProxy::update_tenant_role_in_trans(
+            tenant_id_, trans, tenant_info.get_switchover_epoch(),
             share::PRIMARY_TENANT_ROLE, tenant_info.get_switchover_status(),
             share::NORMAL_SWITCHOVER_STATUS, switchover_epoch_))) {
       LOG_WARN("failed to update tenant switchover status", KR(ret), K(tenant_id_), K(tenant_info), K(cur_tenant_info));
@@ -528,6 +528,7 @@ int ObTenantRoleTransitionService::wait_ls_balance_task_finish_()
       ObBalanceTaskHelper ls_balance_task;
       ObBalanceTaskArray balance_task_array;
       share::ObAllTenantInfo cur_tenant_info;
+      int tmp_ret = OB_SUCCESS;
       while (!THIS_WORKER.is_timeout() && OB_SUCC(ret) && !is_finish) {
         if (FALSE_IT(ret = ObBalanceTaskHelperTableOperator::pop_task(tenant_id_,
                 *sql_proxy_, ls_balance_task))) {
@@ -574,6 +575,9 @@ int ObTenantRoleTransitionService::wait_ls_balance_task_finish_()
         }
 
         if (OB_SUCC(ret) && !is_finish) {
+          if (OB_TMP_FAIL(notify_recovery_ls_service_())) {
+            LOG_WARN("failed to notify recovery ls service", KR(tmp_ret));
+          }
           usleep(100L * 1000L);
           LOG_INFO("has balance task not finish", K(ls_balance_task),
               K(balance_task_array), K(cur_tenant_info));
@@ -587,6 +591,44 @@ int ObTenantRoleTransitionService::wait_ls_balance_task_finish_()
       }
     }
   }
+  return ret;
+}
+
+int ObTenantRoleTransitionService::notify_recovery_ls_service_()
+{
+  int ret = OB_SUCCESS;
+  ObTimeoutCtx ctx;
+  if (OB_FAIL(check_inner_stat())) {
+    LOG_WARN("error unexpected", KR(ret), K(tenant_id_), KP(sql_proxy_), KP(rpc_proxy_));
+  } else if (OB_ISNULL(GCTX.location_service_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("location service is null", KR(ret));
+  } else if (OB_FAIL(ObShareUtil::set_default_timeout_ctx(ctx, GCONF.rpc_timeout))) {
+    LOG_WARN("fail to set timeout ctx", KR(ret));
+  } else {
+    ObAddr leader;
+    ObNotifyTenantThreadArg arg;
+    const int64_t timeout = ctx.get_timeout();
+    if (OB_FAIL(GCTX.location_service_->get_leader(
+            GCONF.cluster_id, tenant_id_, SYS_LS, false, leader))) {
+      LOG_WARN("failed to get leader", KR(ret), K(tenant_id_));
+    } else if (OB_FAIL(arg.init(tenant_id_, obrpc::ObNotifyTenantThreadArg::RECOVERY_LS_SERVICE))) {
+      LOG_WARN("failed to init arg", KR(ret), K(tenant_id_));
+    } else if (OB_FAIL(rpc_proxy_->to(leader).timeout(timeout)
+          .group_id(share::OBCG_DBA_COMMAND).by(tenant_id_)
+          .notify_tenant_thread(arg))) {
+      LOG_WARN("failed to notify tenant thread", KR(ret),
+          K(leader), K(tenant_id_), K(timeout), K(arg));
+    }
+    if (OB_FAIL(ret)) {
+      int tmp_ret = OB_SUCCESS;
+      if (OB_TMP_FAIL(GCTX.location_service_->nonblock_renew(
+              GCONF.cluster_id, tenant_id_, SYS_LS))) {
+        LOG_WARN("failed to renew location", KR(ret), KR(tmp_ret), K(tenant_id_));
+      }
+    }
+  }
+
   return ret;
 }
 
@@ -636,6 +678,7 @@ int ObTenantRoleTransitionService::do_switch_access_mode_to_raw_rw(
     LOG_WARN("fail to execute get_all_ls_status_and_change_access_mode_", KR(ret), K(tenant_info),
         K(target_access_mode), K(sys_ls_sync_scn));
   }
+  DEBUG_SYNC(AFTER_CHANGE_ACCESS_MODE);
   return ret;
 }
 

@@ -104,7 +104,7 @@ void TestLSTabletInfoWR::SetUpTestCase()
 void TestLSTabletInfoWR::TearDownTestCase()
 {
   int ret = OB_SUCCESS;
-  ret = MTL(ObLSService*)->remove_ls(ObLSID(TEST_LS_ID), false);
+  ret = MTL(ObLSService*)->remove_ls(ObLSID(TEST_LS_ID));
   ASSERT_EQ(OB_SUCCESS, ret);
 
   MockTenantModuleEnv::get_instance().destroy();
@@ -156,15 +156,17 @@ void TestLSTabletInfoWR::fill_tablet_meta()
   TestSchemaUtils::prepare_data_schema(table_schema);
   ObArenaAllocator schema_allocator;
   ObCreateTabletSchema create_tablet_schema;
+
   ret = create_tablet_schema.init(schema_allocator, table_schema, lib::Worker::CompatMode::MYSQL,
-        false/*skip_column_info*/, ObCreateTabletSchema::STORAGE_SCHEMA_VERSION_V3);
+        false/*skip_column_info*/, ObCreateTabletSchema::STORAGE_SCHEMA_VERSION_V3,
+        0/*tenant_data_version, default val*/, true/*need_create_empty_major*/);
   ASSERT_EQ(OB_SUCCESS, ret);
 
   ObTabletID empty_tablet_id;
   SCN scn;
   scn.convert_from_ts(ObTimeUtility::current_time());
   ret = src_handle.get_obj()->init_for_first_time_creation(arena_allocator_, src_key.ls_id_, src_key.tablet_id_, src_key.tablet_id_,
-      scn, 2022, create_tablet_schema, false, ls_handle.get_ls()->get_freezer());
+      scn, 2022, create_tablet_schema, ls_handle.get_ls()->get_freezer());
   ASSERT_EQ(common::OB_SUCCESS, ret);
 
   ObMigrationTabletParam tablet_param;

@@ -33,11 +33,13 @@
 #include "../mock_utils/msg_bus.h"
 #include "../mock_utils/basic_fake_define.h"
 #include "../mock_utils/ob_fake_tx_rpc.h"
+#include "share/allocator/ob_shared_memory_allocator_mgr.h"
 
 namespace oceanbase {
 using namespace transaction;
 using namespace share;
 using namespace common;
+
 
 namespace transaction {
 template<class T>
@@ -136,11 +138,12 @@ public:
   int read(const ObTxReadSnapshot &snapshot,
            const int64_t key,
            int64_t &value);
-  int write(ObTxDesc &tx, const int64_t key, const int64_t value);
+  int write(ObTxDesc &tx, const int64_t key, const int64_t value, const int16_t branch = 0);
   int write(ObTxDesc &tx,
             const ObTxReadSnapshot &snapshot,
             const int64_t key,
-            const int64_t value);
+            const int64_t value,
+            const int16_t branch = 0);
   int atomic_write(ObTxDesc &tx, const int64_t key, const int64_t value,
                    const int64_t expire_ts, const ObTxParam &tx_param);
   int replay(const void *buffer, const int64_t nbytes, const palf::LSN &lsn, const int64_t ts_ns);
@@ -165,6 +168,7 @@ public:
   DELEGATE_TENANT_WITH_RET(txs_, abort_tx, int);
   DELEGATE_TENANT_WITH_RET(txs_, submit_commit_tx, int);
   DELEGATE_TENANT_WITH_RET(txs_, get_read_snapshot, int);
+  DELEGATE_TENANT_WITH_RET(txs_, create_branch_savepoint, int);
   DELEGATE_TENANT_WITH_RET(txs_, create_implicit_savepoint, int);
   DELEGATE_TENANT_WITH_RET(txs_, create_explicit_savepoint, int);
   DELEGATE_TENANT_WITH_RET(txs_, rollback_to_explicit_savepoint, int);
@@ -217,13 +221,14 @@ private:
     ObLSTxCtxMgr *ls_tx_ctx_mgr = NULL;
     OZ(txs_.tx_ctx_mgr_.get_ls_tx_ctx_mgr(ls_id_, ls_tx_ctx_mgr));
     int i = 0;
-    for (i = 0; i < 2000; ++i) {
-      if (0 == ls_tx_ctx_mgr->get_tx_ctx_count()) break;
+    int tx_count = ls_tx_ctx_mgr->get_tx_ctx_count();
+    for (i = 0; tx_count > 0 && i < 2000; ++i) {
+      tx_count = ls_tx_ctx_mgr->get_tx_ctx_count();
       usleep(500);
     }
     if (2000 == i) {
       ret = OB_ERR_UNEXPECTED;
-      LOG_INFO("print all tx begin", K(ret));
+      LOG_INFO("wait all tx ctx destoryed fail, print all tx:", K(tx_count));
       const bool verbose = true;
       ls_tx_ctx_mgr->print_all_tx_ctx(ObLSTxCtxMgr::MAX_HASH_ITEM_PRINT, verbose);
       LOG_INFO("print all tx end", K(ret));

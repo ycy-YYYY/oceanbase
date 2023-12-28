@@ -1419,7 +1419,7 @@ int ObRecordType::deserialize(
   int ret = OB_SUCCESS;
   ObPLRecord *record = reinterpret_cast<ObPLRecord *>(dst);
   CK (OB_NOT_NULL(record));
-  int64_t count = OB_INVALID_COUNT;
+  int32_t count = OB_INVALID_COUNT;
   // when record be delete , type will be PL_INVALID_TYPE
   OX (record->deserialize(src, src_len, src_pos));
   if (OB_SUCC(ret) && record->get_type() != PL_INVALID_TYPE) {
@@ -2261,7 +2261,9 @@ int ObCollectionType::deserialize(
           ObPLComposite* composite = reinterpret_cast<ObPLComposite*>(obj->get_ext());
           CK (OB_NOT_NULL(composite));
           if (OB_SUCC(ret) && composite->get_type() == PL_INVALID_TYPE) {
-            obj->set_extend(obj->get_ext(), PL_INVALID_TYPE);
+            composite->set_type(element_type_.get_type());
+            composite->set_is_null(!element_type_.get_not_null());
+            composite->set_id(element_type_.get_user_type_id());
             obj->set_type(ObMaxType);
           }
         }
@@ -3524,9 +3526,9 @@ int ObPLCollection::deep_copy(ObPLCollection *src, ObIAllocator *allocator, bool
         } else {
           if (old_objs[i].is_invalid_type() && src->is_of_composite()) {
             old_obj.set_type(ObExtendType);
+            CK (old_obj.is_pl_extend());
           }
           OX (new (&new_objs[k])ObObj());
-          if (OB_SUCC(ret) && ((src->is_of_composite() && old_obj.is_pl_extend()) || !src->is_of_composite())) {
             OZ (ObPLComposite::copy_element(old_obj,
                                             new_objs[k],
                                             *coll_allocator,
@@ -3535,11 +3537,10 @@ int ObPLCollection::deep_copy(ObPLCollection *src, ObIAllocator *allocator, bool
                                             NULL, /*dest_type*/
                                             true, /*need_new_allocator*/
                                             ignore_del_element));
+          if (old_objs[i].is_invalid_type() && src->is_of_composite()) {
+            new_objs[k].set_type(ObMaxType);
           }
           OX (++k);
-          if (old_objs[i].is_invalid_type() && src->is_of_composite()) {
-            new_objs[i].set_type(ObMaxType);
-          }
         }
       }
       // 对于已经copy成功的new obj释放内存
@@ -3570,10 +3571,20 @@ int ObPLCollection::deep_copy(ObPLCollection *src, ObIAllocator *allocator, bool
         } else if (ignore_del_element && !is_associative_array()) {
           set_first(1);
           set_last(k);
+#ifdef OB_BUILD_ORACLE_PL
+        } else if (PL_ASSOCIATIVE_ARRAY_TYPE == src->get_type()) {
+          set_first(static_cast<ObPLAssocArray *>(src)->get_first());
+          set_last(static_cast<ObPLAssocArray *>(src)->get_last());
+#endif
         } else {
           set_first(src->get_first());
           set_last(src->get_last());
         }
+#ifdef OB_BUILD_ORACLE_PL
+      } else if (PL_ASSOCIATIVE_ARRAY_TYPE == src->get_type()) {
+        set_first(static_cast<ObPLAssocArray *>(src)->get_first());
+        set_last(static_cast<ObPLAssocArray *>(src)->get_last());
+#endif
       } else {
         set_first(src->get_first());
         set_last(src->get_last());
@@ -4344,12 +4355,13 @@ int ObPLAssocArray::deep_copy(ObPLCollection *src, ObIAllocator *allocator, bool
   if (OB_SUCC(ret) && src->get_count() > 0) {
     ObPLAssocArray *src_aa = static_cast<ObPLAssocArray*>(src);
     CK (OB_NOT_NULL(src_aa));
-    if (NULL != src_aa->get_key() && NULL != src_aa->get_sort()) {
-      CK(OB_NOT_NULL(get_allocator()));
-      CK (OB_NOT_NULL(key
-          = static_cast<ObObj*>(get_allocator()->alloc(src->get_count() * sizeof(ObObj)))));
-      CK (OB_NOT_NULL(sort
-          = static_cast<int64_t*>(get_allocator()->alloc(src->get_count() * sizeof(int64_t)))));
+    if (OB_FAIL(ret)) {
+    } else if (NULL != src_aa->get_key() && NULL != src_aa->get_sort()) {
+      CK (OB_NOT_NULL(get_allocator()));
+      OX (key = static_cast<ObObj*>(get_allocator()->alloc(src->get_count() * sizeof(ObObj))));
+      OV (OB_NOT_NULL(key), OB_ALLOCATE_MEMORY_FAILED);
+      OX (sort = static_cast<int64_t*>(get_allocator()->alloc(src->get_count() * sizeof(int64_t))));
+      OV (OB_NOT_NULL(sort), OB_ALLOCATE_MEMORY_FAILED);
       for (int64_t i = 0; OB_SUCC(ret) && i < src->get_count(); ++i) {
         OZ (deep_copy_obj(*get_allocator(), *(src_aa->get_key(i)), key[i]));
         OX (sort[i] = src_aa->get_sort(i));
@@ -4486,6 +4498,15 @@ int64_t ObPLAssocArray::get_first()
 int64_t ObPLAssocArray::get_last()
 {
   return last_;
+}
+
+ObIAllocator& ObPLOpaque::get_allocator()
+{
+  int ret = OB_SUCCESS;
+  if (allocator_.used() > 1024 * 1024 * 512) {
+    LOG_ERROR("opaque allocator hold too much memory", K(allocator_.used()));
+  }
+  return allocator_;
 }
 
 int ObPLOpaque::deep_copy(ObPLOpaque *dst)

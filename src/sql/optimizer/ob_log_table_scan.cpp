@@ -139,9 +139,12 @@ int ObLogTableScan::do_re_est_cost(EstimateCostInfo &param, double &card, double
     }
     param.need_row_count_ = std::min(param.need_row_count_, card);
     param.need_row_count_ += offset_count_double;
-    if (OB_FAIL(AccessPath::re_estimate_cost(param, *est_cost_info_, sample_info_,
-                                             opt_ctx->get_cost_model_type(),
-                                             card, op_cost))) {
+    if (OB_FAIL(AccessPath::re_estimate_cost(param,
+                                             *est_cost_info_,
+                                             sample_info_,
+                                             *opt_ctx,
+                                             card,
+                                             op_cost))) {
       LOG_WARN("failed to re estimate cost", K(ret));
     } else {
       cost = op_cost;
@@ -735,7 +738,8 @@ int ObLogTableScan::generate_ddl_output_column_ids()
   } else {
     ObOptimizerContext &opt_ctx = get_plan()->get_optimizer_context();
     if (opt_ctx.is_online_ddl() &&
-        stmt::T_INSERT == opt_ctx.get_session_info()->get_stmt_type()) {
+        stmt::T_INSERT == opt_ctx.get_session_info()->get_stmt_type() &&
+        !opt_ctx.get_session_info()->get_ddl_info().is_mview_complete_refresh()) {
       for (int64_t i = 0; OB_SUCC(ret) && i < get_output_exprs().count(); ++i) {
         const ObRawExpr *output_expr = get_output_exprs().at(i);
         if (OB_ISNULL(output_expr)) {

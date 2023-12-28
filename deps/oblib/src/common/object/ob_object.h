@@ -406,6 +406,7 @@ public:
 
   OB_INLINE void set_collation_level(ObCollationLevel cs_level) { cs_level_ = cs_level; }
   OB_INLINE void set_collation_type(ObCollationType cs_type) { cs_type_ = cs_type; }
+  OB_INLINE ObCollationType get_collation_type() { return static_cast<ObCollationType>(cs_type_); }
   OB_INLINE void set_default_collation_type() { set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset())); }
   OB_INLINE ObCollationLevel get_collation_level() const { return static_cast<ObCollationLevel>(cs_level_); }
   OB_INLINE ObCollationType get_collation_type() const {
@@ -453,6 +454,11 @@ public:
   }
   OB_INLINE bool is_user_defined_sql_type() const { return ObUserDefinedSQLType == type_; }
   OB_INLINE bool is_xml_sql_type() const { return (ObUserDefinedSQLType == type_ && get_subschema_id() == ObXMLSqlType); }
+  OB_INLINE bool is_calc_end_space() const {
+    return ((type_ == ObNVarchar2Type)
+             || (type_ == ObVarcharType && cs_type_ != CS_TYPE_BINARY))
+           && lib::is_oracle_mode();
+  }
 
   void set_stored_precision(int16_t precision)
   {
@@ -501,6 +507,7 @@ struct ObLobId
   bool operator >(const ObLobId &other) const;
   TO_STRING_KV(K_(tablet_id), K_(lob_id));
   void reset();
+  inline bool is_valid() const {return tablet_id_ != 0 && lob_id_ != 0;}
   uint64_t tablet_id_;
   uint64_t lob_id_;
 };
@@ -1219,7 +1226,7 @@ public:
   explicit ObObj(ObObjType type);
   inline void reset();
   //when in not strict sql mode, build default value refer to data type
-  int build_not_strict_default_value();
+  int build_not_strict_default_value(int16_t precision);
   static ObObj make_min_obj();
   static ObObj make_max_obj();
   static ObObj make_nop_obj();

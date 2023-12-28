@@ -791,6 +791,7 @@ public:
 
   // only index table schema can invoke this function
   int get_index_name(common::ObString &index_name) const;
+  int get_mlog_name(common::ObString &mlog_name) const;
   template <typename Allocator>
   static int get_index_name(Allocator &allocator, uint64_t table_id,
       const common::ObString &src, common::ObString &dst);
@@ -806,10 +807,10 @@ public:
   inline bool is_table() const { return is_user_table() || is_sys_table() || is_vir_table(); }
   inline bool is_user_view() const { return share::schema::ObTableType::USER_VIEW == table_type_; }
   inline bool is_sys_view() const { return share::schema::ObTableType::SYSTEM_VIEW == table_type_; }
-  inline bool is_storage_index_table() const override { return is_index_table() || is_materialized_view(); }
+  inline bool is_storage_index_table() const override { return is_index_table(); }
   inline static bool is_storage_index_table(share::schema::ObTableType table_type)
-  { return share::schema::is_index_table(table_type) || is_materialized_view(table_type);}
-  inline bool is_storage_local_index_table() const { return is_index_local_storage() || is_materialized_view(); }
+  { return share::schema::is_index_table(table_type); }
+  inline bool is_storage_local_index_table() const { return is_index_local_storage(); }
   inline bool is_user_table() const { return share::schema::ObTableType::USER_TABLE == table_type_; }
   inline bool is_sys_table() const { return share::schema::ObTableType::SYSTEM_TABLE == table_type_; }
   inline bool is_vir_table() const { return share::schema::ObTableType::VIRTUAL_TABLE == table_type_; }
@@ -833,6 +834,9 @@ public:
   inline bool is_materialized_view() const { return is_materialized_view(table_type_); }
   inline static bool is_materialized_view(share::schema::ObTableType table_type)
   { return MATERIALIZED_VIEW == table_type; }
+  inline bool is_mlog_table() const { return is_mlog_table(table_type_); }
+  inline static bool is_mlog_table(share::schema::ObTableType table_type)
+  { return MATERIALIZED_VIEW_LOG == table_type; }
   inline bool is_in_recyclebin() const
   { return common::OB_RECYCLEBIN_SCHEMA_ID == database_id_; }
   inline bool is_external_table() const { return EXTERNAL_TABLE == table_type_; }
@@ -866,6 +870,7 @@ public:
   inline bool can_read_index() const { return can_read_index(index_status_); }
   inline static bool can_read_index(ObIndexStatus index_status)
   { return INDEX_STATUS_AVAILABLE == index_status; }
+  inline bool is_available_mlog() const { return is_mlog_table() && (INDEX_STATUS_AVAILABLE == index_status_); }
   inline bool is_final_invalid_index() const;
   inline void set_index_status(const ObIndexStatus index_status) { index_status_ = index_status; }
   inline void set_index_type(const ObIndexType index_type) { index_type_ = index_type; }
@@ -960,6 +965,7 @@ public:
     INDEX_DROP_INDEX = 1,
     INDEX_VISIBILITY_SET_BEFORE = 2,
     INDEX_ROW_MOVEABLE = 3,
+    INDEX_IS_IN_DELETING = 4,
     MAX_INDEX_ATTRIBUTE = 64,
   };
 
@@ -1143,6 +1149,8 @@ public:
   const ObColumnSchemaV2 *get_column_schema_by_prev_next_id(const uint64_t column_id) const;
   static uint64_t gen_materialized_view_column_id(uint64_t column_id);
   static uint64_t get_materialized_view_column_id(uint64_t column_id);
+  static uint64_t gen_mlog_col_id_from_ref_col_id(const uint64_t column_id);
+  static uint64_t gen_ref_col_id_from_mlog_col_id(const uint64_t column_id);
 
   const ObConstraint *get_constraint(const uint64_t constraint_id) const;
   const ObConstraint *get_constraint(const common::ObString &constraint_name) const;
@@ -1155,7 +1163,6 @@ public:
   int64_t get_pctfree() const { return pctfree_; }
   inline ObTenantTableId get_tenant_table_id() const {return ObTenantTableId(tenant_id_, table_id_);}
   inline int64_t get_index_tid_count() const { return simple_index_infos_.count(); }
-  inline int64_t get_mv_count() const { return mv_cnt_; }
   inline int64_t get_aux_vp_tid_count() const { return aux_vp_tid_array_.count(); }
   virtual inline bool is_primary_aux_vp_table() const override { return aux_vp_tid_array_.count() > 0 && is_primary_vp_table(); }
   inline int64_t get_index_column_number() const { return index_column_num_; }
@@ -1244,7 +1251,6 @@ public:
 
   uint64 get_index_attributes_set() { return index_attributes_set_; }
 
-  inline bool has_materialized_view() const { return mv_cnt_ > 0; }
   bool has_depend_table(uint64_t table_id) const;
   int get_orig_default_row(const common::ObIArray<share::schema::ObColDesc> &column_ids,
       common::ObNewRow &default_row) const;
@@ -1256,7 +1262,7 @@ public:
   inline void reset_column_count() { column_cnt_ = 0; }
   void reset_column_group_info();
   inline int64_t get_column_group_count() const { return column_group_cnt_; }
-  inline bool is_row_store() const { return column_group_cnt_ <= 1; }
+  int get_is_row_store(bool &is_row_store) const;
   inline void reset_column_group_count() { column_group_cnt_ = 0; }
   inline int64_t get_constraint_count() const { return cst_cnt_; }
   inline int64_t get_virtual_column_cnt() const { return virtual_column_cnt_; }
@@ -1295,7 +1301,6 @@ public:
   const common::ObIArray<uint64_t>& get_base_table_ids() const { return base_table_ids_; }
   const common::ObIArray<uint64_t>& get_depend_table_ids() const { return depend_table_ids_; }
   const common::ObIArray<uint64_t>& get_depend_mock_fk_parent_table_ids() const { return depend_mock_fk_parent_table_ids_; }
-  uint64_t get_mv_tid(uint64_t idx) const { return (idx < mv_cnt_) ? mv_tid_array_[idx] : common::OB_INVALID_ID; }
   inline void set_define_user_id(const uint64_t user_id) { define_user_id_ = user_id; }
   inline uint64_t get_define_user_id() const { return define_user_id_; }
 
@@ -1367,7 +1372,7 @@ public:
   //
   bool is_column_store_supported() const { return is_column_store_supported_; }
   void set_column_store(const bool support_column_store) { is_column_store_supported_ = support_column_store; }
-  bool is_normal_column_store_table() const { return column_group_cnt_ > 1; }
+  int get_is_column_store(bool &is_column_store) const;
   uint64_t get_max_used_column_group_id() const { return max_used_column_group_id_; }
   void set_max_used_column_group_id(const uint64_t id) { max_used_column_group_id_ = id; }
   int add_column_group(const ObColumnGroupSchema &other);
@@ -1379,7 +1384,14 @@ public:
                                    const bool filter_empty_cg = true) const;
   int get_store_column_groups(ObIArray<const ObColumnGroupSchema *> &column_groups,
                               const bool filter_empty_cg = true) const;
+  int remove_column_group(const uint64_t column_group_id);
   int has_all_column_group(bool &has_all_column_group) const;
+  // materialized view log related
+  template <typename Allocator>
+  static int build_mlog_table_name(Allocator &allocator,
+                                   const common::ObString &base_table_name,
+                                   common::ObString &mlog_table_name,
+                                   const bool is_oracle_mode);
 
   //other methods
   int64_t get_convert_size() const;
@@ -1435,8 +1447,7 @@ public:
     return simple_index_infos_;
   }
   int get_simple_index_infos(
-      common::ObIArray<ObAuxTableMetaInfo> &simple_index_infos_array,
-      bool with_mv = true) const;
+      common::ObIArray<ObAuxTableMetaInfo> &simple_index_infos_array) const;
 
   // Foreign key
   inline const common::ObIArray<ObForeignKeyInfo> &get_foreign_key_infos() const
@@ -1488,12 +1499,16 @@ public:
   int set_column_encodings(const common::ObIArray<int64_t> &col_encodings);
   virtual int get_column_encodings(common::ObIArray<int64_t> &col_encodings) const override;
 
-  int get_column_group_by_id(const uint64_t column_group_id, ObColumnGroupSchema *&column_group);
-  int get_column_group_by_name(const ObString &cg_name, ObColumnGroupSchema *&column_group);
+  int get_column_group_by_id(const uint64_t column_group_id, ObColumnGroupSchema *&column_group) const;
+  int get_column_group_by_name(const ObString &cg_name, ObColumnGroupSchema *&column_group) const;
   int get_all_cg_type_column_group(const ObColumnGroupSchema *&column_group) const;
+  int get_each_column_group(ObIArray<ObColumnGroupSchema*> &each_cgs) const;
   int is_partition_key_match_rowkey_prefix(bool &is_prefix) const;
   int get_column_group_index(const share::schema::ObColumnParam &param, int32_t &cg_idx) const;
 
+  int is_column_group_exist(const common::ObString &cg_name, bool &exist) const;
+
+  int get_all_column_ids(ObIArray<uint64_t> &column_ids) const;
   int generate_partition_key_from_rowkey(const common::ObRowkey &rowkey,
                                          common::ObRowkey &hign_bound_value) const;
   virtual int init_column_meta_array(
@@ -1621,7 +1636,6 @@ protected:
   int add_column_group_to_hash_array(ObColumnGroupSchema *column_group,
                                      const KeyType &key,
                                      ArrayType *&array);
-  int is_column_group_exist(const common::ObString &cg_name, bool &exist);
 
 protected:
   // constraint related
@@ -1679,9 +1693,6 @@ private:
   int get_base_rowkey_column_group_index(int32_t &cg_idx) const;
 
 protected:
-  int add_mv_tid(const uint64_t mv_tid);
-
-protected:
   uint64_t max_used_column_id_;
   // Only temporary table settings, according to the last active time of the session
   // to determine whether the table needs to be cleaned up;
@@ -1731,8 +1742,6 @@ protected:
   common::ObSArray<uint64_t> depend_table_ids_;
 
   common::ObSArray<ObAuxTableMetaInfo> simple_index_infos_;
-  int64_t mv_cnt_;
-  uint64_t *mv_tid_array_;
 
   // aux_vp_tid_array_ also contains the primary partition id, which is the primary table itself
   common::ObSArray<uint64_t> aux_vp_tid_array_;
@@ -1921,10 +1930,10 @@ inline bool ObSimpleTableSchemaV2::should_check_major_merge_progress() const
 {
   // only include primary table except aux lob tables
   // aux lob tables only need to perform replicas verification, but don't need to be verified with primary table
-  return is_sys_table()
+  return is_normal_schema() && (is_sys_table()
           || is_user_table()
           || is_tmp_table()
-          || is_aux_lob_table();
+          || is_aux_lob_table());
 }
 
 inline int64_t ObTableSchema::get_id_hash_array_mem_size(const int64_t column_cnt) const
@@ -2119,6 +2128,9 @@ int ObTableSchema::add_column(const ColumnType &column)
           index_column.type_ = column.get_meta_type();
           index_column.fulltext_flag_ = column.is_fulltext_column();
           index_column.spatial_flag_ = column.is_spatial_generated_column();
+          if (index_column.type_.is_decimal_int()) {
+            index_column.type_.set_scale(column.get_accuracy().get_scale());
+          }
           if (OB_FAIL(index_info_.set_column(column.get_index_position() - 1, index_column))) {
             SHARE_SCHEMA_LOG(WARN, "Fail to set column to index info", KR(ret));
           } else {
@@ -2187,7 +2199,7 @@ int ObTableSchema::add_column(const ColumnType &column)
       if (NULL == (tmp_column = rowkey_info_.get_column(i))) {
         ret = common::OB_ERR_UNEXPECTED;
         SHARE_SCHEMA_LOG(WARN, "the column is NULL, ", KR(ret), K(i));
-      } else if (tmp_column->column_id_ > common::OB_MIN_SHADOW_COLUMN_ID) {
+      } else if (is_shadow_column(tmp_column->column_id_)) {
         if (OB_FAIL(shadow_rowkey_info_.set_column(shadow_pk_pos, *tmp_column))) {
           SHARE_SCHEMA_LOG(WARN, "fail to set column to shadow rowkey info", KR(ret), KPC(tmp_column));
         } else {
@@ -2198,7 +2210,8 @@ int ObTableSchema::add_column(const ColumnType &column)
   }
 
   if (OB_SUCC(ret)) {
-    if (get_max_used_column_id() < column.get_column_id()) {
+    if ((column.get_column_id() > get_max_used_column_id())
+        && (column.get_column_id() <= common::OB_MAX_TMP_COLUMN_ID)) {
       set_max_used_column_id(column.get_column_id());
     }
   }
@@ -2281,7 +2294,34 @@ int ObTableSchema::add_column_group_to_hash_array(
       }
     }
   }
+  return ret;
+}
 
+template <typename Allocator>
+int ObTableSchema::build_mlog_table_name(Allocator &allocator,
+                                         const common::ObString &base_table_name,
+                                         common::ObString &mlog_table_name,
+                                         const bool is_oracle_mode)
+{
+  int ret = OB_SUCCESS;
+  const ObString prefix(is_oracle_mode ? common::OB_MLOG_PREFIX_ORACLE : common::OB_MLOG_PREFIX_MYSQL);
+  int32_t buf_len = prefix.length() + base_table_name.length() + 1;
+  char *name_buf = nullptr;
+  if (OB_ISNULL(name_buf = static_cast<char *>(allocator.alloc(buf_len)))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    SHARE_SCHEMA_LOG(WARN, "failed to allocate memory", KR(ret));
+  } else {
+    name_buf[buf_len - 1] = '\0';
+    mlog_table_name.assign_buffer(name_buf, buf_len);
+    if (prefix.length() != mlog_table_name.write(prefix.ptr(), prefix.length())) {
+      ret = OB_ERR_UNEXPECTED;
+      SHARE_SCHEMA_LOG(WARN, "failed to write string", KR(ret));
+    } else if (base_table_name.length() !=
+        mlog_table_name.write(base_table_name.ptr(), base_table_name.length())) {
+      ret = OB_ERR_UNEXPECTED;
+      SHARE_SCHEMA_LOG(WARN, "failed to write string", KR(ret));
+    }
+  }
   return ret;
 }
 

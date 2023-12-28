@@ -43,11 +43,11 @@ public:
   virtual int init(
       const ObTableIterParam &iter_param,
       ObTableAccessContext &access_ctx,
-      ObCGTableWrapper &wrapper) override;
+      ObSSTableWrapper &wrapper) override;
   virtual int switch_context(
       const ObTableIterParam &iter_param,
       ObTableAccessContext &access_ctx,
-      ObCGTableWrapper &wrapper) override final;
+      ObSSTableWrapper &wrapper) override final;
   virtual void reset() override;
   virtual void reuse() override;
   virtual int locate(
@@ -103,7 +103,7 @@ protected:
   ObCSRowId current_;
   ObCSRange query_index_range_;
   ObSSTable *sstable_;
-  ObCGTableWrapper table_wrapper_;
+  ObSSTableWrapper table_wrapper_;
   const ObTableIterParam *iter_param_;
   ObTableAccessContext *access_ctx_;
   ObCGPrefetcher prefetcher_;
@@ -118,6 +118,7 @@ public:
   ObCGRowScanner() :
       ObCGScanner(),
       row_ids_(nullptr),
+      len_array_(nullptr),
       cell_data_ptrs_(nullptr),
       filter_bitmap_(nullptr),
       read_info_(nullptr)
@@ -128,7 +129,7 @@ public:
   virtual int init(
       const ObTableIterParam &iter_param,
       ObTableAccessContext &access_ctx,
-      ObCGTableWrapper &wrapper) override;
+      ObSSTableWrapper &wrapper) override;
   virtual int get_next_rows(uint64_t &count, const uint64_t capacity) override;
   virtual int locate(
       const ObCSRange &range,
@@ -146,6 +147,7 @@ private:
 
 protected:
   int64_t *row_ids_;
+  uint32_t *len_array_;
   // for projection in vectorize, need to remove later
   const char **cell_data_ptrs_;
   const ObCGBitmap *filter_bitmap_;

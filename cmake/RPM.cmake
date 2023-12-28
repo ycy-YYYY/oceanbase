@@ -78,7 +78,7 @@ install(PROGRAMS
   ${CMAKE_BINARY_DIR}/tools/ob_admin/ob_admin
   tools/ob_admin/io_bench/bench_io.sh
   ${CMAKE_BINARY_DIR}/src/observer/observer
-  $<$<STREQUAL:"${ARCHITECTURE}","x86_64">:${DEVTOOLS_DIR}/bin/obstack>
+  ${DEVTOOLS_DIR}/bin/obstack
   DESTINATION bin
   COMPONENT server)
 endif()
@@ -117,6 +117,12 @@ install(
   DIRECTORY
   ${CDCMSG_HEADER_DIR}
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  COMPONENT cdc
+  )
+install(
+  DIRECTORY
+    ${PROJECT_SOURCE_DIR}/src/logservice/libobcdc/tests/scripts/
+    DESTINATION ${CMAKE_INSTALL_RUNSTATEDIR}
   COMPONENT cdc
   )
 

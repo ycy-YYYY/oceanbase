@@ -235,7 +235,7 @@ int ObQueryEngine::get(const ObMemtableKey *parameter_key, ObMvccRow *&row, ObMe
     } else if (OB_ISNULL(row)) {
       ret = OB_ERR_UNEXPECTED;
       TRANS_LOG(ERROR, "get NULL value from keyhash", KR(ret), K(*parameter_key));
-    } else {
+    } else if (returned_key) {
       ret = returned_key->encode(copy_inner_key_wrapper->get_rowkey());
     }
   }
@@ -406,10 +406,11 @@ int ObQueryEngine::sample_rows(Iterator<BtreeRawIterator> *iter, const ObMemtabl
           gap_size = 0;
         }
         if (blocksstable::ObDmlFlag::DF_NOT_EXIST == value->first_dml_flag_ &&
-            blocksstable::ObDmlFlag::DF_NOT_EXIST == value->last_dml_flag_ &&
-            nullptr != value->list_head_ &&
-            value->list_head_->tx_id_ == tx_id) {
-          ++logical_row_count;
+            blocksstable::ObDmlFlag::DF_NOT_EXIST == value->last_dml_flag_) {
+          ObMvccTransNode *iter = value->get_list_head();
+          if (nullptr != iter && iter->get_tx_id() == tx_id) {
+            ++logical_row_count;
+          }
         } else if (blocksstable::ObDmlFlag::DF_INSERT == value->first_dml_flag_
             && blocksstable::ObDmlFlag::DF_DELETE != value->last_dml_flag_) {
           // insert new row

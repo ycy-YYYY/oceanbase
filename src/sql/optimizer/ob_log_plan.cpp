@@ -793,6 +793,8 @@ int ObLogPlan::generate_join_orders()
   //如果有leading hint就在这里按leading hint指定的join order枚举,
   //如果根据leading hint没有枚举到有效join order，就忽略hint重新枚举。
   if (OB_SUCC(ret)) {
+    OPT_TRACE("SYSTEM STATS:");
+    OPT_TRACE(get_optimizer_context().get_system_stat());
     OPT_TRACE_TITLE("BASIC TABLE STATISTICS");
     OPT_TRACE_STATIS(stmt, get_basic_table_metas());
     OPT_TRACE_TITLE("UPDATE TABLE STATISTICS");
@@ -2112,7 +2114,9 @@ int ObLogPlan::select_replicas(ObExecContext &exec_ctx,
         }
       }
 
-      if (OB_SUCC(ret) && proxy_stat != 0) {
+      if (!MTL_TENANT_ROLE_CACHE_IS_PRIMARY_OR_INVALID()) {
+        // standby and restore tenant not feedback
+      } else if (OB_SUCC(ret) && proxy_stat != 0) {
         ObObj val;
         val.set_int(proxy_stat);
         if (OB_FAIL(session->update_sys_variable(SYS_VAR__OB_PROXY_WEAKREAD_FEEDBACK, val))) {
@@ -4399,12 +4403,8 @@ int ObLogPlan::store_index_column_ids(
     ret = OB_SCHEMA_ERROR;
     LOG_WARN("set index name error", K(ret), K(index_id), K(index_schema));
   } else {
-    if (index_schema->is_materialized_view()) {
-      index_name = index_schema->get_table_name_str();
-    } else {
-      if (OB_FAIL(index_schema->get_index_name(index_name))) {
-        LOG_WARN("fail to get index name", K(index_name), K(ret));
-      }
+    if (OB_FAIL(index_schema->get_index_name(index_name))) {
+      LOG_WARN("fail to get index name", K(index_name), KR(ret));
     }
   }
   if (OB_SUCC(ret)) {
@@ -6661,7 +6661,9 @@ int ObLogPlan::create_scala_group_plan(const ObIArray<ObAggFunRawExpr*> &aggr_it
                                          origin_child_card,
                                          is_partition_wise,
                                          true,
-                                         is_partition_wise))) {
+                                         is_partition_wise,
+                                         ObRollupStatus::NONE_ROLLUP,
+                                         true))) {
       LOG_WARN("failed to allocate scala group by as top", K(ret));
     } else if (OB_FAIL(allocate_exchange_as_top(top, exch_info))) {
       LOG_WARN("failed to allocate exchange as top", K(ret));
@@ -7164,6 +7166,8 @@ int ObLogPlan::check_storage_groupby_pushdown(const ObIArray<ObAggFunRawExpr *> 
                  !pushdown_groupby_columns.empty()) {
         can_push = false;
       }
+    } else if (GET_MIN_CLUSTER_VERSION() < CLUSTER_VERSION_4_3_0_0) {
+      can_push = false;
     } else if (group_exprs.count() != 1) {
       can_push = false;
     } else if (aggrs.count() > 5) {
@@ -8254,7 +8258,8 @@ int ObLogPlan::allocate_group_by_as_top(ObLogicalOperator *&top,
                                         const bool is_partition_wise,
                                         const bool is_push_down,
                                         const bool is_partition_gi,
-                                        const ObRollupStatus rollup_status)
+                                        const ObRollupStatus rollup_status,
+                                        bool force_use_scalar /*false*/)
 {
   int ret = OB_SUCCESS;
   ObLogGroupBy *group_by = NULL;
@@ -8278,6 +8283,9 @@ int ObLogPlan::allocate_group_by_as_top(ObLogicalOperator *&top,
     group_by->set_rollup_status(rollup_status);
     group_by->set_is_partition_wise(is_partition_wise);
     group_by->set_force_push_down((FORCE_GPD & get_optimizer_context().get_aggregation_optimization_settings()) || has_dbms_stats);
+    if (algo == MERGE_AGGREGATE && force_use_scalar) {
+      group_by->set_pushdown_scalar_aggr();
+    }
     if (OB_FAIL(group_by->set_group_by_exprs(group_by_exprs))) {
       LOG_WARN("failed to set group by columns", K(ret));
     } else if (OB_FAIL(group_by->set_rollup_exprs(rollup_exprs))) {
@@ -8306,6 +8314,7 @@ int ObLogPlan::allocate_sort_and_exchange_as_top(ObLogicalOperator *&top,
                                                  const OrderItem *hash_sortkey)
 {
   int ret = OB_SUCCESS;
+  bool is_part_topn = (NULL != hash_sortkey) && (NULL != topn_expr);
   if (OB_ISNULL(top)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected null", K(ret));
@@ -8315,7 +8324,7 @@ int ObLogPlan::allocate_sort_and_exchange_as_top(ObLogicalOperator *&top,
     } else { /*do nothing*/ }
   } else {
     // allocate push down limit if necessary
-    if (NULL != topn_expr && !need_sort) {
+    if (NULL != topn_expr && !need_sort && !is_part_topn) {
       bool is_pushed = false;
       if (!is_fetch_with_ties &&
           OB_FAIL(try_push_limit_into_table_scan(top, topn_expr, topn_expr, NULL, is_pushed))) {
@@ -8394,15 +8403,15 @@ int ObLogPlan::allocate_sort_and_exchange_as_top(ObLogicalOperator *&top,
                                        sort_keys,
                                        real_prefix_pos,
                                        real_local_order,
-                                       NULL,
-                                       false,
+                                       topn_expr,
+                                       is_fetch_with_ties,
                                        hash_sortkey))) {
         LOG_WARN("failed to allocate sort as top", K(ret));
       } else { /*do nothing*/ }
     }
 
     // allocate final limit if necessary
-    if (OB_SUCC(ret) && NULL != topn_expr && exch_info.is_pq_local()) {
+    if (OB_SUCC(ret) && NULL != topn_expr && exch_info.is_pq_local() && !is_part_topn) {
       if (OB_FAIL(allocate_limit_as_top(top,
                                         topn_expr,
                                         NULL,
@@ -9974,8 +9983,8 @@ int ObLogPlan::plan_tree_traverse(const TraverseOp &operation, void *ctx)
     AllocGIContext gi_ctx;
     ObPxPipeBlockingCtx pipe_block_ctx(get_allocator());
     ObLocationConstraintContext location_constraints;
-    AllocMDContext md_ctx;
     AllocBloomFilterContext bf_ctx;
+    AllocOpContext alloc_op_ctx;
     SMART_VAR(ObBatchExecParamCtx, batch_exec_param_ctx) {
       // set up context
       switch (operation) {
@@ -9999,8 +10008,12 @@ int ObLogPlan::plan_tree_traverse(const TraverseOp &operation, void *ctx)
         }
         break;
       }
-      case ALLOC_MONITORING_DUMP: {
-        ctx = &md_ctx;
+      case ALLOC_OP: {
+        if (OB_FAIL(alloc_op_ctx.init())) {
+          LOG_WARN("fail to init alloc op ctx", K(ret));
+        } else {
+          ctx = &alloc_op_ctx;
+        }
         break;
       }
       case RUNTIME_FILTER: {
@@ -10183,6 +10196,7 @@ int ObLogPlan::init_onetime_subquery_info()
     }
     for (int64_t i = 0; OB_SUCC(ret) && i < exprs.count(); ++i) {
       bool dummy = false;
+      bool dummy_shared = false;
       ObRawExpr *expr = exprs.at(i);
       ObSEArray<ObRawExpr *, 4> onetime_list;
       if (OB_ISNULL(expr)) {
@@ -10192,7 +10206,7 @@ int ObLogPlan::init_onetime_subquery_info()
         // do nothing
       } else if (ObOptimizerUtil::find_item(json_table_exprs, expr)) {
         // do nothing
-      } else if (OB_FAIL(extract_onetime_subquery(expr, onetime_list, dummy))) {
+      } else if (OB_FAIL(extract_onetime_subquery(expr, onetime_list, dummy, dummy_shared))) {
         LOG_WARN("failed to extract onetime subquery", K(ret));
       } else if (onetime_list.empty()) {
         // do nothing
@@ -10214,10 +10228,10 @@ int ObLogPlan::init_onetime_subquery_info()
  */
 int ObLogPlan::extract_onetime_subquery(ObRawExpr *expr,
                                         ObIArray<ObRawExpr *> &onetime_list,
-                                        bool &is_valid)
+                                        bool &is_valid,
+                                        bool &has_shared_subquery)
 {
   int ret = OB_SUCCESS;
-  bool is_valid_non_correlated_exists = false;
   if (OB_ISNULL(expr)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("expr is null", K(ret));
@@ -10246,31 +10260,38 @@ int ObLogPlan::extract_onetime_subquery(ObRawExpr *expr,
     } else if (static_cast<ObQueryRefRawExpr *>(expr)->is_scalar()) {
       if (OB_FAIL(onetime_list.push_back(expr))) {
         LOG_WARN("failed to push back candi onetime expr", K(ret));
+      } else if (expr->is_explicited_reference() && expr->get_ref_count() > 1) {
+        has_shared_subquery = true;
       }
     }
   }
-
+  // if query_ref has an exec_param, then will also has a CNT_SUB_QUERY flag
   if (OB_SUCC(ret) && expr->has_flag(CNT_SUB_QUERY)) {
     for (int64_t i = 0; OB_SUCC(ret) && i < expr->get_param_count(); ++i) {
       bool is_param_valid = false;
+      bool has_child_shared_subquery = false;
       if (OB_FAIL(extract_onetime_subquery(expr->get_param_expr(i),
                                            onetime_list,
-                                           is_param_valid))) {
+                                           is_param_valid,
+                                           has_child_shared_subquery))) {
         LOG_WARN("failed to extract onetime subquery", K(ret));
       } else if (!is_param_valid) {
         is_valid = false;
       }
+      has_shared_subquery |= has_child_shared_subquery;
     }
-    if (OB_SUCC(ret) && is_valid && (T_OP_EXISTS == expr->get_expr_type()
-                                     || T_OP_NOT_EXISTS == expr->get_expr_type()
-                                     || expr->has_flag(IS_WITH_ALL)
-                                     || expr->has_flag(IS_WITH_ANY))) {
+    if (OB_SUCC(ret) && is_valid && !has_shared_subquery &&
+                        (T_OP_EXISTS == expr->get_expr_type()
+                         || T_OP_NOT_EXISTS == expr->get_expr_type()
+                         || expr->has_flag(IS_WITH_ALL)
+                         || expr->has_flag(IS_WITH_ANY))) {
       if (OB_FAIL(onetime_list.push_back(expr))) {
         LOG_WARN("failed to push back candi onetime exprs", K(ret));
+      } else if (expr->is_explicited_reference() && expr->get_ref_count() > 1) {
+        has_shared_subquery = true;
       }
     }
   }
-
   return ret;
 }
 
@@ -10309,8 +10330,7 @@ int ObLogPlan::create_onetime_param(ObRawExpr *expr,
     }
   } else if (expr->has_flag(CNT_SUB_QUERY)) {
     for (int64_t i = 0; OB_SUCC(ret) && i < expr->get_param_count(); ++i) {
-      if (OB_FAIL(create_onetime_param(expr->get_param_expr(i),
-                                       onetime_list))) {
+      if (OB_FAIL(create_onetime_param(expr->get_param_expr(i), onetime_list))) {
         LOG_WARN("failed to create onetime param", K(ret));
       }
     }
@@ -11497,7 +11517,7 @@ int ObLogPlan::generate_plan()
   } else if (OB_FAIL(plan_traverse_loop(RUNTIME_FILTER,
                                         ALLOC_GI,
                                         PX_PIPE_BLOCKING,
-                                        ALLOC_MONITORING_DUMP,
+                                        ALLOC_OP,
                                         OPERATOR_NUMBERING,
                                         PX_RESCAN,
                                         EXCHANGE_NUMBERING,
@@ -14058,7 +14078,8 @@ int ObLogPlan::will_use_column_store(const uint64_t table_id,
     LOG_WARN("unexpect null table schema", K(ret));
   } else if (OB_FAIL(schema->has_all_column_group(has_all_column_group))) {
     LOG_WARN("failed to check has row store", K(ret));
-  } else if (OB_FALSE_IT(has_normal_column_group = schema->is_normal_column_store_table())) {
+  } else if (OB_FAIL(schema->get_is_column_store(has_normal_column_group))) {
+    LOG_WARN("failed to get is column store", K(ret));
   } else if (OB_FAIL(get_log_plan_hint().check_use_column_store(table_id,
                                                                 hint_force_use_column_store,
                                                                 hint_force_no_use_column_store))) {

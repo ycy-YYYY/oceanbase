@@ -118,7 +118,8 @@ inline int TestTabletHelper::create_tablet(
   prepare_sstable_param(tablet_id, table_schema, param);
   void *buff = nullptr;
   if (OB_FAIL(create_tablet_schema.init(schema_allocator, table_schema, compat_mode,
-        false/*skip_column_info*/, ObCreateTabletSchema::STORAGE_SCHEMA_VERSION_V3))) {
+        false/*skip_column_info*/, ObCreateTabletSchema::STORAGE_SCHEMA_VERSION_V3,
+        0/*tenant_data_version, default val*/, true/*need_create_empty_major*/))) {
     STORAGE_LOG(WARN, "failed to init storage schema", KR(ret), K(table_schema));
   } else if (OB_FAIL(ObSSTableMergeRes::fill_column_checksum_for_empty_major(param.column_cnt_, param.column_checksums_))) {
     STORAGE_LOG(WARN, "fill column checksum failed", K(ret), K(param));
@@ -133,7 +134,7 @@ inline int TestTabletHelper::create_tablet(
     } else if (OB_FAIL(tablet_handle.get_obj()->init_for_first_time_creation(
         *tablet_handle.get_allocator(),
         ls_id, tablet_id, tablet_id, share::SCN::base_scn(),
-        snapshot_version, create_tablet_schema, true, freezer))){
+        snapshot_version, create_tablet_schema, freezer))){
       STORAGE_LOG(WARN, "failed to init tablet", K(ret), K(ls_id), K(tablet_id));
     } else if (ObTabletStatus::Status::MAX != tablet_status) {
       ObTabletCreateDeleteMdsUserData data;
@@ -157,8 +158,11 @@ inline int TestTabletHelper::create_tablet(
       }
     }
 
-    if (FAILEDx(t3m->compare_and_swap_tablet(key, tablet_handle, tablet_handle))) {
-      STORAGE_LOG(WARN, "failed to compare and swap tablet", K(ret), K(ls_id), K(tablet_id));
+    ObUpdateTabletPointerParam param;
+    if (FAILEDx(tablet_handle.get_obj()->get_updating_tablet_pointer_param(param))) {
+      STORAGE_LOG(WARN, "fail to get updating tablet pointer parameters", K(ret), K(tablet_handle));
+    } else if (OB_FAIL(t3m->compare_and_swap_tablet(key, tablet_handle, tablet_handle, param))) {
+      STORAGE_LOG(WARN, "failed to compare and swap tablet", K(ret), K(ls_id), K(tablet_id), K(param));
     } else if (OB_FAIL(ls_tablet_svr->tablet_id_set_.set(tablet_id))){
       STORAGE_LOG(WARN, "set tablet id failed", K(ret), K(tablet_id));
     } else {
@@ -206,9 +210,12 @@ inline int TestTabletHelper::remove_tablet(const ObLSHandle &ls_handle, const Ob
   } else {
     tablet_handle.get_obj()->mds_data_.tablet_status_.committed_kv_.get_ptr()->v_.user_data_.assign(buf, data_serialize_size);
     ObMetaDiskAddr disk_addr;
+    ObUpdateTabletPointerParam param;
     disk_addr.set_mem_addr(0, sizeof(ObTablet));
-    if(OB_FAIL(t3m->compare_and_swap_tablet(
-            ObTabletMapKey(ls_id, tablet_id), tablet_handle, tablet_handle))) {
+    if (OB_FAIL(tablet_handle.get_obj()->get_updating_tablet_pointer_param(param))) {
+      STORAGE_LOG(WARN, "fail to get updating tablet pointer parameters", K(ret), K(tablet_handle));
+    } else if(OB_FAIL(t3m->compare_and_swap_tablet(
+            ObTabletMapKey(ls_id, tablet_id), tablet_handle, tablet_handle, param))) {
       STORAGE_LOG(WARN, "failed to compare and swap tablet", K(ret), K(ls_id), K(tablet_id), K(disk_addr));
     }
   }

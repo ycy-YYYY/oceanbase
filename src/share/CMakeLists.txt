@@ -13,11 +13,13 @@ ob_set_subtarget(ob_share SCHEMA_CPPS
 
 ob_set_subtarget(ob_share allocator
   allocator/ob_fifo_arena.cpp
-  allocator/ob_gmemstore_allocator.cpp
+  allocator/ob_memstore_allocator.cpp
   allocator/ob_handle_list.cpp
-  allocator/ob_memstore_allocator_mgr.cpp
+  allocator/ob_mds_allocator.cpp
+  allocator/ob_shared_memory_allocator_mgr.cpp
   allocator/ob_tenant_mutil_allocator.cpp
   allocator/ob_tenant_mutil_allocator_mgr.cpp
+  allocator/ob_tx_data_allocator.cpp
 )
 
 ob_set_subtarget(ob_share backup
@@ -268,8 +270,14 @@ ob_set_subtarget(ob_share common_mixed
   detect/ob_detect_rpc_processor.cpp
   detect/ob_detect_manager_utils.cpp
   table/ob_table_load_sql_statistics.cpp
+  tenant_snapshot/ob_tenant_snapshot_id.cpp
+  tenant_snapshot/ob_tenant_snapshot_table_operator.cpp
   table/ob_ttl_util.cpp
   table/ob_table_config_util.cpp
+  restore/ob_tenant_clone_table_operator.cpp
+  index_usage/ob_index_usage_info_mgr.cpp
+  index_usage/ob_index_usage_report_task.cpp
+  table/ob_table_util.cpp
 )
 
 ob_set_subtarget(ob_share tablet
@@ -447,11 +455,16 @@ ob_set_subtarget(ob_share schema
   schema/ob_server_schema_service.cpp
   schema/ob_table_schema.cpp
   schema/ob_latest_schema_guard.cpp
+  schema/ob_mlog_info.cpp
+  schema/ob_mview_info.cpp
+  schema/ob_mview_refresh_stats_params.cpp
+  schema/ob_mview_refresh_stats.cpp
 )
 
 ob_set_subtarget(ob_share stat
   stat/ob_basic_stats_estimator.cpp
   stat/ob_opt_stat_monitor_manager.cpp
+  stat/ob_dbms_stats_copy_table_stats.cpp
   stat/ob_dbms_stats_executor.cpp
   stat/ob_dbms_stats_export_import.cpp
   stat/ob_dbms_stats_history_manager.cpp
@@ -477,6 +490,9 @@ ob_set_subtarget(ob_share stat
   stat/ob_opt_stat_gather_stat.cpp
   stat/ob_opt_ds_stat.cpp
   stat/ob_opt_ds_stat_cache.cpp
+  stat/ob_dbms_stats_gather.cpp
+  stat/ob_opt_system_stat.cpp
+  stat/ob_opt_system_stat_cache.cpp
 )
 
 ob_set_subtarget(ob_share external_table
@@ -516,6 +532,7 @@ if (OB_ERRSIM)
 endif()
 
 ob_set_subtarget(ob_share throttle
+  throttle/ob_share_throttle_define.cpp
   throttle/ob_throttle_common.cpp
 )
 
@@ -525,6 +542,27 @@ ob_set_subtarget(ob_share wr
   wr/ob_wr_snapshot_rpc_processor.cpp
   wr/ob_wr_collector.cpp
 )
+
+ob_set_subtarget(ob_share vector
+  vector/ob_vector_base.cpp
+  vector/ob_fixed_length_vector.cpp
+  vector/ob_continuous_vector.cpp
+  vector/ob_discrete_vector.cpp
+  vector/ob_uniform_vector.cpp
+  vector/ob_uniform_base.cpp
+  vector/ob_fixed_length_base.cpp
+  vector/ob_discrete_base.cpp
+  vector/ob_continuous_base.cpp
+  vector/expr_cmp_func.cpp
+)
+
+ob_set_subtarget(ob_share aggregate
+  aggregate/iaggregate.cpp
+  aggregate/count.cpp
+  aggregate/min_max.cpp
+  aggregate/sum.cpp
+  aggregate/processor.cpp
+  aggregate/single_row.cpp)
 
 ob_add_new_object_target(ob_share ob_share)
 

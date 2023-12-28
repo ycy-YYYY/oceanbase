@@ -162,14 +162,16 @@ int ObRawExprResolverImpl::try_negate_const(ObRawExpr *&expr,
         ObObj new_val;
         if (const_expr->get_value().is_decimal_int()) {
           ObDecimalInt *neg_dec = nullptr;
-          if (is_odd
-              && OB_FAIL(wide::negate(const_expr->get_value().get_decimal_int(),
-                                      const_expr->get_value().get_int_bytes(), neg_dec,
-                                      ctx_.expr_factory_.get_allocator()))) {
+          int32_t out_prec =
+            const_expr->get_accuracy().get_precision() + (lib::is_oracle_mode() ? 0 : 1);
+          int32_t out_bytes = wide::ObDecimalIntConstValue::get_int_bytes_by_precision(out_prec);
+          if (!is_odd) {// do nothing
+          } else if (OB_FAIL(wide::negate(const_expr->get_value().get_decimal_int(),
+                                          const_expr->get_value().get_int_bytes(), neg_dec,
+                                          out_bytes, ctx_.expr_factory_.get_allocator()))) {
             LOG_WARN("negate decimal int failed", K(ret));
           } else {
-            new_val.set_decimal_int(const_expr->get_value().get_int_bytes(),
-                                    const_expr->get_value().get_scale(), neg_dec);
+            new_val.set_decimal_int(out_bytes, const_expr->get_value().get_scale(), neg_dec);
             negated = true;
           }
         } else {
@@ -2522,6 +2524,9 @@ int ObRawExprResolverImpl::process_datatype_or_questionmark(const ParseNode &nod
     LOG_WARN("get sys variables failed", K(ret));
   } else if (OB_FAIL(ObSQLUtils::check_enable_decimalint(session_info, enable_decimal_int))) {
     LOG_WARN("fail to check enable decimal int", K(ret));
+  } else if (lib::is_oracle_mode() && ctx_.is_expanding_view_) {
+    // numeric constants should parsed with ObNumber in view expansion for oracle mode
+    enable_decimal_int = false;
   }
 
   if (OB_FAIL(ret)) { // do nothing
@@ -4141,10 +4146,11 @@ int ObRawExprResolverImpl::process_agg_node(const ParseNode *node, ObRawExpr *&e
       ObSysFunRawExpr *window_size_expr = NULL;
       ObRawExpr *div_expr = NULL;
       ObConstRawExpr *one_expr = NULL;
+      ObRawExpr *max_disuse_expr = NULL;
       if (OB_ISNULL(ctx_.session_info_)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("get unexpected null", K(ret), K(ctx_.session_info_));
-      } else if (OB_UNLIKELY(3 != node->num_child_)) {
+      } else if (OB_UNLIKELY(4 != node->num_child_)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("get unexpected error", K(ret), K(node->num_child_));
       } else if (OB_FAIL(SMART_CALL(recursive_resolve(node->children_[0], error_expr)))) {
@@ -4187,6 +4193,14 @@ int ObRawExprResolverImpl::process_agg_node(const ParseNode *node, ObRawExpr *&e
         ret = OB_INVALID_ARGUMENT;
         LOG_WARN("get invalid item_size_expr", K(ret), K(item_size_expr));
       } else if (OB_FAIL(agg_expr->add_real_param_expr(item_size_expr))) {
+        LOG_WARN("fail to add param expr to agg expr", K(ret));
+      } else if (OB_FAIL(SMART_CALL(recursive_resolve(node->children_[3], max_disuse_expr)))) {
+        LOG_WARN("fail to recursive resolve expr item", K(ret));
+      } else if (OB_ISNULL(max_disuse_expr) ||
+                 OB_UNLIKELY(ObRawExpr::EXPR_CONST != max_disuse_expr->get_expr_class())) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_WARN("get invalid item_size_expr", K(ret), K(max_disuse_expr));
+      } else if (OB_FAIL(agg_expr->add_real_param_expr(max_disuse_expr))) {
         LOG_WARN("fail to add param expr to agg expr", K(ret));
       } else {/*do nothing*/}
     } else if (T_FUN_HYBRID_HIST == node->type_ || T_FUN_JSON_OBJECTAGG == node->type_) {

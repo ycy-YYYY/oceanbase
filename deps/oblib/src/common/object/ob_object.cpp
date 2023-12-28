@@ -571,7 +571,7 @@ int ObLobLocatorV2::get_disk_locator(ObString &disc_loc_buff) const
     int64_t handle_size = reinterpret_cast<intptr_t>(disk_loc) - reinterpret_cast<intptr_t>(ptr_);
     if (handle_size > size_) {
       ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("get invalid handle size", K(ret), K(size_), K(disk_loc), K(ptr_));
+      LOG_WARN("get invalid handle size", K(ret), K(size_), K(disk_loc), K(ptr_), K(handle_size));
     } else {
       if (disk_loc->in_row_) {
         handle_size = size_ - handle_size;
@@ -1050,7 +1050,7 @@ bool ObObj::is_zero() const
   return ret;
 }
 
-int ObObj::build_not_strict_default_value()
+int ObObj::build_not_strict_default_value(int16_t precision)
 {
   int ret = OB_SUCCESS;
   const ObObjType &data_type = meta_.get_type();
@@ -1190,7 +1190,14 @@ int ObObj::build_not_strict_default_value()
       break;
     }
     case ObDecimalIntType: {
-      set_decimal_int(0, 0, nullptr);
+      const ObDecimalInt *decint = nullptr;
+      int32_t int_bytes = 0;
+      if (OB_FAIL(wide::ObDecimalIntConstValue::get_zero_value_byte_precision(precision, decint,
+                                                                              int_bytes))) {
+        _OB_LOG(WARN, "get zero value failed, ret=%u", ret);
+      } else {
+        set_decimal_int(int_bytes, 0, const_cast<ObDecimalInt *>(decint));
+      }
       break;
     }
     default:

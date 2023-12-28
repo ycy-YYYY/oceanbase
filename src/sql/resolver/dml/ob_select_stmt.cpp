@@ -119,6 +119,15 @@ int ObSelectStmt::add_window_func_expr(ObWinFunRawExpr *expr)
   return ret;
 }
 
+int ObSelectStmt::set_qualify_filters(common::ObIArray<ObRawExpr *> &exprs)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(qualify_filters_.assign(exprs))) {
+    LOG_WARN("failed to add expr", K(ret));
+  }
+  return ret;
+}
+
 int ObSelectStmt::remove_window_func_expr(ObWinFunRawExpr *expr)
 {
   int ret = OB_SUCCESS;
@@ -179,6 +188,8 @@ int ObSelectStmt::assign(const ObSelectStmt &other)
     LOG_WARN("assign other start with failed", K(ret));
   } else if (OB_FAIL(win_func_exprs_.assign(other.win_func_exprs_))) {
     LOG_WARN("assign window function exprs failed", K(ret));
+  } else if (OB_FAIL(qualify_filters_.assign(other.qualify_filters_))) {
+    LOG_WARN("assign window function filter exprs failed", K(ret));
   } else if (OB_FAIL(connect_by_exprs_.assign(other.connect_by_exprs_))) {
     LOG_WARN("assign other connect by failed", K(ret));
   } else if (OB_FAIL(connect_by_prior_exprs_.assign(other.connect_by_prior_exprs_))) {
@@ -246,6 +257,8 @@ int ObSelectStmt::deep_copy_stmt_struct(ObIAllocator &allocator,
   } else if (OB_FAIL(expr_copier.copy(other.agg_items_, agg_items_))) {
     LOG_WARN("deep copy agg item failed", K(ret));
   } else if (OB_FAIL(expr_copier.copy(other.win_func_exprs_, win_func_exprs_))) {
+    LOG_WARN("deep copy window function expr failed", K(ret));
+  } else if (OB_FAIL(expr_copier.copy(other.qualify_filters_, qualify_filters_))) {
     LOG_WARN("deep copy window function expr failed", K(ret));
   } else if (OB_FAIL(expr_copier.copy(other.start_with_exprs_, start_with_exprs_))) {
     LOG_WARN("deep copy start with exprs failed", K(ret));
@@ -438,6 +451,11 @@ int ObSelectStmt::iterate_stmt_expr(ObStmtExprVisitor &visitor)
       if (OB_FAIL(visitor.visit(search_by_items_.at(i).expr_, SCOPE_DICT_FIELDS))) {
         LOG_WARN("failed to visit search by items", K(ret));
       } else { /* do nothing*/ }
+    }
+  }
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(visitor.visit(qualify_filters_, SCOPE_QUALIFY_FILTER))) {
+      LOG_WARN("failed to visit winfunc exprs", K(ret));
     }
   }
   if (OB_SUCC(ret) && NULL != into_item_) {
@@ -994,7 +1012,7 @@ int ObSelectStmt::get_set_stmt_size(int64_t &size) const
   return ret;
 }
 
-bool ObSelectStmt::check_is_select_item_expr(const ObRawExpr *expr)
+bool ObSelectStmt::check_is_select_item_expr(const ObRawExpr *expr) const
 {
   bool bret = false;
   for(int64_t i = 0; !bret && i < select_items_.count(); ++i) {
@@ -1320,4 +1338,57 @@ ObRawExpr* ObSelectStmt::get_pure_set_expr(ObRawExpr *expr)
     expr = expr->get_param_expr(0);
   }
   return expr;
+}
+
+int ObSelectStmt::get_all_group_by_exprs(ObIArray<ObRawExpr*> &group_by_exprs) const
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(append(group_by_exprs, group_exprs_))) {
+    LOG_WARN("failed to append group exprs");
+  } else if (OB_FAIL(append(group_by_exprs, rollup_exprs_))) {
+    LOG_WARN("failed to append rollup exprs");
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && i < grouping_sets_items_.count(); ++i) {
+      const ObIArray<ObGroupbyExpr> &groupby_exprs = grouping_sets_items_.at(i).grouping_sets_exprs_;
+      const ObIArray<ObRollupItem> &rollup_items = grouping_sets_items_.at(i).rollup_items_;
+      const ObIArray<ObCubeItem> &cube_items = grouping_sets_items_.at(i).cube_items_;
+      for (int64_t j = 0; OB_SUCC(ret) && j < groupby_exprs.count(); ++j) {
+        if (OB_FAIL(append(group_by_exprs, groupby_exprs.at(j).groupby_exprs_))) {
+          LOG_WARN("failed to append exprs", K(ret));
+        }
+      }
+      for (int64_t j = 0; OB_SUCC(ret) && j < rollup_items.count(); ++j) {
+        for (int64_t k = 0; OB_SUCC(ret) && k < rollup_items.at(j).rollup_list_exprs_.count(); ++k) {
+          if (OB_FAIL(append(group_by_exprs, rollup_items.at(j).rollup_list_exprs_.at(k).groupby_exprs_))) {
+            LOG_WARN("failed to append exprs", K(ret));
+          }
+        }
+      }
+      for (int64_t j = 0; OB_SUCC(ret) && j < cube_items.count(); ++j) {
+        for (int64_t k = 0; OB_SUCC(ret) && k < cube_items.at(j).cube_list_exprs_.count(); ++k) {
+          if (OB_FAIL(append(group_by_exprs, cube_items.at(j).cube_list_exprs_.at(k).groupby_exprs_))) {
+            LOG_WARN("failed to append exprs", K(ret));
+          }
+        }
+      }
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < rollup_items_.count(); ++i) {
+      const ObIArray<ObGroupbyExpr> &rollup_list_exprs = rollup_items_.at(i).rollup_list_exprs_;
+      for (int64_t j = 0; OB_SUCC(ret) && j < rollup_list_exprs.count(); ++j) {
+        if (OB_FAIL(append(group_by_exprs, rollup_list_exprs.at(j).groupby_exprs_))) {
+          LOG_WARN("failed to append exprs", K(ret));
+        }
+      }
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < cube_items_.count(); ++i) {
+      const ObIArray<ObGroupbyExpr> &cube_list_exprs = cube_items_.at(i).cube_list_exprs_;
+      for (int64_t j = 0; OB_SUCC(ret) && j < cube_list_exprs.count(); ++j) {
+        if (OB_FAIL(append(group_by_exprs, cube_list_exprs.at(j).groupby_exprs_))) {
+          LOG_WARN("failed to append exprs", K(ret));
+        }
+      }
+    }
+  }
+  LOG_TRACE("succeed to get all group by exprs", K(group_by_exprs));
+  return ret;
 }

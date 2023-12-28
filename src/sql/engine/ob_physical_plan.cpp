@@ -133,7 +133,9 @@ ObPhysicalPlan::ObPhysicalPlan(MemoryContext &mem_context /* = CURRENT_CONTEXT *
     append_table_id_(0),
     logical_plan_(),
     is_enable_px_fast_reclaim_(false),
-    subschema_ctx_(allocator_)
+    use_rich_format_(false),
+    subschema_ctx_(allocator_),
+    all_local_session_vars_(&allocator_)
 {
 }
 
@@ -219,6 +221,7 @@ void ObPhysicalPlan::reset()
   is_packed_ = false;
   has_instead_of_trigger_ = false;
   enable_append_ = false;
+  use_rich_format_ = false;
   append_table_id_ = 0;
   stat_.expected_worker_map_.destroy();
   stat_.minimal_worker_map_.destroy();
@@ -229,6 +232,7 @@ void ObPhysicalPlan::reset()
   logical_plan_.reset();
   is_enable_px_fast_reclaim_ = false;
   subschema_ctx_.reset();
+  all_local_session_vars_.reset();
 }
 
 void ObPhysicalPlan::destroy()
@@ -692,7 +696,9 @@ int ObPhysicalPlan::inc_concurrent_num()
   } else {
     while(OB_SUCC(ret) && false == is_succ) {
       concurrent_num = ATOMIC_LOAD(&concurrent_num_);
-      if (concurrent_num >= max_concurrent_num_) {
+      if (0 == max_concurrent_num_) {
+        ret = OB_REACH_MAX_CONCURRENT_NUM;
+      } else if (concurrent_num >= max_concurrent_num_) {
         ret = OB_REACH_MAX_CONCURRENT_NUM;
       } else {
         new_num = concurrent_num + 1;
@@ -782,6 +788,7 @@ OB_SERIALIZE_MEMBER(ObPhysicalPlan,
                     is_enable_px_fast_reclaim_,
                     gtt_session_scope_ids_,
                     gtt_trans_scope_ids_,
+                    use_rich_format_,
                     subschema_ctx_);
 
 int ObPhysicalPlan::set_table_locations(const ObTablePartitionInfoArray &infos,
@@ -1011,6 +1018,10 @@ int ObPhysicalPlan::alloc_op_spec(const ObPhyOperatorType type,
     op->id_ = tmp_op_id;
     op->plan_ = this;
     op->max_batch_size_ = (ObOperatorFactory::is_vectorized(type)) ? batch_size_ : 0;
+    op->use_rich_format_ = use_rich_format_
+                           && op->is_vectorized()
+                           && ObOperatorFactory::support_rich_format(type);
+    LOG_TRACE("alloc op spec", K(use_rich_format_), K(*op));
   }
   return ret;
 }
@@ -1333,6 +1344,32 @@ int ObPhysicalPlan::set_feedback_info(ObExecContext &ctx)
       LOG_WARN("failed to compress logical plan", K(ret));
     } else if (OB_FAIL(set_logical_plan(new_logical_plan))) {
       LOG_WARN("failed to set logical plan", K(ret));
+    }
+  }
+  return ret;
+}
+
+int ObPhysicalPlan::set_all_local_session_vars(ObIArray<ObLocalSessionVar> *all_local_session_vars)
+{
+  int ret = OB_SUCCESS;
+  if (!all_local_session_vars_.empty()) {
+    all_local_session_vars_.reset();
+  }
+  if (OB_ISNULL(all_local_session_vars)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null", K(ret), K(all_local_session_vars));
+  } else if (OB_FAIL(all_local_session_vars_.reserve(all_local_session_vars->count()))) {
+    LOG_WARN("reserve for local_session_vars failed", K(ret));
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && i < all_local_session_vars->count(); ++i) {
+      if (OB_FAIL(all_local_session_vars_.push_back(ObLocalSessionVar()))) {
+        LOG_WARN("push back local session var failed", K(ret));
+      } else {
+        all_local_session_vars_.at(i).set_allocator(&allocator_);
+        if (OB_FAIL(all_local_session_vars_.at(i).deep_copy(all_local_session_vars->at(i)))) {
+          LOG_WARN("deep copy local session vars failed", K(ret));
+        }
+      }
     }
   }
   return ret;

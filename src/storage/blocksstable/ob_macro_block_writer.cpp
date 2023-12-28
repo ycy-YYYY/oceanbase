@@ -21,7 +21,7 @@
 #include "share/ob_task_define.h"
 #include "share/schema/ob_table_schema.h"
 #include "storage/blocksstable/index_block/ob_index_block_builder.h"
-#include "storage/blocksstable/index_block/ob_index_block_macro_iterator.h"
+#include "storage/blocksstable/index_block/ob_index_block_dual_meta_iterator.h"
 #include "storage/blocksstable/index_block/ob_index_block_row_struct.h"
 #include "storage/blocksstable/ob_macro_block_writer.h"
 #include "storage/blocksstable/cs_encoding/ob_micro_block_cs_encoder.h"
@@ -840,9 +840,12 @@ int ObMacroBlockWriter::check_order(const ObDatumRow &row)
   int64_t cur_row_version = 0;
   int64_t cur_sql_sequence = 0;
   if (!row.is_valid() || row.get_column_count() != data_store_desc_->get_row_column_count()) {
-    ret = OB_INVALID_ARGUMENT;
+    ret = OB_ERR_UNEXPECTED;
     STORAGE_LOG(ERROR, "invalid macro block writer input argument.",
         K(row), "row_column_count", data_store_desc_->get_row_column_count(), K(ret));
+  } else if (OB_UNLIKELY(!row.mvcc_row_flag_.is_valid())) {
+    ret = OB_ERR_UNEXPECTED;
+    STORAGE_LOG(ERROR, "invalid mvcc_row_flag", K(ret), K(row.mvcc_row_flag_));
   } else {
     ObMacroBlock &curr_block = macro_blocks_[current_index_];
     cur_row_version = row.storage_datums_[trans_version_col_idx].get_int();
@@ -1291,7 +1294,6 @@ int ObMacroBlockWriter::write_micro_block(ObMicroBlockDesc &micro_block_desc)
     }
   }
 
-  // TODO(zhuixin.gsy): ensure bloomfilter correct for index micro block
   if (OB_SUCC(ret)) {
     last_micro_size_ = micro_block_desc.data_size_;
     last_micro_expand_pct_ = micro_block_desc.original_size_  * 100 / micro_block_desc.data_size_;
@@ -1340,7 +1342,7 @@ int ObMacroBlockWriter::try_active_flush_macro_block()
 int ObMacroBlockWriter::flush_macro_block(ObMacroBlock &macro_block)
 {
   int ret = OB_SUCCESS;
-  ObLogicMacroBlockId cur_logic_id; // TODO(zhuixin.gsy) rm this if DDL Rebuild Ready
+  ObLogicMacroBlockId cur_logic_id;
   cur_logic_id.logic_version_ = data_store_desc_->get_logical_version();
   cur_logic_id.column_group_idx_ = data_store_desc_->get_table_cg_idx();
   cur_logic_id.data_seq_.macro_data_seq_ = current_macro_seq_;
@@ -1365,7 +1367,7 @@ int ObMacroBlockWriter::flush_macro_block(ObMacroBlock &macro_block)
                                                                 cur_logic_id,
                                                                 macro_block.get_data_buf(),
                                                                 upper_align(macro_block.get_data_size(), DIO_ALIGN_SIZE),
-                                                                current_macro_seq_))) {
+                                                                macro_block.get_row_count()))) {
     STORAGE_LOG(WARN, "fail to do callback flush", K(ret));
   }
   if (OB_SUCC(ret)) {
@@ -1814,7 +1816,7 @@ int ObMacroBlockWriter::init_pre_agg_util(const ObDataStoreDesc &data_store_desc
   int ret = OB_SUCCESS;
   const ObIArray<ObSkipIndexColMeta> &full_agg_metas = data_store_desc.get_agg_meta_array();
   const bool need_pre_aggregation =
-      data_store_desc.is_major_merge_type()
+      data_store_desc.is_major_or_meta_merge_type()
       && nullptr != data_store_desc.sstable_index_builder_
       && full_agg_metas.count() > 0;
   if (!need_pre_aggregation) {

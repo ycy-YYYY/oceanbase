@@ -3223,10 +3223,10 @@ void ObIOFaultDetector::handle(void *task)
         }
         if (OB_SUCC(ret) && !is_retry_succ) {
           const int64_t current_ts = ObTimeUtility::fast_current_time();
-          if (current_ts >= error_ts) {
+          if (current_ts >= error_ts || (sys_io_errno != 0 && fs_error_times >= MAX_DETECT_READ_ERROR_TIMES)) {
             set_device_error();
             LOG_WARN("ObIOManager::detect IO retry timeout, device error", K(ret), K(current_ts), K(error_ts), K(retry_task->io_info_));
-          } else if (current_ts >= warn_ts || (sys_io_errno != 0 && fs_error_times >= MAX_DETECT_READ_TIMES)) {
+          } else if (current_ts >= warn_ts || (sys_io_errno != 0 && fs_error_times >= MAX_DETECT_READ_WARN_TIMES)) {
             set_device_warning();
             LOG_WARN("ObIOManager::detect IO retry reach limit, device warning", K(ret), K(sys_io_errno), K(current_ts), K(current_ts), K(fs_error_times), K(retry_task->io_info_));
           }
@@ -3296,7 +3296,7 @@ int ObIOFaultDetector::record_timing_task(const int64_t first_id, const int64_t 
     retry_task->io_info_.fd_.second_id_ = second_id;
     retry_task->io_info_.offset_ = 0;
     retry_task->io_info_.callback_ = nullptr;
-    retry_task->timeout_ms_ = 5000L; // 5s
+    retry_task->timeout_ms_ = io_config_.data_storage_warning_tolerance_time_; // default 5s
     if (OB_FAIL(TG_PUSH_TASK(TGDefIDs::IO_HEALTH, retry_task))) {
       LOG_WARN("io fault detector push task failed", K(ret), KP(retry_task));
     }
@@ -3332,7 +3332,7 @@ void ObIOFaultDetector::record_io_timeout(const ObIOResult &result, ObIORequest 
       retry_task->io_info_.size_ = result.size_;
       retry_task->io_info_.offset_ = static_cast<int64_t>(result.offset_);
       retry_task->io_info_.flag_.set_group_id(ObIOModule::DETECT_IO);
-      retry_task->timeout_ms_ = 5000L; // 5s
+      retry_task->timeout_ms_ = io_config_.data_storage_warning_tolerance_time_; // default 5s
       if (OB_FAIL(TG_PUSH_TASK(TGDefIDs::IO_HEALTH, retry_task))) {
         LOG_WARN("io fault detector push task failed", K(ret), KPC(retry_task));
       }
@@ -3435,7 +3435,7 @@ ObIOTracer::~ObIOTracer()
 int ObIOTracer::init(const uint64_t tenant_id)
 {
   int ret = OB_SUCCESS;
-  auto attr = SET_USE_500("io_trace_map");
+  const ObMemAttr attr = SET_USE_500("io_trace_map");
   if (OB_UNLIKELY(is_inited_)) {
     ret = OB_INIT_TWICE;
     LOG_WARN("init twice", K(ret));
@@ -3588,6 +3588,13 @@ void ObIOTracer::print_status()
     ObIArray<TraceItem> &trace_array_;
   };
 
+  struct {
+    bool operator()(const TraceItem &left, const TraceItem &right) const
+    {
+      return left.count_ < right.count_;
+    }
+  } sort_fn;
+
   int ret = OB_SUCCESS;
   CountFn counter;
   if (OB_FAIL(counter.init())) {
@@ -3602,9 +3609,7 @@ void ObIOTracer::print_status()
     } else if (OB_FAIL(counter.bt_count_.foreach_refactored(store_fn))) {
       LOG_WARN("get max backtrace count failed", K(ret));
     } else {
-      std::sort(trace_array.begin(), trace_array.end(), [](const TraceItem &left, const TraceItem &right) {
-          return left.count_ > right.count_;
-          });
+      std::sort(trace_array.begin(), trace_array.end(), sort_fn);
       LOG_INFO("[IO STATUS TRACER]", K_(tenant_id), "trace_request_count", counter.req_count_, "distinct_backtrace_count", trace_array.count());
       const int64_t print_count = min(5, trace_array.count());
       for (int64_t i = 0; OB_SUCC(ret) && i < print_count; ++i) {

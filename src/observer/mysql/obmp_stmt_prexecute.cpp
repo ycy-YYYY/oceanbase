@@ -151,6 +151,7 @@ int ObMPStmtPrexecute::before_process()
       uint32_t ps_stmt_checksum = DEFAULT_ITERATION_COUNT;
       ObSQLSessionInfo::LockGuard lock_guard(session->get_query_lock());
       session->set_current_trace_id(ObCurTraceId::get_trace_id());
+      session->init_use_rich_format();
       session->set_proxy_version(get_proxy_version());
       int64_t packet_len = (reinterpret_cast<const ObMySQLRawPacket &>
                                 (req_->get_packet())).get_clen();
@@ -166,6 +167,8 @@ int ObMPStmtPrexecute::before_process()
           if (OB_UNLIKELY(!session->is_valid())) {
             ret = OB_ERR_UNEXPECTED;
             LOG_ERROR("invalid session", K_(sql), K(ret));
+          } else if (OB_FAIL(process_kill_client_session(*session))) {
+            LOG_WARN("client session has been killed", K(ret));
           } else if (OB_UNLIKELY(session->is_zombie())) {
             ret = OB_ERR_SESSION_INTERRUPTED;
             LOG_WARN("session has been killed", K(session->get_session_state()), K_(sql),

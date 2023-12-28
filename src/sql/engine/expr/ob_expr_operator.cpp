@@ -33,6 +33,7 @@
 #include "lib/timezone/ob_oracle_format_models.h"
 #include "sql/engine/expr/ob_expr_lob_utils.h"
 #include "sql/resolver/dml/ob_select_stmt.h"
+#include "share/vector/expr_cmp_func.h"
 #include "sql/engine/expr/ob_expr_func_round.h"
 
 namespace oceanbase
@@ -643,20 +644,20 @@ bool ObExprOperator::is_valid_nls_param(const common::ObString &nls_param_str)
  * */
 ObCollationType ObExprOperator::get_default_collation_type(
     ObObjType type,
-    const ObBasicSessionInfo &session_info
+    ObExprTypeCtx &type_ctx
     )
 {
   ObCollationType collation_type = CS_TYPE_INVALID;
-  if (ob_is_string_or_lob_type(type)) {
+  if (OB_NOT_NULL(type_ctx.get_session()) && ob_is_string_or_lob_type(type)) {
     if (lib::is_mysql_mode()) {
-      collation_type = static_cast<ObCollationType>(session_info.get_local_collation_connection());
+      collation_type = static_cast<ObCollationType>(type_ctx.get_coll_type());
     } else {
       if (ob_is_nstring(type)) {
         //nvarchar2 nchar nclob
-        collation_type = session_info.get_nls_collation_nation();
+        collation_type = type_ctx.get_session()->get_nls_collation_nation();
       } else {
         //varchar2 char clob
-        collation_type = session_info.get_nls_collation();
+        collation_type = type_ctx.get_session()->get_nls_collation();
       }
     }
   }
@@ -1038,13 +1039,12 @@ int ObExprOperator::aggregate_result_type_for_case(
   const ObCollationType conn_coll_type,
   bool is_oracle_mode,
   const ObLengthSemantics default_length_semantics,
-  const ObSQLSessionInfo *session,
   bool need_merge_type,
   bool skip_null,
   bool is_called_in_sql)
 {
   int ret = OB_SUCCESS;
-  if (OB_ISNULL(types) || OB_UNLIKELY(param_num < 1) || OB_ISNULL(session)) {
+  if (OB_ISNULL(types) || OB_UNLIKELY(param_num < 1)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("types is null or param_num is wrong", K(types), K(param_num), K(ret));
   } else if (1 == param_num && ob_is_enumset_tc(types[0].get_type())) {
@@ -1087,7 +1087,7 @@ int ObExprOperator::aggregate_result_type_for_case(
         LOG_WARN("fail to aggregate numeric accuracy", K(ret));
       }
     } else if (OB_FAIL(aggregate_result_type_for_merge(type, types, param_num, conn_coll_type,
-        is_oracle_mode, default_length_semantics, session, need_merge_type, skip_null,
+        is_oracle_mode, default_length_semantics, need_merge_type, skip_null,
         is_called_in_sql))) {
       LOG_WARN("fail to aggregate result type", K(ret));
     } else if (ObFloatType == type.get_type() && !is_oracle_mode) {
@@ -1104,20 +1104,19 @@ int ObExprOperator::aggregate_result_type_for_merge(
   const ObCollationType conn_coll_type,
   bool is_oracle_mode,
   const ObLengthSemantics default_length_semantics,
-  const ObSQLSessionInfo *session,
   bool need_merge_type,
   bool skip_null,
   bool is_called_in_sql)
 {
   int ret = OB_SUCCESS;
-  if (OB_ISNULL(types) || OB_UNLIKELY(param_num < 1) || OB_ISNULL(session)) {
+  if (OB_ISNULL(types) || OB_UNLIKELY(param_num < 1)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("types is null or param_num is wrong", K(types), K(param_num), K(ret));
   } else if (1 == param_num && ob_is_enumset_tc(types[0].get_type())) {
     //this is for case when clause like case  when 1 then c1 end;
     type.set_type(ObVarcharType);
     type.set_collation_level(common::CS_LEVEL_IMPLICIT);
-    type.set_collation_type(session->get_local_collation_connection());
+    type.set_collation_type(conn_coll_type);
   } else {
     ObObjType res_type = types[0].get_type();
     bool is_oracle_all_same_number = is_oracle_mode &&
@@ -1932,6 +1931,8 @@ bool ObRelationalExprOperator::can_cmp_without_cast(ObExprResType type1,
       need_no_cast = (type1.get_scale() == type2.get_scale()
                       && get_decimalint_type(type1.get_precision())
                            == get_decimalint_type(type2.get_precision()));
+    } else if (ob_is_double_tc(type1.get_type()) && ob_is_double_tc(type2.get_type())) {
+      need_no_cast = (type1.get_scale() == type2.get_scale());
     } else {
       auto func_ptr = ObExprCmpFuncsHelper::get_eval_expr_cmp_func(type1.get_type(),
                                                                    type2.get_type(),
@@ -2260,6 +2261,40 @@ ObExpr *ObExprOperator::get_rt_expr(const ObRawExpr &raw_expr) const
   return raw_expr.rt_expr_;
 }
 
+DEF_SET_LOCAL_SESSION_VARS(ObExprOperator, raw_expr) {
+  return OB_SUCCESS;
+}
+
+int ObExprOperator::add_local_var_to_expr(ObSysVarClassType var_type,
+                                          const share::schema::ObLocalSessionVar *local_session_var,
+                                          const ObBasicSessionInfo *session,
+                                          share::schema::ObLocalSessionVar &local_vars)
+{
+  int ret = OB_SUCCESS;
+  share::schema::ObSessionSysVar *sys_var = NULL;
+  if (NULL != local_session_var) {
+    if (OB_FAIL(local_session_var->get_local_var(var_type, sys_var))) {
+      LOG_WARN("fail to get sys var", K(ret), K(var_type));
+    } else if (NULL != sys_var && OB_FAIL(local_vars.add_local_var(sys_var))) {
+      LOG_WARN("fail to add sysvar", K(ret));
+    }
+  }
+  if (OB_SUCC(ret) && NULL == sys_var && NULL != session) {
+    ObObj session_val;
+    if (share::SYS_VAR_SQL_MODE == var_type) {
+      session_val.set_uint64(session->get_sql_mode());
+    } else if (OB_FAIL(session->get_sys_variable(var_type, session_val))) {
+      LOG_WARN("fail to get session variable", K(ret));
+    }
+    if (OB_SUCC(ret)) {
+      if (OB_FAIL(local_vars.add_local_var(var_type, session_val))) {
+        LOG_WARN("fail to add sysvar", K(ret));
+      }
+    }
+  }
+  return ret;
+}
+
 OB_SERIALIZE_MEMBER(ObIterExprOperator, expr_id_, expr_type_);
 
 int ObRelationalExprOperator::calc_result_type2(ObExprResType &type,
@@ -2537,15 +2572,30 @@ int ObRelationalExprOperator::calc_calc_type3(ObExprResType &type1,
         type2.set_calc_type(ObNumberType);
         type3.set_calc_type(ObNumberType);
       }
+    } else if (cmp_type == ObDoubleType) {
+      type1.set_calc_type(cmp_type);
+      type2.set_calc_type(cmp_type);
+      type3.set_calc_type(cmp_type);
+      // unified scale
+      common::ObScale calc_scale = -1;
+      // All three values are of type FixedDouble.
+      if ((type1.get_scale() > 0 && type1.get_scale() <= OB_MAX_DOUBLE_FLOAT_SCALE) &&
+          (type2.get_scale() > 0 && type2.get_scale() <= OB_MAX_DOUBLE_FLOAT_SCALE) &&
+          (type3.get_scale() > 0 && type3.get_scale() <= OB_MAX_DOUBLE_FLOAT_SCALE)) {
+        calc_scale = max(type1.get_scale(), max(type2.get_scale(), type3.get_scale()));
+      }
+      type1.set_calc_scale(calc_scale);
+      type2.set_calc_scale(calc_scale);
+      type3.set_calc_scale(calc_scale);
     } else {
       type1.set_calc_type(cmp_type);
       type2.set_calc_type(cmp_type);
       type3.set_calc_type(cmp_type);
     }
-    LOG_DEBUG("calc type3", K(type1.get_calc_type()), K(type2.get_calc_type()),
-              K(type3.get_calc_type()), K(type1.get_calc_accuracy()), K(type2.get_calc_accuracy()),
-              K(type3.get_calc_accuracy()), K(type1.get_cast_mode()), K(type2.get_cast_mode()),
-              K(type3.get_cast_mode()));
+    LOG_DEBUG("calc type3", K(cmp_type),
+      K(type1.get_calc_type()), K(type2.get_calc_type()), K(type3.get_calc_type()),
+      K(type1.get_calc_accuracy()), K(type2.get_calc_accuracy()), K(type3.get_calc_accuracy()),
+      K(type1.get_cast_mode()), K(type2.get_cast_mode()), K(type3.get_cast_mode()));
   }
   return ret;
 }
@@ -2839,6 +2889,12 @@ int ObRelationalExprOperator::pl_udt_compare2(CollectionPredRes &cmp_result,
   } else if (c1->get_element_type().get_obj_type() != c2->get_element_type().get_obj_type()) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("not support udt compare with different elem type", K(ret), K(c1), K(c2));
+  } else if (c1->is_of_composite()) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "comparison of composite types is");
+    LOG_WARN("comparison of composite types is not supported",
+              K(c1->get_element_type()),
+              K(c2->get_element_type()));
   } else if (!c1->is_inited() || !c2->is_inited()) {
     cmp_result = CollectionPredRes::COLL_PRED_NULL;
   } else if ((c1->get_actual_count() != c2->get_actual_count())) {
@@ -4752,9 +4808,15 @@ int ObBitwiseExprOperator::calc_result2_mysql(const ObExpr &expr, ObEvalCtx &ctx
   ObDatum *right = NULL;
   const BitOperator op = static_cast<const BitOperator>(expr.extra_);
   ObCastMode cast_mode = CM_NONE;
+  ObSolidifiedVarsGetter helper(expr, ctx, ctx.exec_ctx_.get_my_session());
+  ObSQLMode sql_mode = 0;
+  const ObSQLSessionInfo *session = ctx.exec_ctx_.get_my_session();
   if (OB_UNLIKELY(op < 0 || op >= BIT_MAX)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", K(ret), K(op));
+  } else if (OB_ISNULL(session)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("session is null", K(ret));
   } else if (OB_FAIL(expr.args_[0]->eval(ctx, left))) {
     LOG_WARN("eval arg 0 failed", K(ret));
   } else if (left->is_null()) {
@@ -4763,9 +4825,8 @@ int ObBitwiseExprOperator::calc_result2_mysql(const ObExpr &expr, ObEvalCtx &ctx
     LOG_WARN("eval arg 1 failed", K(ret));
   } else if (right->is_null()) {
     res_datum.set_null();
-  } else if (OB_FAIL(ObSQLUtils::get_default_cast_mode(false, 0,
-          ctx.exec_ctx_.get_my_session(), cast_mode))) {
-    LOG_WARN("get default cast mode failed", K(ret));
+  } else if (OB_FAIL(helper.get_sql_mode(sql_mode))) {
+    LOG_WARN("get sql mode failed", K(ret));
   } else {
     uint64_t left_uint = 0;
     uint64_t right_uint = 0;
@@ -4773,6 +4834,10 @@ int ObBitwiseExprOperator::calc_result2_mysql(const ObExpr &expr, ObEvalCtx &ctx
     void *get_uint_func1 = NULL;
     const ObDatumMeta &left_meta = expr.args_[0]->datum_meta_;
     const ObDatumMeta &right_meta = expr.args_[1]->datum_meta_;
+    ObSQLUtils::get_default_cast_mode(false, 0,
+                                  session->get_stmt_type(),
+                                  session->is_ignore_stmt(),
+                                  sql_mode, cast_mode);
     // choose_get_int_func可以想办法放到cg阶段，但是bitwise表达式
     // 应该不是性能敏感的地方
     if (OB_FAIL(choose_get_int_func(left_meta, get_uint_func0))) {
@@ -5109,6 +5174,15 @@ int ObBitwiseExprOperator::get_uint64(const ObObj &obj,
     // need add CM_NO_RANGE_CHECK, otherwise 1 & -3.5(float) return 0.
     EXPR_DEFINE_CAST_CTX(expr_ctx, CM_NO_RANGE_CHECK | CM_STRING_INTEGER_TRUNC);
     EXPR_GET_UINT64_V2(obj, out);
+  }
+  return ret;
+}
+
+DEF_SET_LOCAL_SESSION_VARS(ObBitwiseExprOperator, raw_expr) {
+  int ret = OB_SUCCESS;
+  if (is_mysql_mode()) {
+    SET_LOCAL_SYSVAR_CAPACITY(1);
+    EXPR_ADD_LOCAL_SYSVAR(SYS_VAR_SQL_MODE);
   }
   return ret;
 }
@@ -6320,6 +6394,8 @@ int ObRelationalExprOperator::cg_datum_cmp_expr(const ObRawExpr &raw_expr,
       rt_expr.eval_batch_func_ = ObExprCmpFuncsHelper::get_eval_batch_expr_cmp_func(
         input_type1, input_type2, input_scale1, input_scale2, in_prec1, in_prec2, cmp_op,
         lib::is_oracle_mode(), cs_type, has_lob_header);
+      rt_expr.eval_vector_func_ = VectorCmpExprFuncsHelper::get_eval_vector_expr_cmp_func(
+        rt_expr.args_[0]->datum_meta_, rt_expr.args_[1]->datum_meta_, cmp_op);
     }
     CK(NULL != rt_expr.eval_func_);
     CK(NULL != rt_expr.eval_batch_func_);

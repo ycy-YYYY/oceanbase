@@ -248,7 +248,7 @@ void ObMultiVersionSSTableTest::SetUpTestCase()
 
 void ObMultiVersionSSTableTest::TearDownTestCase()
 {
-  ASSERT_EQ(OB_SUCCESS, MTL(ObLSService*)->remove_ls(ObLSID(ls_id_), false));
+  ASSERT_EQ(OB_SUCCESS, MTL(ObLSService*)->remove_ls(ObLSID(ls_id_)));
   ObKVGlobalCache::get_instance().destroy();
   //ObIODeviceWrapper::get_instance().destroy();
   OB_STORE_CACHE.destroy();
@@ -298,7 +298,7 @@ ObITable::TableType ObMultiVersionSSTableTest::get_merged_table_type() const
   } else if (META_MAJOR_MERGE == merge_type_) {
     table_type = ObITable::TableType::META_MAJOR_SSTABLE;
   } else if (DDL_KV_MERGE == merge_type_) {
-    table_type = ObITable::TableType::DDL_DUMP_SSTABLE;
+    table_type = ObITable::TableType::DDL_MERGE_CO_SSTABLE;
   } else { // MINOR_MERGE
     table_type = ObITable::TableType::MINOR_SSTABLE;
   }

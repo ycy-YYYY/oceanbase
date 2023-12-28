@@ -29,6 +29,7 @@
 #include "share/ls/ob_ls_table_operator.h"
 #include "ob_rebuild_service.h"
 #include "share/ob_cluster_version.h"
+#include "ob_storage_ha_utils.h"
 
 namespace oceanbase
 {
@@ -1042,9 +1043,8 @@ int ObStartMigrationTask::deal_with_local_ls_()
   int ret = OB_SUCCESS;
   ObLSHandle ls_handle;
   ObLS *ls = nullptr;
-  ObRole role;
-  int64_t proposal_id = 0;
   ObLSMeta local_ls_meta;
+  bool is_leader = false;
   if (!is_inited_) {
     ret = OB_NOT_INIT;
     LOG_WARN("start migration task do not init", K(ret));
@@ -1053,18 +1053,19 @@ int ObStartMigrationTask::deal_with_local_ls_()
   } else if (OB_ISNULL(ls = ls_handle.get_ls())) {
     ret = OB_ERR_SYS;
     LOG_ERROR("log stream should not be NULL", K(ret), K(*ctx_));
-  } else if (OB_FAIL(ls->get_log_handler()->get_role(role, proposal_id))) {
-    LOG_WARN("failed to get role", K(ret), "arg", ctx_->arg_);
-  } else if (is_strong_leader(role)) {
+  } else if (OB_FAIL(ObStorageHAUtils::check_ls_is_leader(
+        ctx_->tenant_id_, ctx_->arg_.ls_id_, is_leader))) {
+    LOG_WARN("failed to check ls leader", K(ret), KPC(ctx_));
+  } else if (is_leader) {
     if (ObMigrationOpType::REBUILD_LS_OP == ctx_->arg_.type_) {
       ret = OB_ERR_UNEXPECTED;
-      LOG_ERROR("leader can not as rebuild dst", K(ret), K(role), "myaddr", MYADDR, "arg", ctx_->arg_);
+      LOG_ERROR("leader can not as rebuild dst", K(ret), K(is_leader), "myaddr", MYADDR, "arg", ctx_->arg_);
     } else if (ObMigrationOpType::ADD_LS_OP == ctx_->arg_.type_
         || ObMigrationOpType::MIGRATE_LS_OP == ctx_->arg_.type_
         || ObMigrationOpType::CHANGE_LS_OP == ctx_->arg_.type_) {
       ret = OB_ERR_SYS;
       LOG_WARN("leader cannot as add, migrate, change dst",
-          K(ret), K(role), "myaddr", MYADDR, "arg", ctx_->arg_);
+          K(ret), K(is_leader), "myaddr", MYADDR, "arg", ctx_->arg_);
     }
   } else if (OB_FAIL(ls->offline())) {
     LOG_WARN("failed to disable log", K(ret), KPC(ctx_));
@@ -1446,7 +1447,7 @@ int ObStartMigrationTask::check_before_ls_migrate_(const ObLSMeta &ls_meta)
     LOG_WARN("start migration task do not init", K(ret));
   } else if (OB_FAIL(ls_meta.get_restore_status(ls_restore_status))) {
     LOG_WARN("failed to get restore status", K(ret), KPC(ctx_));
-  } else if (ls_restore_status.is_restore_failed()) {
+  } else if (ls_restore_status.is_failed()) {
     ret = OB_LS_RESTORE_FAILED;
     LOG_WARN("ls restore failed, cannot migrate", K(ret), KPC(ctx_), K(ls_restore_status));
   } else if (!ls_restore_status.can_migrate()) {
@@ -2833,19 +2834,17 @@ int ObTabletMigrationTask::try_update_tablet_()
       ls, &ctx_->ha_table_info_mgr_, ha_tablets_builder))) {
     LOG_WARN("failed to init ha tablets builder", K(ret), KPC(ctx_));
   } else {
-    //Here inner tablet copy data before clog replay, and now just create a new tablet to replace it.
-    //Data tablet copy data during clog replay, so the data tablet can only be updated.
-    if (copy_tablet_ctx_->tablet_id_.is_ls_inner_tablet()) {
-      if (OB_FAIL(ha_tablets_builder.create_or_update_tablets())) {
-        LOG_WARN("failed to create or update tablets", K(ret), KPC(ctx_));
-      }
-    } else {
-      if (OB_FAIL(ha_tablets_builder.update_local_tablets())) {
-        LOG_WARN("failed to create or update tablets", K(ret), KPC(ctx_), KPC(copy_tablet_ctx_));
+    if (OB_FAIL(ctx_->ha_table_info_mgr_.remove_tablet_table_info(copy_tablet_ctx_->tablet_id_))) {
+      if (OB_HASH_NOT_EXIST == ret) {
+        ret = OB_SUCCESS;
+      } else {
+        LOG_WARN("failed to remove tablet info", K(ret), KPC(copy_tablet_ctx_), KPC(ctx_));
       }
     }
 
     if (OB_FAIL(ret)) {
+    } else if (copy_tablet_ctx_->tablet_id_.is_ls_inner_tablet() && OB_FAIL(ha_tablets_builder.create_or_update_tablets())) {
+      LOG_WARN("failed to create or update inner tablet", K(ret), KPC(ctx_));
     } else if (OB_FAIL(ha_tablets_builder.build_tablets_sstable_info())) {
       LOG_WARN("failed to build tablets sstable info", K(ret), KPC(ctx_), KPC(copy_tablet_ctx_));
     } else if (OB_FAIL(ctx_->ha_table_info_mgr_.check_tablet_table_info_exist(copy_tablet_ctx_->tablet_id_, is_exist))) {
@@ -4018,8 +4017,8 @@ int ObTabletGroupMigrationTask::process()
     LOG_WARN("tablet group migration task do not init", K(ret));
   } else if (ctx_->is_failed()) {
     //do nothing
-  } else if (OB_FAIL(try_update_local_tablets_())) {
-    LOG_WARN("failed to try update local tablets", K(ret), KPC(ctx_));
+  } else if (OB_FAIL(try_remove_tablets_info_())) {
+    LOG_WARN("failed to try remove tablets info", K(ret), KPC(ctx_));
   } else if (OB_FAIL(build_tablets_sstable_info_())) {
     LOG_WARN("failed to build tablets sstable info", K(ret));
   } else {
@@ -4153,7 +4152,7 @@ int ObTabletGroupMigrationTask::build_tablets_sstable_info_()
   return ret;
 }
 
-int ObTabletGroupMigrationTask::try_update_local_tablets_()
+int ObTabletGroupMigrationTask::try_remove_tablets_info_()
 {
   int ret = OB_SUCCESS;
   bool is_in_retry = false;
@@ -4169,15 +4168,13 @@ int ObTabletGroupMigrationTask::try_update_local_tablets_()
     LOG_WARN("failed to check is in retry", K(ret), KPC(ctx_), KP(dag));
   } else if (!is_in_retry) {
     //do nothing
-  } else if (OB_FAIL(try_remove_tablets_info_())) {
+  } else if (OB_FAIL(remove_tablets_info_())) {
     LOG_WARN("failed to try remove tablets info", K(ret), KPC(ctx_));
-  } else if (OB_FAIL(ha_tablets_builder_.update_local_tablets())) {
-    LOG_WARN("failed to build tablets sstable info", K(ret), KPC(ctx_));
   }
   return ret;
 }
 
-int ObTabletGroupMigrationTask::try_remove_tablets_info_()
+int ObTabletGroupMigrationTask::remove_tablets_info_()
 {
   int ret = OB_SUCCESS;
   if (!is_inited_) {

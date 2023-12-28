@@ -917,7 +917,8 @@ public:
                                const bool is_partition_wise = false,
                                const bool is_push_down = false,
                                const bool is_partition_gi = false,
-                               const ObRollupStatus rollup_status = ObRollupStatus::NONE_ROLLUP);
+                               const ObRollupStatus rollup_status = ObRollupStatus::NONE_ROLLUP,
+                               bool force_use_scalar = false);
 
   int candi_allocate_limit(const ObIArray<OrderItem> &order_items);
 
@@ -1201,7 +1202,8 @@ public:
 
   int extract_onetime_subquery(ObRawExpr *expr,
                                ObIArray<ObRawExpr *> &onetime_list,
-                               bool &is_valid);
+                               bool &is_valid,
+                               bool &has_shared_subquery);
 
   int create_onetime_param(ObRawExpr *expr, const ObIArray<ObRawExpr *> &onetime_list);
 

@@ -36,6 +36,8 @@ class ObRowState;
 }
 namespace blocksstable
 {
+extern const char *DDL_EMPTY_SSTABLE_DUMMY_INDEX_DATA_BUF;
+extern const int64_t DDL_EMPTY_SSTABLE_DUMMY_INDEX_DATA_SIZE;
 class ObSSTableSecMetaIterator;
 class ObIMacroBlockIterator;
 struct ObMacroBlocksWriteCtx;
@@ -217,13 +219,27 @@ public:
   {
     return meta_cache_.filled_tx_scn_;
   }
+  OB_INLINE bool has_padding_meta_cache() const
+  {
+    return ObSSTableMetaCache::PADDING == meta_cache_.status_;
+  }
+
   bool is_empty() const
   {
     return 0 == meta_cache_.data_macro_block_count_;
   }
+  virtual bool no_data_to_read() const override
+  {
+    return is_empty() && !is_ddl_merge_sstable();
+  }
+  virtual bool is_ddl_merge_empty_sstable() const override
+  {
+    return is_empty() && is_ddl_merge_sstable();
+  }
   int set_addr(const ObMetaDiskAddr &addr);
   OB_INLINE const ObMetaDiskAddr &get_addr() const { return addr_; }
   OB_INLINE int64_t get_data_macro_block_count() const { return meta_cache_.data_macro_block_count_; }
+  OB_INLINE int64_t get_merged_row_count() const { return is_ddl_merge_empty_sstable() ? INT64_MAX : meta_cache_.row_count_; } // empty ddl_merge_sstable cannot speed up queries
   OB_INLINE int64_t get_macro_offset() const { return meta_cache_.nested_offset_; }
   OB_INLINE int64_t get_macro_read_size() const { return meta_cache_.nested_size_; }
 

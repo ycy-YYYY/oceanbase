@@ -19,6 +19,7 @@
 #include "lib/geo/ob_geo_utils.h"
 #include "share/schema/ob_schema_getter_guard.h"
 #include "share/inner_table/ob_inner_table_schema.h"
+#include "share/ob_lob_access_utils.h"
 #include "sql/session/ob_sql_session_info.h"
 #include "sql/parser/ob_parser.h"
 #include "sql/resolver/dml/ob_select_resolver.h"
@@ -218,7 +219,7 @@ int ObInfoSchemaColumnsTable::iterate_table_schema_array(const bool is_filter_ta
       ret = OB_ERR_UNEXPECTED;
       SERVER_LOG(WARN, "table_schema should not be NULL", K(ret));
     } else {
-      bool is_normal_view = table_schema->is_view_table()&& !table_schema->is_materialized_view();
+      bool is_normal_view = table_schema->is_view_table()&& !table_schema->is_materialized_view() && (table_schema->get_table_state_flag() == ObTableStateFlag::TABLE_STATE_NORMAL || table_schema->get_table_state_flag() == ObTableStateFlag::TABLE_STATE_OFFLINE_DDL);
       //  不显示索引表
       if (table_schema->is_aux_table()
          || table_schema->is_tmp_table()
@@ -234,7 +235,10 @@ int ObInfoSchemaColumnsTable::iterate_table_schema_array(const bool is_filter_ta
       }
       // for system view, its column info depend on hard code, so its valid by default, but do not have column meta
       // status default value is valid, old version also work whether what status it read because its column count = 0
-      bool view_is_invalid = (0 == table_schema->get_object_status() || 0 == table_schema->get_column_count());
+      bool view_is_invalid = (0 == table_schema->get_object_status()
+                              || 0 == table_schema->get_column_count()
+                              || (table_schema->is_sys_view()
+                                  && table_schema->get_schema_version() <= GCTX.start_time_));
       if (OB_FAIL(ret)) {
       } else if (is_normal_view && view_is_invalid) {
         mem_context_->reset_remain_one_page();
@@ -536,19 +540,25 @@ int ObInfoSchemaColumnsTable::fill_row_cells(const ObString &database_name,
           }
         case COLUMN_DEFAULT: {
             casted_cell.reset();
+            cells[cell_idx].reset();
             const ObObj *res_cell = NULL;
             ObObj def_obj = column_schema->get_cur_default_value();
             ObObjType column_type = ObMaxType;
             const ObColumnSchemaV2 *tmp_column_schema = NULL;
             if (OB_ISNULL(table_schema_) ||
-                OB_ISNULL(tmp_column_schema = table_schema_->get_column_schema(col_id))) {
+                OB_ISNULL(tmp_column_schema = table_schema_->get_column_schema(col_id)) ||
+                OB_ISNULL(allocator_)) {
               ret = OB_ERR_UNEXPECTED;
-              SERVER_LOG(WARN, "table or column schema is null", KR(ret), KP(table_schema_), KP(tmp_column_schema));
+              SERVER_LOG(WARN, "table or column schema or or allocator is null", KR(ret), KP(table_schema_), KP(tmp_column_schema), KP(allocator_));
             } else if (FALSE_IT(column_type = tmp_column_schema->get_meta_type().get_type())) {
             } else if (IS_DEFAULT_NOW_OBJ(def_obj)) {
               ObObj def_now_obj;
               def_now_obj.set_string(column_type, ObString::make_string(N_UPPERCASE_CUR_TIMESTAMP));
-              cells[cell_idx] = def_now_obj;
+              if (OB_FAIL(ObTextStringResult::ob_convert_obj_temporay_lob(def_now_obj, *allocator_))) {
+                SERVER_LOG(WARN, "convert lob type obj fail", K(ret), K(def_now_obj));
+              } else {
+                cells[cell_idx] = def_now_obj;
+              }
             } else if (def_obj.is_bit() || ob_is_enum_or_set_type(def_obj.get_type())) {
               char *buf = NULL;
               int64_t buf_len = number::ObNumber::MAX_PRINTABLE_SIZE;
@@ -568,6 +578,10 @@ int ObInfoSchemaColumnsTable::fill_row_cells(const ObString &database_name,
                 } else {
                   cells[cell_idx].set_string(column_type, ObString(static_cast<int32_t>(pos), buf));
                 }
+              }
+              if (OB_FAIL(ret)) {
+              } else if (OB_FAIL(ObTextStringResult::ob_convert_obj_temporay_lob(cells[cell_idx], *allocator_))) {
+                SERVER_LOG(WARN, "convert lob type obj fail", K(ret), K(cells[cell_idx]));
               }
             } else {
               if (OB_FAIL(ObObjCaster::to_type(column_type, cast_ctx,
@@ -977,21 +991,27 @@ int ObInfoSchemaColumnsTable::fill_row_cells(const common::ObString &database_na
           }
         case COLUMN_DEFAULT: {
             casted_cell.reset();
+            cells[cell_idx].reset();
             const ObObj *res_cell = NULL;
             ColumnItem column_item;
             ObObjType column_type = ObMaxType;
             const ObColumnSchemaV2 *tmp_column_schema = NULL;
             if (OB_ISNULL(table_schema_) ||
-                OB_ISNULL(tmp_column_schema = table_schema_->get_column_schema(col_id))) {
+                OB_ISNULL(tmp_column_schema = table_schema_->get_column_schema(col_id)) ||
+                OB_ISNULL(allocator_)) {
               ret = OB_ERR_UNEXPECTED;
-              SERVER_LOG(WARN, "table or column schema is null", KR(ret), KP(table_schema_), KP(tmp_column_schema));
+              SERVER_LOG(WARN, "table or column schema or allocator is null", KR(ret), KP(table_schema_), KP(tmp_column_schema), KP(allocator_));
             } else if (FALSE_IT(column_type = tmp_column_schema->get_meta_type().get_type())) {
             } else if (OB_FAIL(ObResolverUtils::resolve_default_value_and_expr_from_select_item(select_item, column_item, select_stmt))) {
               SERVER_LOG(WARN, "failed to resolve default value", K(ret));
             } else if (IS_DEFAULT_NOW_OBJ(column_item.default_value_)) {
               ObObj def_now_obj;
               def_now_obj.set_string(column_type, ObString::make_string(N_UPPERCASE_CUR_TIMESTAMP));
-              cells[cell_idx] = def_now_obj;
+              if (OB_FAIL(ObTextStringResult::ob_convert_obj_temporay_lob(def_now_obj, *allocator_))) {
+                SERVER_LOG(WARN, "convert lob type obj fail", K(ret), K(def_now_obj));
+              } else {
+                cells[cell_idx] = def_now_obj;
+              }
             } else if (column_item.default_value_.is_bit() || ob_is_enum_or_set_type(column_item.default_value_.get_type())) {
               char *buf = NULL;
               int64_t buf_len = number::ObNumber::MAX_PRINTABLE_SIZE;
@@ -1015,6 +1035,10 @@ int ObInfoSchemaColumnsTable::fill_row_cells(const common::ObString &database_na
                 } else {
                   cells[cell_idx].set_string(column_type, ObString(static_cast<int32_t>(pos), buf));
                 }
+              }
+              if (OB_FAIL(ret)) {
+              } else if (OB_FAIL(ObTextStringResult::ob_convert_obj_temporay_lob(cells[cell_idx], *allocator_))) {
+                SERVER_LOG(WARN, "convert lob type obj fail", K(ret), K(cells[cell_idx]));
               }
             } else {
               if (OB_FAIL(ObObjCaster::to_type(column_type, cast_ctx,

@@ -93,8 +93,9 @@ public:
     tg_id_(0),
     local_schema_version_(OB_INVALID_VERSION),
     has_start_(false),
-    is_paused_(false),
-    dag_ref_cnt_(0)
+    is_leader_(true),
+    dag_ref_cnt_(0),
+    need_do_for_switch_(true)
   {
   }
 
@@ -156,6 +157,7 @@ public:
   int64_t get_dag_ref() const { return ATOMIC_LOAD(&dag_ref_cnt_); }
   int safe_to_destroy(bool &is_safe);
   int sync_all_dirty_task(common::ObIArray<ObTabletID>& dirty_tasks);
+  void run_task();
 private:
   typedef common::hash::ObHashMap<ObTabletID, ObTTLTaskCtx*> TabletTaskMap;
   typedef TabletTaskMap::iterator tablet_task_iter;
@@ -174,8 +176,7 @@ private:
                         cmd_type_(obrpc::ObTTLRequestArg::TTL_INVALID_TYPE),
                         rsp_time_(OB_INVALID_ID),
                         state_(common::ObTTLTaskStatus::OB_TTL_TASK_INVALID),
-                        is_droped_(false),
-                        is_finished_(true)
+                        is_reused_(false)
     {}
     ~ObTTLTenantInfo()
     {
@@ -202,7 +203,7 @@ private:
                  K_(ttl_continue),
                  K_(rsp_time),
                  K_(state),
-                 K_(is_finished));
+                 K_(is_reused));
 
   public:
       TabletTaskMap                     tablet_task_map_;
@@ -216,8 +217,7 @@ private:
       obrpc::ObTTLRequestArg::TTLRequestType         cmd_type_; // deprecated @dazhi
       int64_t                           rsp_time_; // OB_INVALID_ID means no need response
       common::ObTTLTaskStatus           state_;
-      bool                              is_droped_;   // tenant is droped
-      bool                              is_finished_; // all delete task is finished (or canceled)
+      bool                              is_reused_; // all delete task is finished (or canceled)
   };
 
   int alloc_tenant_info(uint64_t tenant_id);
@@ -238,7 +238,8 @@ private:
                                           ObTabletID& tablet_id,
                                           ObTTLStatusFieldArray& filter);
   common::ObMySQLProxy *get_sql_proxy() { return sql_proxy_; }
-  int sync_sys_table(common::ObTabletID& tablet_id);
+  int sync_sys_table_op(ObTTLTaskCtx* ctx, bool force_update, bool &tenant_state_changed);
+  int sync_sys_table(common::ObTabletID& tablet_id, bool &tenant_state_changed);
   int construct_sys_table_record(ObTTLTaskCtx* ctx, common::ObTTLStatus& ttl_record);
   int try_schedule_task(ObTTLTaskCtx* ctx);
   int try_schedule_remaining_tasks(const ObTTLTaskCtx *current_ctx);
@@ -254,11 +255,10 @@ private:
   void mark_tenant_checked();
   int refresh_tablet_task(ObTTLTaskCtx &ttl_task, bool refresh_status, bool refresh_retcode = false);
   int check_schema_version();
-  void resume();
-  void pause();
+  OB_INLINE bool need_skip_run() { return ATOMIC_LOAD(&need_do_for_switch_); }
 private:
   static const int64_t DEFAULT_TTL_BUCKET_NUM = 100;
-  static const int64_t TTL_PERIODIC_DELAY = 5*1000*1000; //5s
+  static const int64_t TTL_PERIODIC_DELAY = 10*1000*1000; //10s
   static const int64_t TBALE_GENERATE_BATCH_SIZE = 200;
   static const int64_t DEFAULT_TABLE_ARRAY_SIZE = 200;
   static const int64_t DEFAULT_TABLET_PAIR_SIZE = 1024;
@@ -278,8 +278,10 @@ private:
   ObArray<share::ObTabletTablePair> tablet_table_pairs_;
   int64_t local_schema_version_;
   bool has_start_;
-  bool is_paused_;
+  bool is_leader_; // current tenant ttl mgr is in leader ls or not
   volatile int64_t dag_ref_cnt_; // ttl dag ref count for current ls
+  // after leader switch, need wait and reset status
+  bool need_do_for_switch_;
 };
 
 } // end namespace table

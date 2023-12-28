@@ -411,6 +411,11 @@ private:
   int advance_checkpoint_by_flush_(const uint64_t tenant_id, const share::ObLSID &ls_id, const share::SCN &start_scn);
   int backup_ls_meta_and_tablet_metas_(const uint64_t tenant_id, const share::ObLSID &ls_id);
   int backup_ls_meta_package_(const ObBackupLSMetaInfo &ls_meta_info);
+  int report_backup_stat_(const int64_t tablet_count, const int64_t macro_block_count);
+  int calc_backup_stat_(const ObBackupSetTaskAttr &set_task_attr,
+      const int64_t tablet_count, const int64_t macro_block_count, ObBackupStats &backup_stats);
+  int calc_ls_backup_stat_(const share::ObBackupStats &old_backup_stat, const int64_t tablet_count,
+      const int64_t macro_block_count, ObBackupStats &backup_stats);
 
 private:
   bool is_inited_;
@@ -491,9 +496,11 @@ private:
       const ObBackupProviderItem &item, bool &need_copy, ObBackupMacroBlockIndex &macro_index);
   int generate_next_prefetch_dag_();
   int generate_backup_dag_(const int64_t task_id, const common::ObIArray<ObBackupProviderItem> &items);
+  void record_server_event_(const int64_t cost_us);
 
 private:
   bool is_inited_;
+  int64_t prefetch_task_id_;
   ObLSBackupDagInitParam param_;
   ObBackupReportCtx report_ctx_;
   share::ObBackupDataType backup_data_type_;
@@ -504,6 +511,8 @@ private:
   ObBackupMacroBlockIndexStore macro_index_store_for_inc_;
   ObBackupMacroBlockIndexStore macro_index_store_for_turn_;
   share::ObIDag *index_rebuild_dag_;
+  int64_t next_prefetch_task_id_;
+  int64_t next_backup_task_id_;
   DISALLOW_COPY_AND_ASSIGN(ObPrefetchBackupInfoTask);
 };
 
@@ -523,6 +532,8 @@ private:
 private:
   int build_backup_file_header_(ObBackupFileHeader &file_header);
   int do_write_file_header_();
+  int get_check_tablet_list_(common::ObIArray<ObTabletID> &tablet_list);
+  int do_check_tablet_valid_();
   int do_backup_macro_block_data_();
   int do_backup_meta_data_();
   int get_tablet_meta_info_(
@@ -531,7 +542,9 @@ private:
   int report_ls_backup_task_info_(const ObLSBackupStat &stat);
   int update_task_stat_(const share::ObBackupStats &old_backup_stat, const ObLSBackupStat &ls_stat,
       share::ObBackupStats &new_backup_stat);
-  int update_task_info_stat_(const ObBackupLSTaskInfo &task_info, const ObLSBackupStat &stat, ObLSBackupStat &new_stat);
+  int update_ls_task_stat_(const share::ObBackupStats &old_backup_stat, const ObLSBackupStat &ls_stat,
+      share::ObBackupStats &new_backup_stat);
+  int update_ls_task_info_stat_(const ObBackupLSTaskInfo &task_info, const ObLSBackupStat &stat, ObLSBackupStat &new_stat);
   int do_generate_next_task_();
   int check_disk_space_();
   int get_macro_block_id_list_(common::ObIArray<ObBackupMacroBlockId> &list);
@@ -588,6 +601,7 @@ private:
   common::ObArray<ObBackupProviderItem> backup_items_;
   common::ObArray<common::ObTabletID> finished_tablet_list_;
   share::ObIDag *index_rebuild_dag_;
+  int64_t next_prefetch_task_id_;
   DISALLOW_COPY_AND_ASSIGN(ObLSBackupDataTask);
 };
 

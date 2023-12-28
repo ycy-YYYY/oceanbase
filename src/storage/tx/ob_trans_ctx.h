@@ -33,7 +33,7 @@
 #include "storage/memtable/ob_memtable_context.h"
 #include "ob_xa_define.h"
 #include "share/rc/ob_context.h"
-#include "ob_trans_hashmap.h"
+#include "share/ob_light_hashmap.h"
 #include "ob_tx_elr_handler.h"
 
 namespace oceanbase
@@ -93,7 +93,7 @@ static inline void protocol_error(const int64_t state, const int64_t msg_type)
 // For Example: If you change the signature of the function `commit` in
 // `ObTransCtx`, you should also modify the signatore of function `commit` in
 // `ObPartTransCtx`, `ObScheTransCtx`
-class ObTransCtx: public ObTransHashLink<ObTransCtx>
+class ObTransCtx: public share::ObLightHashLink<ObTransCtx>
 {
   friend class CtxLock;
 public:
@@ -113,7 +113,7 @@ public:
   virtual ~ObTransCtx() { }
   void reset() { }
 public:
-  void get_ctx_guard(CtxLockGuard &guard);
+  void get_ctx_guard(CtxLockGuard &guard, uint8_t mode = CtxLockGuard::MODE::ALL);
   void print_trace_log();
   // ATTENTION! There is no lock protect
   bool is_too_long_transaction() const
@@ -161,15 +161,14 @@ public:
   const ObAddr &get_addr() const { return addr_; }
   virtual int64_t get_part_trans_action() const { return part_trans_action_; }
   int acquire_ctx_ref() { return acquire_ctx_ref_(); }
-
+  void release_ctx_ref();
   ObITransRpc *get_trans_rpc() const { return rpc_; }
-  void test_lock(ObTxLogCb *log_cb);
 public:
   virtual bool is_inited() const = 0;
   virtual int handle_timeout(const int64_t delay) = 0;
-  virtual int kill(const KillTransArg &arg, ObIArray<ObTxCommitCallback> &cb_array) = 0;
+  virtual int kill(const KillTransArg &arg, ObTxCommitCallback *&cb_list) = 0;
   // thread unsafe
-  VIRTUAL_TO_STRING_KV(KP(this),
+  VIRTUAL_TO_STRING_KV(KP(this), K_(ref),
                        K_(trans_id),
                        K_(tenant_id),
                        K_(is_exiting),
@@ -190,6 +189,7 @@ protected:
   ObITsMgr *get_ts_mgr_();
   bool has_callback_scheduler_();
   int defer_callback_scheduler_(const int ret, const share::SCN &commit_version);
+  int prepare_commit_cb_for_role_change_(const int cb_ret, ObTxCommitCallback *&cb_list);
   int64_t get_remaining_wait_interval_us_()
   {
     return trans_need_wait_wrap_.get_remaining_wait_interval_us();
@@ -202,16 +202,15 @@ protected:
   }
   int acquire_ctx_ref_()
   {
-    ObTransHashLink::inc_ref(1);
+    ObLightHashLink::inc_ref(1);
     TRANS_LOG(DEBUG, "inc tx ctx ref", KPC(this));
     return OB_SUCCESS;
   }
   void release_ctx_ref_()
   {
-    ObTransHashLink::dec_ref(1);
+    ObLightHashLink::dec_ref(1);
     TRANS_LOG(DEBUG, "dec tx ctx ref", KPC(this));
   }
-
   virtual int register_timeout_task_(const int64_t interval_us);
   virtual int unregister_timeout_task_();
   void generate_request_id_();

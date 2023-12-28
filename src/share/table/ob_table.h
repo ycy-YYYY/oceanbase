@@ -339,10 +339,10 @@ class ObTableTTLOperation
 {
 public:
   ObTableTTLOperation(uint64_t tenant_id, uint64_t table_id, const ObTTLTaskParam &para,
-                      uint64_t del_row_limit, ObRowkey start_rowkey)
+                      uint64_t del_row_limit, ObRowkey start_rowkey, uint64_t hbase_cur_version)
   : tenant_id_(tenant_id), table_id_(table_id), max_version_(para.max_version_),
     time_to_live_(para.ttl_), is_htable_(para.is_htable_), del_row_limit_(del_row_limit),
-    start_rowkey_(start_rowkey)
+    start_rowkey_(start_rowkey), hbase_cur_version_(hbase_cur_version)
   {}
 
   ~ObTableTTLOperation() {}
@@ -360,6 +360,7 @@ public:
   bool is_htable_;
   uint64_t del_row_limit_;
   ObRowkey start_rowkey_;
+  uint64_t hbase_cur_version_;
 };
 
 /// common result for ObTable
@@ -863,6 +864,7 @@ public:
   const common::ObIArray<common::ObString>& get_select_columns() const { return properties_names_; };
   static int64_t get_max_packet_buffer_length() { return obrpc::get_max_rpc_packet_size() - (1<<20); }
   static int64_t get_max_buf_block_size() { return get_max_packet_buffer_length() - (1024*1024LL); }
+  TO_STRING_KV(K(properties_names_), K(row_count_), K(buf_.get_position()));
 private:
   static const int64_t DEFAULT_BUF_BLOCK_SIZE = common::OB_MALLOC_BIG_BLOCK_SIZE - (1024*1024LL);
   int alloc_buf_if_need(const int64_t size);
@@ -945,7 +947,8 @@ public:
     : ttl_del_rows_(0),
       max_version_del_rows_(0),
       scan_rows_(0),
-      end_rowkey_()
+      end_rowkey_(),
+      iter_end_ts_(0)
     {}
   ~ObTableTTLOperationResult() {}
   uint64_t get_ttl_del_row() { return ttl_del_rows_; }
@@ -953,12 +956,14 @@ public:
   uint64_t get_del_row() { return ttl_del_rows_ + max_version_del_rows_; }
   uint64_t get_scan_row() { return scan_rows_; }
   common::ObString get_end_rowkey() { return end_rowkey_; }
-  TO_STRING_KV(K_(ttl_del_rows), K_(max_version_del_rows), K_(scan_rows), K_(end_rowkey));
+  int64_t get_end_ts() { return iter_end_ts_; }
+  TO_STRING_KV(K_(ttl_del_rows), K_(max_version_del_rows), K_(scan_rows), K_(end_rowkey), K_(iter_end_ts));
 public:
   uint64_t ttl_del_rows_;
   uint64_t max_version_del_rows_;
   uint64_t scan_rows_;
   common::ObString end_rowkey_;
+  int64_t iter_end_ts_;
 };
 
 struct ObTableMoveReplicaInfo final

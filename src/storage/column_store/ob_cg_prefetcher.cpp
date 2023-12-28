@@ -108,7 +108,7 @@ int ObCGPrefetcher::open_index_root()
   ObMicroIndexInfo index_info;
   index_info.is_root_ = true;
   index_info.cs_row_range_.start_row_id_ = 0;
-  index_info.cs_row_range_.end_row_id_ = sstable_meta_handle_.get_sstable_meta().get_row_count() - 1;
+  index_info.cs_row_range_.end_row_id_ = sstable_meta_handle_.get_sstable_meta().get_end_row_id(sstable_->is_ddl_merge_empty_sstable());
   ObIndexTreeLevelHandle &tree_handle = tree_handles_[0];
   if (OB_FAIL(sstable_->get_index_tree_root(index_block_))) {
     LOG_WARN("Fail to get index block root", K(ret));
@@ -120,7 +120,13 @@ int ObCGPrefetcher::open_index_root()
               true,
               true,
               &index_info))) {
-    LOG_WARN("Fail to open index scanner", K(ret), K(query_range_));
+    if (OB_BEYOND_THE_RANGE != ret) {
+      LOG_WARN("Fail to open index scanner", K(ret), K(query_range_));
+    } else {
+      // empty ddl_merge_sstable with empty ddl_kvs may return OB_BEYOND_THE_RANGE
+      ret = OB_SUCCESS;
+      is_prefetch_end_ = true;
+    }
   } else {
     tree_handle.fetch_idx_ = tree_handle.prefetch_idx_ = 0;
     tree_handle.is_prefetch_end_ = true;
@@ -334,6 +340,7 @@ int ObCGPrefetcher::prefetch_micro_data()
         while (OB_SUCC(ret) && !is_prefetch_end_ && prefetched_cnt < prefetch_depth) {
           prefetch_micro_idx = micro_data_prefetch_idx_ % max_micro_handle_cnt_;
           ObMicroIndexInfo &block_info = micro_data_infos_[prefetch_micro_idx];
+          bool can_agg = false;
           if (access_ctx_->micro_block_handle_mgr_.reach_hold_limit()
               && micro_data_prefetch_idx_ > cur_micro_data_fetch_idx_ + 1) {
             LOG_DEBUG("micro block handle mgr has reach hold limit, stop prefetch", K(prefetch_depth),
@@ -366,7 +373,9 @@ int ObCGPrefetcher::prefetch_micro_data()
             prefetched_cnt++;
             micro_data_prefetch_idx_++;
             tree_handles_[cur_level_].current_block_read_handle().end_prefetched_row_idx_++;
-          } else if (can_agg_micro_index(block_info)) {
+          } else if (OB_FAIL(can_agg_micro_index(block_info, can_agg))) {
+            LOG_WARN("fail to check can agg index info", K(ret), K(block_info), KPC(cg_agg_cells_));
+          } else if (can_agg) {
             if (OB_FAIL(cg_agg_cells_->process(block_info))) {
               LOG_WARN("Fail to agg index info", K(ret));
             } else {
@@ -422,15 +431,19 @@ bool ObCGPrefetcher::contain_rows(const ObCSRange &index_range)
   return (nullptr == filter_bitmap_ || !filter_bitmap_->is_all_false(index_range));
 }
 
-bool ObCGPrefetcher::can_agg_micro_index(const blocksstable::ObMicroIndexInfo &index_info)
+int ObCGPrefetcher::can_agg_micro_index(const blocksstable::ObMicroIndexInfo &index_info, bool &can_agg)
 {
+  int ret = OB_SUCCESS;
   const ObCSRange &index_range = index_info.get_row_range();
-  bool can_agg = nullptr != cg_agg_cells_&&
-                 cg_agg_cells_->can_use_index_info() && index_info.has_agg_data() &&
+  can_agg = nullptr != cg_agg_cells_&&
                  index_range.start_row_id_ >= query_index_range_.start_row_id_ &&
                  index_range.end_row_id_ <= query_index_range_.end_row_id_ &&
                  (nullptr == filter_bitmap_ || filter_bitmap_->is_all_true(index_range));
-  return can_agg;
+  if (can_agg && OB_FAIL(cg_agg_cells_->can_use_index_info(index_info, can_agg))) {
+    LOG_WARN("fail to check index info", K(ret),
+                      K(index_info), KPC(cg_agg_cells_));
+  }
+  return ret;
 }
 
 int ObCGPrefetcher::ObCSIndexTreeLevelHandle::prefetch(
@@ -459,6 +472,7 @@ int ObCGPrefetcher::ObCSIndexTreeLevelHandle::prefetch(
       ObIndexTreeLevelHandle &parent = prefetcher.tree_handles_[level - 1];
       int8_t prefetch_idx = (prefetch_idx_ + 1) % INDEX_TREE_PREFETCH_DEPTH;
       ObMicroIndexInfo &index_info = index_block_read_handles_[prefetch_idx].index_info_;
+      bool can_agg = false;
       if (OB_FAIL(parent.get_next_index_row(prefetcher.iter_param_->has_lob_column_out(),
                                             index_info,
                                             prefetcher))) {
@@ -482,7 +496,9 @@ int ObCGPrefetcher::ObCSIndexTreeLevelHandle::prefetch(
                          *(prefetcher.access_ctx_->allocator_)))) {
         LOG_WARN("Fail to check if can skip prefetch", K(ret), K(index_info));
         // TODO: skip data block which is always_false/always_true and record the result in filter bitmap
-      } else if (prefetcher.can_agg_micro_index(index_info)) {
+      } else if (OB_FAIL(prefetcher.can_agg_micro_index(index_info, can_agg))) {
+        LOG_WARN("fail to check index info", K(ret), K(index_info), KPC(prefetcher.cg_agg_cells_));
+      } else if (can_agg) {
         if (OB_FAIL(prefetcher.cg_agg_cells_->process(index_info))) {
           LOG_WARN("Fail to agg index info", K(ret));
         } else {

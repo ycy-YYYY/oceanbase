@@ -30,6 +30,10 @@
 #include "share/ob_rs_mgr.h"
 #include "share/config/ob_server_config.h"
 #include "common/sql_mode/ob_sql_mode_utils.h"
+#include "share/vector/ob_fixed_length_vector.h"
+#include "share/vector/ob_continuous_vector.h"
+#include "share/vector/ob_uniform_vector.h"
+#include "share/vector/ob_discrete_vector.h"
 #include "sql/ob_sql_context.h"
 #include "sql/ob_result_set.h"
 #include "sql/optimizer/ob_log_plan_factory.h"
@@ -1199,10 +1203,6 @@ ObSql::TimeoutGuard::TimeoutGuard(ObSQLSessionInfo &session)
 {
   int ret = OB_SUCCESS;
   worker_timeout_ = THIS_WORKER.get_timeout_ts();
-  if (OB_FAIL(session_.get_query_timeout(query_timeout_))
-      || OB_FAIL(session_.get_tx_timeout(trx_timeout_))) {
-    LOG_ERROR("get timeout failed", KR(ret), K(query_timeout_), K(trx_timeout_));
-  }
 }
 
 ObSql::TimeoutGuard::~TimeoutGuard()
@@ -1210,24 +1210,6 @@ ObSql::TimeoutGuard::~TimeoutGuard()
   int ret = OB_SUCCESS;
   if (THIS_WORKER.get_timeout_ts() != worker_timeout_) {
     THIS_WORKER.set_timeout_ts(worker_timeout_);
-  }
-  int64_t query_timeout = 0;
-  int64_t trx_timeout = 0;
-  if (OB_FAIL(session_.get_query_timeout(query_timeout))
-      || OB_FAIL(session_.get_tx_timeout(trx_timeout))) {
-    LOG_ERROR("get timeout failed", KR(ret), K(query_timeout), K(trx_timeout));
-  } else {
-    if (query_timeout != query_timeout_ || trx_timeout != trx_timeout_) {
-      ObObj query_val, trx_val;
-      query_val.set_int(query_timeout_);
-      trx_val.set_int(trx_timeout_);
-      if (OB_FAIL(ret)) {
-      } else if (OB_FAIL(session_.update_sys_variable(SYS_VAR_OB_QUERY_TIMEOUT, query_val))) {
-        LOG_WARN("set sys variable failed", K(ret), K(OB_SV_QUERY_TIMEOUT), K(query_val));
-      } else if (OB_FAIL(session_.update_sys_variable(SYS_VAR_OB_TRX_TIMEOUT, trx_val))) {
-        LOG_WARN("set sys variable failed", K(ret), K(OB_SV_TRX_TIMEOUT), K(trx_val));
-      }
-    }
   }
 }
 
@@ -2806,6 +2788,7 @@ int ObSql::generate_stmt(ParseResult &parse_result,
       context.all_expr_constraints_ = &(resolver_ctx.query_ctx_->all_expr_constraints_);
       context.all_priv_constraints_ = &(resolver_ctx.query_ctx_->all_priv_constraints_);
       context.need_match_all_params_ = resolver_ctx.query_ctx_->need_match_all_params_;
+      context.all_local_session_vars_ = &(resolver_ctx.query_ctx_->all_local_session_vars_);
       context.cur_stmt_ = stmt;
       context.res_map_rule_id_ = resolver_ctx.query_ctx_->res_map_rule_id_;
       context.res_map_rule_param_idx_ = resolver_ctx.query_ctx_->res_map_rule_param_idx_;
@@ -3132,6 +3115,7 @@ int ObSql::generate_plan(ParseResult &parse_result,
       LOG_ERROR("Failed to alloc physical plan from tc factory", K(ret));
     } else {
       // update is_use_jit flag
+      phy_plan->set_use_rich_format(sql_ctx.session_info_->use_rich_format());
       phy_plan->stat_.is_use_jit_ = use_jit;
       phy_plan->stat_.enable_early_lock_release_ = sql_ctx.session_info_->get_early_lock_release();
       // if phy_plan's tenant id, which refers the tenant who create this plan,
@@ -3617,6 +3601,12 @@ int ObSql::code_generate(
       last_mem_usage = phy_plan->get_mem_size();
     }
   }
+  //add local_session_var array to phy_plan_ctx
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(phy_plan->set_all_local_session_vars(sql_ctx.all_local_session_vars_))) {
+      LOG_WARN("set all local sesson vars failed", K(ret));
+    }
+  }
   NG_TRACE(cg_end);
 
   // set phy table location in task_exec_ctx, query_timeout in exec_context
@@ -3768,6 +3758,8 @@ OB_INLINE int ObSql::init_exec_context(const ObSqlCtx &context, ObExecContext &e
       context.session_info_->get_query_timeout(query_timeout);
       exec_ctx.get_physical_plan_ctx()->set_timeout_timestamp(
         context.session_info_->get_query_start_time() + query_timeout);
+      exec_ctx.get_physical_plan_ctx()->set_rich_format(
+         context.session_info_->use_rich_format());
     }
   }
   return ret;
@@ -3870,7 +3862,16 @@ int ObSql::pc_get_plan(ObPlanCacheCtx &pc_ctx,
       //inner sql不能丢入大查询队列, 因为有可能上层查询已有数据返回客户端
     } else {
       get_plan_err = ret;
-      ret = OB_SUCCESS; //get plan出错, 覆盖错误码, 确保因plan cache的错误不影响正常执行路径
+      int tmp_ret = OB_SUCCESS;
+      tmp_ret = OB_E(EventTable::EN_PC_NOT_SWALLOW_ERROR) OB_SUCCESS;
+      if (OB_SUCCESS != tmp_ret) {
+         // do nothing
+        if (OB_SQL_PC_NOT_EXIST == ret) {
+          ret = OB_SUCCESS;
+        }
+      } else {
+        ret = OB_SUCCESS; //get plan出错, 覆盖错误码, 确保因plan cache的错误不影响正常执行路径
+      }
     }
   } else { //get plan 成功
     plan_cache->inc_hit_and_access_cnt();
@@ -4351,7 +4352,12 @@ int ObSql::pc_add_plan(ObPlanCacheCtx &pc_ctx,
       ret = plan_cache->add_plan(phy_plan, pc_ctx);
     }
     plan_added = (OB_SUCCESS == ret);
+    if (pc_ctx.is_max_curr_limit_) {
+      ret = OB_REACH_MAX_CONCURRENT_NUM;
+    }
 
+    int tmp_ret = OB_SUCCESS;
+    tmp_ret = OB_E(EventTable::EN_PC_NOT_SWALLOW_ERROR) OB_SUCCESS;
     if (is_batch_exec) {
       // Batch optimization cannot continue for errors other than OB_SQL_PC_PLAN_DUPLICATE.
       if (OB_SQL_PC_PLAN_DUPLICATE == ret) {
@@ -4379,9 +4385,13 @@ int ObSql::pc_add_plan(ObPlanCacheCtx &pc_ctx,
       ret = OB_SUCCESS;
       LOG_DEBUG("plan cache don't support add this kind of plan now",  K(phy_plan));
     } else if (OB_FAIL(ret)) {
-      if (OB_REACH_MAX_CONCURRENT_NUM != ret) { //如果是达到限流上限, 则将错误码抛出去
-        ret = OB_SUCCESS; //add plan出错, 覆盖错误码, 确保因plan cache失败不影响正常执行路径
-        LOG_WARN("Failed to add plan to ObPlanCache", K(ret));
+      if (OB_SUCCESS != tmp_ret) {
+
+      } else {
+        if (OB_REACH_MAX_CONCURRENT_NUM != ret) { //如果是达到限流上限, 则将错误码抛出去
+          ret = OB_SUCCESS; //add plan出错, 覆盖错误码, 确保因plan cache失败不影响正常执行路径
+          LOG_WARN("Failed to add plan to ObPlanCache", K(ret));
+        }
       }
     } else {
       pc_ctx.sql_ctx_.self_add_plan_ = true;
@@ -4603,6 +4613,11 @@ int ObSql::after_get_plan(ObPlanCacheCtx &pc_ctx,
                                                phy_plan->get_gtt_trans_scope_ids()))) {
           LOG_WARN("fail to append array", K(ret));
         }
+      }
+    }
+    if (OB_SUCC(ret) && NULL != phy_plan && !phy_plan->is_remote_plan()) {
+      if (OB_FAIL(pctx->set_all_local_session_vars(phy_plan->get_all_local_session_vars()))) {
+        LOG_WARN("fail to set all local session vars", K(ret));
       }
     }
   } else {

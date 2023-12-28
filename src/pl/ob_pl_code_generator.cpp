@@ -3025,7 +3025,15 @@ int ObPLCodeGenerateVisitor::visit(const ObPLGotoStmt &s)
             }\
           }\
           if (OB_SUCC(ret)) { \
-            if (OB_SUCC(ret) && OB_FAIL(generator_.get_helper().create_br(goto_dst))) { \
+            ObSEArray<ObLLVMValue, 1> args;    \
+            ObLLVMValue result;                \
+            if (OB_FAIL(args.push_back(generator_.get_vars().at(generator_.CTX_IDX)))) {    \
+              LOG_WARN("fail to push back.", K(ret));               \
+            } else if (OB_FAIL(generator_.get_helper().create_call(ObString("check_early_exit"), generator_.get_spi_service().spi_check_early_exit_, args, result))) { \
+              LOG_WARN("fail to create call check_early_exit", K(ret));      \
+            } else if (OB_FAIL(generator_.check_success(result, s.get_stmt_id(), s.get_block()->in_notfound(), s.get_block()->in_warning()))) {   \
+              LOG_WARN("fail to check success", K(ret));  \
+            } else if (OB_FAIL(generator_.get_helper().create_br(goto_dst))) { \
               LOG_WARN("failed to create br instr", K(ret)); \
             }\
           }\
@@ -3527,7 +3535,37 @@ int ObPLCodeGenerator::build_opaque_type(const ObUserDefinedType &opaque_type,
 int ObPLCodeGenerator::init()
 {
   int ret = OB_SUCCESS;
-  if (debug_mode_ && OB_FAIL(di_helper_.init(helper_.get_jc()))) {
+
+  // CG local types + external types at least, so pre-allocate doubled buckets
+  // bucket number will grow up automatically if udt_count_guess is not enough
+  int64_t udt_count_guess =
+      (ast_.get_user_type_table().get_count() +
+        ast_.get_user_type_table().get_external_types().count()) * 2;
+
+  // make udt_count_guess at least 64, to prevent size grow up frequently in bad case
+  if (udt_count_guess < 64) {
+    udt_count_guess = 64;
+  }
+
+  int64_t goto_label_count_guess = 64;
+  if (OB_NOT_NULL(ast_.get_body()) &&
+       ast_.get_body()->get_stmts().count() > goto_label_count_guess) {
+    goto_label_count_guess = ast_.get_body()->get_stmts().count();
+  }
+
+  if (OB_FAIL(user_type_map_.create(
+               udt_count_guess,
+               ObMemAttr(MTL_ID(), GET_PL_MOD_STRING(OB_PL_CODE_GEN))))){
+    LOG_WARN("failed to create user_type_map_", K(ret), K(udt_count_guess));
+  } else if (OB_FAIL(di_user_type_map_.create(
+                      udt_count_guess,
+                      ObMemAttr(MTL_ID(), GET_PL_MOD_STRING(OB_PL_CODE_GEN))))){
+    LOG_WARN("failed to create di_user_type_map_", K(ret), K(udt_count_guess));
+  } else if (OB_FAIL(goto_label_map_.create(
+                      goto_label_count_guess,
+                      ObMemAttr(MTL_ID(), GET_PL_MOD_STRING(OB_PL_CODE_GEN))))) {
+    LOG_WARN("failed to create goto_label_map_", K(ret), K(goto_label_count_guess));
+  } else if (debug_mode_ && OB_FAIL(di_helper_.init(helper_.get_jc()))) {
     LOG_WARN("failed to init di helper", K(ret));
   } else if (OB_FAIL(init_spi_service())) {
     LOG_WARN("failed to init spi service", K(ret));

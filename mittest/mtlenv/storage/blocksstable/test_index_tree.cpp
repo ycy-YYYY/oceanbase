@@ -32,7 +32,7 @@
 #include "storage/memtable/ob_memtable_interface.h"
 #include "storage/ob_i_store.h"
 #include "storage/compaction/ob_tenant_freeze_info_mgr.h"
-#include "storage/blocksstable/index_block/ob_index_block_macro_iterator.h"
+#include "storage/blocksstable/index_block/ob_index_block_dual_meta_iterator.h"
 #include "mtlenv/mock_tenant_module_env.h"
 #include "share/scn.h"
 #include "storage/blocksstable/ob_shared_macro_block_manager.h"
@@ -1296,7 +1296,7 @@ TEST_F(TestIndexTree, test_reuse_macro_block)
 
 TEST_F(TestIndexTree, DISABLED_test_writer_try_to_append_row)
 {
-  // TODO(zhuixin.gsy) fix try_to_append_row, enable this case
+  // fix try_to_append_row, enable this case
   int ret = OB_SUCCESS;
   ObDatumRow row;
   OK(row.init(allocator_, TEST_COLUMN_CNT));
@@ -1320,7 +1320,6 @@ TEST_F(TestIndexTree, DISABLED_test_writer_try_to_append_row)
   }
   OK(micro_writer->build_micro_block_desc(micro_block_desc));
   const int64_t need_store_size = micro_block_desc.buf_size_ + micro_block_desc.header_->header_size_;
-  STORAGE_LOG(INFO, "zhuixin debug block", K(micro_block_desc));
 
   { // set size upper bound after reuse
     micro_writer->reuse();

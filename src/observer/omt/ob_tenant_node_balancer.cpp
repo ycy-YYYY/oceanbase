@@ -136,6 +136,21 @@ void ObTenantNodeBalancer::run1()
   }
 }
 
+int ObTenantNodeBalancer::handle_notify_unit_resource(const obrpc::TenantServerUnitConfig &arg)
+{
+  int ret = OB_SUCCESS;
+  if (!arg.is_delete_) {
+    if (OB_FAIL(notify_create_tenant(arg))) {
+      LOG_WARN("failed to notify update tenant", KR(ret), K(arg));
+    }
+  } else {
+    if (OB_FAIL(try_notify_drop_tenant(arg.tenant_id_))) {
+      LOG_WARN("fail to try drop tenant", KR(ret), K(arg));
+    }
+  }
+  return ret;
+}
+
 int ObTenantNodeBalancer::notify_create_tenant(const obrpc::TenantServerUnitConfig &unit)
 {
   LOG_INFO("succ to receive notify of creating tenant", K(unit));
@@ -197,10 +212,22 @@ int ObTenantNodeBalancer::notify_create_tenant(const obrpc::TenantServerUnitConf
       LOG_INFO("succ to create new user tenant", KR(ret), K(unit), K(basic_tenant_unit), K(create_tenant_timeout_ts));
     }
 #ifdef OB_BUILD_TDE_SECURITY
-    if (OB_SUCC(ret) && is_user_tenant(tenant_id)) {
-      ObRootKey root_key;
-      if (OB_FAIL(ObMasterKeyGetter::instance().get_root_key(tenant_id, root_key, true))) {
-        LOG_WARN("failed to get root key", K(ret));
+    // get and set root_key
+    if (OB_SUCC(ret)) {
+      if (!unit.with_root_key_) {
+        ObRootKey root_key;
+        if (OB_FAIL(ObMasterKeyGetter::instance().get_root_key(tenant_id, root_key, true))) {
+          LOG_WARN("failed to get root key", KR(ret));
+        }
+      } else {
+        const obrpc::ObRootKeyResult &root_key = unit.root_key_;
+        if (obrpc::RootKeyType::INVALID == root_key.key_type_) {
+          // do nothing
+          LOG_INFO("root_key got from RS is INVALID, won't set now", KR(ret));
+        } else if (OB_FAIL(ObMasterKeyGetter::instance().set_root_key(
+                            tenant_id, root_key.key_type_, root_key.root_key_))) {
+          LOG_WARN("failed to set root_key", KR(ret));
+        }
       }
     }
 #endif
@@ -485,6 +512,32 @@ int ObTenantNodeBalancer::fetch_effective_tenants(const TenantUnits &old_tenants
         } else {
           // check ls service safe to destroy.
           is_released = MTL(ObLSService *)->safe_to_destroy();
+        }
+
+        bool is_tenant_snapshot_released = false;
+        if (is_user_tenant(tenant_config.tenant_id_)) {
+          const int64_t now_time = ObTimeUtility::current_time();
+          const int64_t life_time = now_time - tenant_config.create_timestamp_;
+          if (tenant_config.is_removed_ || life_time >= RECYCLE_LATENCY) {
+            MTL(ObTenantSnapshotService*)->notify_unit_is_deleting();
+          }
+          if (OB_FAIL(MTL(ObTenantSnapshotService*)->
+                check_all_tenant_snapshot_released(is_tenant_snapshot_released))) {
+            LOG_WARN("fail to check_all_tenant_snapshot_released", K(ret), K(tenant_config));
+          } else if (!is_tenant_snapshot_released) {
+            // can not release now. dump some debug info
+            const uint64_t interval = 180 * 1000 * 1000; // 180s
+            if (!is_tenant_snapshot_released && REACH_TIME_INTERVAL(interval)) {
+              MTL(ObTenantSnapshotService*)->dump_all_tenant_snapshot_info();
+            }
+            LOG_INFO("[DELETE_TENANT] tenant has been dropped, tenant snapshot is still waiting for gc",
+                K(tenant_config));
+          }
+          if (OB_SUCC(ret)) {
+            is_released = is_released && is_tenant_snapshot_released;
+          } else {
+            is_released = false;
+          }
         }
       }
 

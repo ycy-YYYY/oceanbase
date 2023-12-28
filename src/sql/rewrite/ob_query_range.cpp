@@ -180,6 +180,9 @@ int ObQueryRange::init_query_range_ctx(ObIAllocator &allocator,
     query_range_ctx_->phy_rowid_for_table_loc_ = phy_rowid_for_table_loc;
     query_range_ctx_->ignore_calc_failure_ = ignore_calc_failure;
     query_range_ctx_->range_optimizer_max_mem_size_ = exec_ctx->get_my_session()->get_range_optimizer_max_mem_size();
+    if (0 == query_range_ctx_->range_optimizer_max_mem_size_) {
+      query_range_ctx_->range_optimizer_max_mem_size_ = INT64_MAX;
+    }
     query_range_ctx_->use_in_optimization_ = use_in_optimization;
   }
   for (int64_t i = 0; OB_SUCC(ret) && i < range_columns.count(); ++i) {
@@ -840,6 +843,16 @@ int ObQueryRange::preliminary_extract_query_range(const ColumnIArray &range_colu
       state_ = NEED_PREPARE_PARAMS;
     } else {
       state_ = CAN_READ;
+      // If query range need final extract, final stage will perform FINAL_EXTRACT() to merge
+      // duplicate range. If final extract doesn't needed, or_range_graph is needed here to
+      // merge duplicate range.
+      ObKeyPartList or_array;
+      if (!or_array.add_last(temp_result)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("Add query graph to list failed", K(ret));
+      } else if (OB_FAIL(or_range_graph(or_array, exec_ctx, temp_result, dtc_params))) {
+        LOG_WARN("Do OR of range graph failed", K(ret));
+      }
     }
   }
   destroy_query_range_ctx(ctx_allocator);
@@ -1561,66 +1574,70 @@ int ObQueryRange::get_rowid_key_part(const ObRawExpr *l_expr,
           LOG_WARN("failed to get final expr idx", K(ret));
         }
       }
-      for (int64_t i = 0; OB_SUCC(ret) && i < pk_column_items.count(); ++i) {
-        const ObColumnRefRawExpr *column_item = pk_column_items.at(i);
-        ObKeyPartId key_part_id(column_item->get_table_id(), column_item->get_column_id());
-        ObKeyPartPos *key_part_pos = nullptr;
-        bool b_is_key_part = false;
-        tmp_key_part = NULL;
-        if (OB_FAIL(is_key_part(key_part_id, key_part_pos, b_is_key_part))) {
-          LOG_WARN("is_key_part failed", K(ret));
-        } else if (!b_is_key_part) {
-          if (is_physical_rowid &&
-              query_range_ctx_->phy_rowid_for_table_loc_ &&
-              table_id != common::OB_INVALID_ID &&
-              part_column_id != common::OB_INVALID_ID) {
-            key_part_id.table_id_ = table_id;
-            key_part_id.column_id_ = part_column_id;
-          }
+      if (is_physical_rowid && column_count_ != 1 && !query_range_ctx_->phy_rowid_for_table_loc_) {
+        GET_ALWAYS_TRUE_OR_FALSE(true, out_key_part);
+      } else {
+        for (int64_t i = 0; OB_SUCC(ret) && i < pk_column_items.count(); ++i) {
+          const ObColumnRefRawExpr *column_item = pk_column_items.at(i);
+          ObKeyPartId key_part_id(column_item->get_table_id(), column_item->get_column_id());
+          ObKeyPartPos *key_part_pos = nullptr;
+          bool b_is_key_part = false;
+          tmp_key_part = NULL;
           if (OB_FAIL(is_key_part(key_part_id, key_part_pos, b_is_key_part))) {
             LOG_WARN("is_key_part failed", K(ret));
+          } else if (!b_is_key_part) {
+            if (is_physical_rowid &&
+                query_range_ctx_->phy_rowid_for_table_loc_ &&
+                table_id != common::OB_INVALID_ID &&
+                part_column_id != common::OB_INVALID_ID) {
+              key_part_id.table_id_ = table_id;
+              key_part_id.column_id_ = part_column_id;
+            }
+            if (OB_FAIL(is_key_part(key_part_id, key_part_pos, b_is_key_part))) {
+              LOG_WARN("is_key_part failed", K(ret));
+            }
           }
-        }
-        if (OB_FAIL(ret) || !b_is_key_part) {
-          GET_ALWAYS_TRUE_OR_FALSE(true, tmp_key_part);
-        } else if (OB_ISNULL(key_part_pos)) {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("get null key part pos");
-        } else if (OB_ISNULL((tmp_key_part = create_new_key_part()))) {
-          ret = OB_ALLOCATE_MEMORY_FAILED;
-          LOG_ERROR("alloc memory failed", K(ret));
-        } else {
-          ObObj tmp_val = val;
-          tmp_key_part->rowid_column_idx_ = i;
-          tmp_key_part->is_phy_rowid_key_part_ = is_physical_rowid;
-          tmp_key_part->id_ = key_part_id;
-          tmp_key_part->pos_ = *key_part_pos;
-          tmp_key_part->null_safe_ = false;
-          //if current expr can be extracted to range, just store the expr
-          if (c_type != T_OP_LIKE) {
-            bool is_inconsistent_rowid = false;
-            if (tmp_val.is_urowid()) {
-              if (OB_FAIL(get_result_value_with_rowid(*tmp_key_part,
-                                                      tmp_val,
-                                                      *query_range_ctx_->exec_ctx_,
-                                                      is_inconsistent_rowid))) {
-                LOG_WARN("failed to get result value", K(ret));
-              } else if (is_inconsistent_rowid) {
-                GET_ALWAYS_TRUE_OR_FALSE(false, tmp_key_part);
+          if (OB_FAIL(ret) || !b_is_key_part) {
+            GET_ALWAYS_TRUE_OR_FALSE(true, tmp_key_part);
+          } else if (OB_ISNULL(key_part_pos)) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("get null key part pos");
+          } else if (OB_ISNULL((tmp_key_part = create_new_key_part()))) {
+            ret = OB_ALLOCATE_MEMORY_FAILED;
+            LOG_ERROR("alloc memory failed", K(ret));
+          } else {
+            ObObj tmp_val = val;
+            tmp_key_part->rowid_column_idx_ = i;
+            tmp_key_part->is_phy_rowid_key_part_ = is_physical_rowid;
+            tmp_key_part->id_ = key_part_id;
+            tmp_key_part->pos_ = *key_part_pos;
+            tmp_key_part->null_safe_ = false;
+            //if current expr can be extracted to range, just store the expr
+            if (c_type != T_OP_LIKE) {
+              bool is_inconsistent_rowid = false;
+              if (tmp_val.is_urowid()) {
+                if (OB_FAIL(get_result_value_with_rowid(*tmp_key_part,
+                                                        tmp_val,
+                                                        *query_range_ctx_->exec_ctx_,
+                                                        is_inconsistent_rowid))) {
+                  LOG_WARN("failed to get result value", K(ret));
+                } else if (is_inconsistent_rowid) {
+                  GET_ALWAYS_TRUE_OR_FALSE(false, tmp_key_part);
+                }
+              }
+              if (OB_FAIL(ret) || is_inconsistent_rowid) {
+              } else if (OB_FAIL(get_normal_cmp_keypart(c_type, tmp_val, *tmp_key_part))) {
+                LOG_WARN("get normal cmp keypart failed", K(ret));
               }
             }
-            if (OB_FAIL(ret) || is_inconsistent_rowid) {
-            } else if (OB_FAIL(get_normal_cmp_keypart(c_type, tmp_val, *tmp_key_part))) {
-              LOG_WARN("get normal cmp keypart failed", K(ret));
-            }
           }
-        }
-        if (OB_FAIL(ret)) {
-        } else if (OB_FAIL(add_and_item(key_part_list, tmp_key_part))) {
-          LOG_WARN("Add basic query key part failed", K(ret));
-        } else if (pk_column_items.count() - 1 == i &&
-                   OB_FAIL(and_range_graph(key_part_list, out_key_part))) {
-          LOG_WARN("and basic query key part failed", K(ret));
+          if (OB_FAIL(ret)) {
+          } else if (OB_FAIL(add_and_item(key_part_list, tmp_key_part))) {
+            LOG_WARN("Add basic query key part failed", K(ret));
+          } else if (pk_column_items.count() - 1 == i &&
+                    OB_FAIL(and_range_graph(key_part_list, out_key_part))) {
+            LOG_WARN("and basic query key part failed", K(ret));
+          }
         }
       }
     }
@@ -4198,12 +4215,30 @@ int ObQueryRange::intersect_border_from(const ObKeyPart *l_key_part,
       e_need_continue = true;
     } else if (l_key_part->has_intersect(r_key_part)) {
       // incase here is last
-      if (NULL == l_key_part->and_next_) {
-        start_border_type = left_is_equal ? OB_FROM_LEFT : OB_FROM_RIGHT;
+      if (l_key_part->is_equal_condition() && r_key_part->is_equal_condition()) {
+        if (NULL == l_key_part->and_next_ || NULL == r_key_part->and_next_) {
+        start_border_type = (NULL == l_key_part->and_next_) ? OB_FROM_RIGHT : OB_FROM_LEFT;
         end_border_type = start_border_type;
+        } else {
+          s_need_continue = true;
+          e_need_continue = true;
+        }
       } else {
-        s_need_continue = true;
-        e_need_continue = true;
+        const ObKeyPart *equal_key = left_is_equal ? l_key_part : r_key_part;
+        const ObKeyPart *other_key = left_is_equal ? r_key_part : l_key_part;
+        if ((0 == equal_key->normal_keypart_->start_.compare(other_key->normal_keypart_->start_) && other_key->normal_keypart_->include_start_) ||
+            (0 == equal_key->normal_keypart_->start_.compare(other_key->normal_keypart_->end_) && other_key->normal_keypart_->include_end_)) {
+          if (NULL == equal_key->and_next_) {
+            start_border_type = left_is_equal ? OB_FROM_LEFT : OB_FROM_RIGHT;
+            end_border_type = start_border_type;
+          } else {
+            s_need_continue = true;
+            e_need_continue = true;
+          }
+        } else {
+          start_border_type = left_is_equal ? OB_FROM_LEFT : OB_FROM_RIGHT;
+          end_border_type = start_border_type;
+        }
       }
     } else {
       is_always_false = true;
@@ -4379,7 +4414,7 @@ int ObQueryRange::set_partial_row_border(
         } else {
           // do nothing
         }
-        ObKeyPart *item = NULL != l_cur ? l_cur->item_next_ : NULL;
+        ObKeyPart *item = NULL != l_cur && l_cur->pos_.offset_ == new_key_part->pos_.offset_ ? l_cur->item_next_ : NULL;
         while (OB_SUCC(ret) && NULL != item) {
           ObKeyPart *new_item = NULL;
           if (OB_ISNULL(new_item = deep_copy_key_part(item))) {
@@ -4391,7 +4426,7 @@ int ObQueryRange::set_partial_row_border(
             item = item->item_next_;
           }
         }
-        item = NULL != r_cur ? r_cur->item_next_ : NULL;
+        item = NULL != r_cur && r_cur->pos_.offset_ == new_key_part->pos_.offset_ ? r_cur->item_next_ : NULL;
         while (OB_SUCC(ret) && NULL != item) {
           ObKeyPart *new_item = NULL;
           if (OB_ISNULL(new_item = deep_copy_key_part(item))) {
@@ -4521,7 +4556,7 @@ int ObQueryRange::do_row_gt_and(ObKeyPart *l_gt, ObKeyPart *r_gt, ObKeyPart  *&r
             LOG_WARN("Find row border failed", K(ret));
           } else if (is_always_false) {
             result->normal_keypart_->always_false_ = true;
-            result->normal_keypart_->always_true_ = true;
+            result->normal_keypart_->always_true_ = false;
             result->normal_keypart_->start_.set_max_value();
             result->normal_keypart_->end_.set_min_value();
             find_false = result;
@@ -9017,49 +9052,81 @@ int ObQueryRange::get_geo_coveredby_keypart(uint32_t input_srid,
         query_range_ctx_->cur_expr_is_precise_ = false;
         exec_ctx = query_range_ctx_->exec_ctx_;
       }
-      ObKeyPartList and_ranges;
+      ObKeyPart *head = nullptr;
+      ObKeyPart *last = nullptr;
+      hash::ObHashSet<uint64_t> cellid_set;
+      if (OB_FAIL(cellid_set.create(128, "CoveredByKeyPart", "HashNode"))) {
+        LOG_WARN("failed to create cellid set", K(ret));
+      } else if (!cellid_set.created()) {
+        ret = OB_NOT_INIT;
+        LOG_WARN("fail to init cellid set", K(ret));
+      }
       for (uint64_t i = 0; OB_SUCC(ret) && i < cells.size(); i++) {
-        ObKeyPart *head = NULL;
-        ObKeyPart *last = NULL;
-        if (OB_ISNULL((head = create_new_key_part()))) {
-          ret = OB_ALLOCATE_MEMORY_FAILED;
-          LOG_ERROR("alloc memory failed", K(ret));
-        } else {
-          ObObj val;
-          val.set_uint64(cells[i]);
-          head->id_ = out_key_part->id_;
-          head->pos_ = out_key_part->pos_;
-          if (OB_FAIL(get_geo_single_keypart(val, val, *head))) {
-            LOG_WARN("get normal cmp keypart failed", K(ret));
-          } else {
-            last = head;
-          }
-        }
-        ObS2Cellids ancestors;
-        if (OB_FAIL(s2object->get_ancestors(cells[i], ancestors))) {
-          LOG_WARN("Get ancestors of cell failed", K(ret));
-        }
-        for (uint64_t i = 0; OB_SUCC(ret) && i < ancestors.size(); i++) {
-          ObKeyPart *tmp = NULL;
-          if (OB_ISNULL((tmp = create_new_key_part()))) {
+        int hash_ret = cellid_set.exist_refactored(cells[i]);
+        if (OB_HASH_NOT_EXIST == hash_ret) {
+          ObKeyPart *cell_head = nullptr;
+          ObKeyPart *cell_last = nullptr;
+          if (OB_FAIL(cellid_set.set_refactored(cells[i]))) {
+            LOG_WARN("failed to add cellid into set", K(ret));
+          } else if (OB_ISNULL((cell_head = create_new_key_part()))) {
             ret = OB_ALLOCATE_MEMORY_FAILED;
             LOG_ERROR("alloc memory failed", K(ret));
           } else {
             ObObj val;
-            val.set_uint64(ancestors[i]);
-            tmp->id_ = out_key_part->id_;
-            tmp->pos_ = out_key_part->pos_;
-            if (OB_FAIL(get_geo_single_keypart(val, val, *tmp))) {
+            val.set_uint64(cells[i]);
+            cell_head->id_ = out_key_part->id_;
+            cell_head->pos_ = out_key_part->pos_;
+            if (OB_FAIL(get_geo_single_keypart(val, val, *cell_head))) {
               LOG_WARN("get normal cmp keypart failed", K(ret));
             } else {
-              last->or_next_ = tmp;
-              last = tmp;
+              cell_last = cell_head;
             }
           }
-        }
-        if (!and_ranges.add_last(head)) {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("Add key part range failed", K(ret));
+          ObS2Cellids ancestors;
+          if (OB_FAIL(ret)) {
+          } else if (OB_FAIL(s2object->get_ancestors(cells[i], ancestors))) {
+            LOG_WARN("Get ancestors of cell failed", K(ret));
+          }
+          // if cur cellid is exists in set, then it's ancestors also exist in set
+          int hash_ret = OB_HASH_NOT_EXIST;
+          for (uint64_t i = 0; OB_SUCC(ret) && i < ancestors.size(); i++) {
+            hash_ret = cellid_set.exist_refactored(ancestors[i]);
+            if (hash_ret == OB_HASH_NOT_EXIST) {
+              ObKeyPart *tmp = NULL;
+              if (OB_FAIL(cellid_set.set_refactored(ancestors[i]))) {
+                LOG_WARN("failed to add cellid into set", K(ret));
+              } else if (OB_ISNULL((tmp = create_new_key_part()))) {
+                ret = OB_ALLOCATE_MEMORY_FAILED;
+                LOG_ERROR("alloc memory failed", K(ret));
+              } else {
+                ObObj val;
+                val.set_uint64(ancestors[i]);
+                tmp->id_ = out_key_part->id_;
+                tmp->pos_ = out_key_part->pos_;
+                if (OB_FAIL(get_geo_single_keypart(val, val, *tmp))) {
+                  LOG_WARN("get normal cmp keypart failed", K(ret));
+                } else {
+                  cell_last->or_next_ = tmp;
+                  cell_last = tmp;
+                }
+              }
+            } else if (OB_HASH_EXIST != hash_ret) {
+              ret = hash_ret;
+              LOG_WARN("fail to check if key exist", K(ret), K(ancestors[i]), K(i));
+            }
+          }
+
+          if (OB_SUCC(ret)) {
+            if (OB_ISNULL(head)) {
+              head = cell_head;
+            } else {
+              last->or_next_ = cell_head;
+            }
+            last = cell_last;
+          }
+        } else if (OB_HASH_EXIST != hash_ret) {
+          ret = hash_ret;
+          LOG_WARN("fail to check if key exist", K(ret), K(cells[i]), K(i));
         }
       }
 
@@ -9071,31 +9138,15 @@ int ObQueryRange::get_geo_coveredby_keypart(uint32_t input_srid,
       } else {
         query_range_ctx_ = new(ptr) ObQueryRangeCtx(exec_ctx, NULL, NULL);
       }
-      ObKeyPart *temp_result = NULL;
+
       ObS2Cellids cells_cover_geo;
-      ObSqlBitSet<> key_offsets;
-      if (OB_FAIL(ret)) {
-      } else if (OB_FAIL(and_range_graph(and_ranges, temp_result))) {
-        LOG_WARN("And query range failed", K(ret));
-      } else if (NULL == temp_result) {
-        // no range left
-      } else if (OB_FAIL(refine_large_range_graph(temp_result))) {
-        LOG_WARN("failed to refine large range graph", K(ret));
-      } else if (OB_FAIL(remove_useless_range_graph(temp_result, key_offsets))) {
-        LOG_WARN("failed to remove useless range", K(ret));
-      } else if (OB_FAIL(s2object->get_cellids(cells_cover_geo, false))) {
-          LOG_WARN("Get cellids from s2object failed", K(ret));
-      } else {
-        // get the last node
-        ObKeyPart *cur = temp_result;
-        ObKeyPart *last = NULL;
-        while (OB_NOT_NULL(cur)) {
-          last = cur;
-          cur = cur->or_next_;
-        }
-        for (uint64_t i = 0; OB_SUCC(ret) && i < cells_cover_geo.size(); i++) {
+      for (uint64_t i = 0; OB_SUCC(ret) && i < cells_cover_geo.size(); i++) {
+        int hash_ret = cellid_set.exist_refactored(cells_cover_geo[i]);
+        if (OB_HASH_NOT_EXIST == hash_ret) {
           ObKeyPart *tmp = NULL;
-          if (OB_ISNULL((tmp = create_new_key_part()))) {
+          if (OB_FAIL(cellid_set.set_refactored(cells_cover_geo[i]))) {
+            LOG_WARN("failed to add cellid into set", K(ret));
+          } else if (OB_ISNULL((tmp = create_new_key_part()))) {
             ret = OB_ALLOCATE_MEMORY_FAILED;
             LOG_ERROR("alloc memory failed", K(ret));
           } else {
@@ -9110,24 +9161,35 @@ int ObQueryRange::get_geo_coveredby_keypart(uint32_t input_srid,
               last = tmp;
             }
           }
+        } else if (OB_HASH_EXIST != hash_ret) {
+          ret = hash_ret;
+          LOG_WARN("fail to check if key exist", K(ret), K(cells_cover_geo[i]), K(i));
         }
-        // copy temp_result to out_key_part
-        if (OB_FAIL(out_key_part->create_normal_key())) {
-          LOG_WARN("create normal key failed", K(ret));
-        } else if (OB_ISNULL(out_key_part->normal_keypart_)) {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("normal keypart is null");
-        } else {
-          out_key_part->null_safe_ = temp_result->null_safe_;
-          out_key_part->normal_keypart_->include_start_ = true;
-          out_key_part->normal_keypart_->include_end_ = true;
-          out_key_part->normal_keypart_->start_ = temp_result->normal_keypart_->start_;
-          out_key_part->normal_keypart_->end_ = temp_result->normal_keypart_->end_;
-          out_key_part->normal_keypart_->always_false_ = false;
-          out_key_part->normal_keypart_->always_true_ = false;
-          out_key_part->item_next_ = temp_result->item_next_;
-          out_key_part->or_next_ = temp_result->or_next_;
-          out_key_part->and_next_ = temp_result->and_next_;
+      }
+      // copy temp_result to out_key_part
+      if (OB_FAIL(ret)) {
+      } else if (OB_FAIL(out_key_part->create_normal_key())) {
+        LOG_WARN("create normal key failed", K(ret));
+      } else if (OB_ISNULL(out_key_part->normal_keypart_)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("normal keypart is null");
+      } else {
+        out_key_part->null_safe_ = head->null_safe_;
+        out_key_part->normal_keypart_->include_start_ = true;
+        out_key_part->normal_keypart_->include_end_ = true;
+        out_key_part->normal_keypart_->start_ = head->normal_keypart_->start_;
+        out_key_part->normal_keypart_->end_ = head->normal_keypart_->end_;
+        out_key_part->normal_keypart_->always_false_ = false;
+        out_key_part->normal_keypart_->always_true_ = false;
+        out_key_part->item_next_ = head->item_next_;
+        out_key_part->or_next_ = head->or_next_;
+        out_key_part->and_next_ = head->and_next_;
+      }
+      // clear hashset
+      if (cellid_set.created()) {
+        int tmp_ret = cellid_set.destroy();
+        if (OB_SUCC(ret) && OB_FAIL(tmp_ret)) {
+          LOG_WARN("failed to destory param set", K(ret));
         }
       }
     }

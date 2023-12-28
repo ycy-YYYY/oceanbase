@@ -445,6 +445,8 @@ int ObMigrationStatusHelper::check_ls_transfer_tablet_(
     allow_gc = true;
   } else if (OB_FAIL(set_ls_migrate_gc_status_(*ls, allow_gc))) {
     LOG_WARN("failed to set ls gc status", KR(ret));
+  } else if (!allow_gc) {
+    //do nothing
   } else if (OB_FAIL(ls->get_restore_status(restore_status))) {
     LOG_WARN("failed to get restore status", K(ret), KPC(ls));
   } else if (restore_status.is_in_restore()) {
@@ -460,8 +462,9 @@ int ObMigrationStatusHelper::check_ls_transfer_tablet_(
     ObTabletHandle tablet_handle;
     ObTablet *tablet = NULL;
     ObTabletCreateDeleteMdsUserData user_data;
-    bool unused_committed_flag = false;
+    bool committed_flag = false;
     while (OB_SUCC(ret)) {
+      committed_flag = false;
       if (OB_FAIL(tablet_iter.get_next_tablet(tablet_handle))) {
         if (OB_ITER_END == ret) {
           allow_gc = true;
@@ -478,7 +481,7 @@ int ObMigrationStatusHelper::check_ls_transfer_tablet_(
         LOG_WARN("tablet is NULL", KR(ret), K(ls_id));
       } else if (tablet->is_ls_inner_tablet() || tablet->is_empty_shell()) {
         // do nothing
-      } else if (OB_FAIL(tablet->ObITabletMdsInterface::get_latest_tablet_status(user_data, unused_committed_flag))) {
+      } else if (OB_FAIL(tablet->ObITabletMdsInterface::get_latest_tablet_status(user_data, committed_flag))) {
         if (OB_EMPTY_RESULT == ret) {
           LOG_INFO("tablet_status is null, ls is allowed to be GC", KR(ret), "tablet_id", tablet->get_tablet_meta().tablet_id_, K(ls_id));
           ret = OB_SUCCESS;
@@ -488,9 +491,17 @@ int ObMigrationStatusHelper::check_ls_transfer_tablet_(
       } else if (ObTabletStatus::TRANSFER_OUT != user_data.tablet_status_
           && ObTabletStatus::TRANSFER_OUT_DELETED != user_data.tablet_status_) {
         // do nothing
+      } else if (user_data.transfer_scn_.is_min()) {
+        if (committed_flag) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("transfer out is committed but transfer scn is invalid, unexpected", K(ret), K(user_data), K(committed_flag));
+        } else {
+          allow_gc = true;
+          LOG_INFO("transfer out is not committed, allow gc", K(ret), K(user_data));
+        }
       } else if (OB_FAIL(check_transfer_dest_ls_status_for_ls_gc(
           user_data.transfer_ls_id_, tablet->get_tablet_meta().tablet_id_,
-          tablet->get_tablet_meta().transfer_info_.transfer_start_scn_, need_wait_dest_ls_replay, allow_gc))) {
+          user_data.transfer_scn_, need_wait_dest_ls_replay, allow_gc))) {
         LOG_WARN("failed to check ls transfer tablet", K(ret), K(ls), K(user_data));
       } else if (!allow_gc) {
         LOG_INFO("The ls is not allowed to be GC because it is also dependent on other ls", K(user_data),
@@ -541,7 +552,7 @@ int ObMigrationStatusHelper::check_ls_with_transfer_task_(
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("mysql proxy should not be NULL", K(ret), KP(sql_proxy));
   } else if (OB_FAIL(ObTransferTaskOperator::get_by_src_ls(
-      *sql_proxy, tenant_id, src_ls_id, task, share::OBCG_STORAGE_HA_LEVEL2))) {
+      *sql_proxy, tenant_id, src_ls_id, task, share::OBCG_STORAGE))) {
     LOG_WARN("failed to get transfer task", K(ret), K(tenant_id), K(src_ls_id));
     if (OB_ENTRY_NOT_EXIST == ret || OB_TABLE_NOT_EXIST == ret) {
       need_check_allow_gc = true;
@@ -590,6 +601,11 @@ bool ObMigrationStatusHelper::check_migration_status_is_fail_(const ObMigrationS
     is_fail = true;
   }
   return is_fail;
+}
+
+bool ObMigrationStatusHelper::need_online(const ObMigrationStatus &cur_status)
+{
+  return (OB_MIGRATION_STATUS_NONE == cur_status);
 }
 
 bool ObMigrationStatusHelper::check_allow_gc_abandoned_ls(const ObMigrationStatus &cur_status)
