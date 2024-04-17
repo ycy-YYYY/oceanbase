@@ -70,8 +70,11 @@ ObLogFetcher::ObLogFetcher() :
     stop_flag_(true),
     paused_(false),
     pause_time_(OB_INVALID_TIMESTAMP),
-    resume_time_(OB_INVALID_TIMESTAMP)
+    resume_time_(OB_INVALID_TIMESTAMP),
+    decompression_blk_mgr_(DECOMPRESSION_MEM_LIMIT_THRESHOLD),
+    decompression_alloc_(ObMemAttr(OB_SERVER_TENANT_ID, "decompress_buf"), common::OB_MALLOC_BIG_BLOCK_SIZE, decompression_blk_mgr_)
 {
+  decompression_alloc_.set_nway(DECOMPRESSION_MEM_LIMIT_THRESHOLD);
 }
 
 ObLogFetcher::~ObLogFetcher()
@@ -132,7 +135,8 @@ int ObLogFetcher::init(
         cfg.blacklist_history_overdue_time_min,
         cfg.blacklist_history_clear_interval_min,
         is_tenant_mode,
-        TCTX.tenant_id_))) {
+        TCTX.tenant_id_,
+        OB_SERVER_TENANT_ID))) {
       LOG_ERROR("ObLogRouterService init failer", KR(ret), K(prefer_region), K(cluster_id));
     } else if (OB_FAIL(progress_controller_.init(cfg.ls_count_upper_limit))) {
       LOG_ERROR("init progress controller fail", KR(ret));
@@ -834,6 +838,22 @@ void ObLogFetcher::print_fetcher_stat_()
     LOG_INFO("[STAT] [FETCHER]", "upper_limit", NTS_TO_STR(upper_limit_ns),
         "dml_progress_limit_sec", dml_progress_limit / _SEC_,
         "fetcher_delay", TVAL_TO_STR(fetcher_delay));
+  }
+}
+void *ObLogFetcher::alloc_decompression_buf(int64_t size)
+{
+  void *buf = NULL;
+  if (IS_INIT) {
+    buf = decompression_alloc_.alloc(size);
+  }
+  return buf;
+}
+
+void ObLogFetcher::free_decompression_buf(void *buf)
+{
+  if (NULL != buf) {
+    decompression_alloc_.free(buf);
+    buf = NULL;
   }
 }
 

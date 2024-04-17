@@ -622,6 +622,7 @@ ObHTableRowIterator::ObHTableRowIterator(const ObTableQuery &query)
       max_result_size_(query.get_max_result_size()),
       batch_size_(query.get_batch()),
       time_to_live_(0),
+      max_version_(0),
       curr_cell_(),
       allocator_(ObModIds::TABLE_PROC, OB_MALLOC_NORMAL_BLOCK_SIZE, MTL_ID()),
       column_tracker_(NULL),
@@ -736,6 +737,7 @@ int ObHTableRowIterator::get_next_result(ObTableQueryResult *&out_result)
   ObHTableMatchCode match_code = ObHTableMatchCode::DONE_SCAN;  // initialize
   if (ObQueryFlag::Reverse == scan_order_ && (-1 != limit_per_row_per_cf_ || 0 != offset_per_row_per_cf_)) {
     ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "set limit_per_row_per_cf_ and offset_per_row_per_cf_ in reverse scan");
     LOG_WARN("server don't support set limit_per_row_per_cf_ and offset_per_row_per_cf_ in reverse scan yet",
               K(ret), K(scan_order_), K(limit_per_row_per_cf_), K(offset_per_row_per_cf_));
   }

@@ -32,7 +32,7 @@
 #include "observer/ob_server_struct.h"
 #include "sql/session/ob_sql_session_mgr.h"
 #include "share/schema/ob_schema_getter_guard.h"
-
+#include "share/stat/ob_dbms_stats_maintenance_window.h"
 
 namespace oceanbase
 {
@@ -59,6 +59,7 @@ int ObDBMSSchedJobInfo::deep_copy(ObIAllocator &allocator, const ObDBMSSchedJobI
   failures_ = other.failures_;
   flag_ = other.flag_;
   scheduler_flags_ = other.scheduler_flags_;
+  start_date_ = other.start_date_;
   end_date_ = other.end_date_;
   enabled_ = other.enabled_;
   auto_drop_ = other.auto_drop_;
@@ -80,6 +81,7 @@ int ObDBMSSchedJobInfo::deep_copy(ObIAllocator &allocator, const ObDBMSSchedJobI
   OZ (ob_write_string(allocator, other.job_name_, job_name_));
   OZ (ob_write_string(allocator, other.job_class_, job_class_));
   OZ (ob_write_string(allocator, other.program_name_, program_name_));
+  OZ (ob_write_string(allocator, other.state_, state_));
   return ret;
 }
 
@@ -244,24 +246,30 @@ int ObDBMSSchedJobUtils::init_session(
   uint64_t tenant_id,
   const ObString &database_name,
   uint64_t database_id,
-  const ObUserInfo* user_info)
+  const ObUserInfo* user_info,
+  const ObDBMSSchedJobInfo &job_info)
 {
   int ret = OB_SUCCESS;
-  ObObj oracle_sql_mode;
   ObArenaAllocator *allocator = NULL;
   const bool print_info_log = true;
   const bool is_sys_tenant = true;
   ObPCMemPctConf pc_mem_conf;
-  ObObj oracle_mode;
-  oracle_mode.set_int(1);
-  oracle_sql_mode.set_uint(ObUInt64Type, DEFAULT_ORACLE_MODE);
+  ObObj compatibility_mode;
+  ObObj sql_mode;
+  if (job_info.is_oracle_tenant_) {
+    compatibility_mode.set_int(1);
+    sql_mode.set_uint(ObUInt64Type, DEFAULT_ORACLE_MODE);
+  } else {
+    compatibility_mode.set_int(0);
+    sql_mode.set_uint(ObUInt64Type, DEFAULT_MYSQL_MODE);
+  }
   OX (session.set_inner_session());
   OZ (session.load_default_sys_variable(print_info_log, is_sys_tenant));
   OZ (session.update_max_packet_size());
   OZ (session.init_tenant(tenant_name.ptr(), tenant_id));
   OZ (session.load_all_sys_vars(schema_guard));
-  OZ (session.update_sys_variable(share::SYS_VAR_SQL_MODE, oracle_sql_mode));
-  OZ (session.update_sys_variable(share::SYS_VAR_OB_COMPATIBILITY_MODE, oracle_mode));
+  OZ (session.update_sys_variable(share::SYS_VAR_SQL_MODE, sql_mode));
+  OZ (session.update_sys_variable(share::SYS_VAR_OB_COMPATIBILITY_MODE, compatibility_mode));
   OZ (session.update_sys_variable(share::SYS_VAR_NLS_DATE_FORMAT,
                                   ObTimeConverter::COMPAT_OLD_NLS_DATE_FORMAT));
   OZ (session.update_sys_variable(share::SYS_VAR_NLS_TIMESTAMP_FORMAT,
@@ -275,6 +283,42 @@ int ObDBMSSchedJobUtils::init_session(
   OZ (session.set_user(
     user_info->get_user_name(), user_info->get_host_name_str(), user_info->get_user_id()));
   OX (session.set_user_priv_set(OB_PRIV_ALL | OB_PRIV_GRANT));
+  if (OB_SUCC(ret) && job_info.is_date_expression_job_class()) {
+    // set larger timeout for mview scheduler jobs
+    const int64_t QUERY_TIMEOUT_US = (24 * 60 * 60 * 1000000L); // 24hours
+    const int64_t TRX_TIMEOUT_US = (24 * 60 * 60 * 1000000L); // 24hours
+    ObObj query_timeout_obj;
+    ObObj trx_timeout_obj;
+    query_timeout_obj.set_int(QUERY_TIMEOUT_US);
+    trx_timeout_obj.set_int(TRX_TIMEOUT_US);
+    OZ (session.update_sys_variable(SYS_VAR_OB_QUERY_TIMEOUT, query_timeout_obj));
+    OZ (session.update_sys_variable(SYS_VAR_OB_TRX_TIMEOUT, trx_timeout_obj));
+  }
+  return ret;
+}
+
+int ObDBMSSchedJobUtils::reserve_user_with_minimun_id(ObIArray<const ObUserInfo *> &user_infos)
+{
+  int ret = OB_SUCCESS;
+  if (user_infos.count() > 1) {
+    //bug:
+    //resver the minimum user id to execute
+    const ObUserInfo *minimum_user_info = user_infos.at(0);
+    for (int64_t i = 1; OB_SUCC(ret) && i < user_infos.count(); ++i) {
+      if (OB_ISNULL(minimum_user_info) || OB_ISNULL(user_infos.at(i))) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("get unexpected error", K(ret), K(minimum_user_info), K(user_infos.at(i)));
+      } else if (minimum_user_info->get_user_id() > user_infos.at(i)->get_user_id()) {
+        minimum_user_info = user_infos.at(i);
+      } else {/*do nothing*/}
+    }
+    if (OB_SUCC(ret)) {
+      user_infos.reset();
+      if (OB_FAIL(user_infos.push_back(minimum_user_info))) {
+        LOG_WARN("failed to push back", K(ret));
+      }
+    }
+  }
   return ret;
 }
 
@@ -295,24 +339,50 @@ int ObDBMSSchedJobUtils::init_env(
   CK (job_info.valid());
   OZ (GCTX.schema_service_->get_tenant_schema_guard(job_info.get_tenant_id(), schema_guard));
   OZ (schema_guard.get_tenant_info(job_info.get_tenant_id(), tenant_info));
-  OZ (schema_guard.get_user_info(
-    job_info.get_tenant_id(), job_info.get_powner(), user_infos));
   OZ (schema_guard.get_database_schema(
     job_info.get_tenant_id(), job_info.get_cowner(), database_schema));
-  OV (1 == user_infos.count(), OB_ERR_UNEXPECTED, K(job_info), K(user_infos));
-  CK (OB_NOT_NULL(user_info = user_infos.at(0)));
-  CK (OB_NOT_NULL(user_info));
-  CK (OB_NOT_NULL(tenant_info));
-  CK (OB_NOT_NULL(database_schema));
-  OZ (exec_env.init(job_info.get_exec_env()));
-  OZ (init_session(session,
-                   schema_guard,
-                   tenant_info->get_tenant_name(),
-                   job_info.get_tenant_id(),
-                   database_schema->get_database_name(),
-                   database_schema->get_database_id(),
-                   user_info));
-  OZ (exec_env.store(session));
+  if (OB_SUCC(ret)) {
+    if (job_info.is_oracle_tenant()) {
+      OZ (schema_guard.get_user_info(
+        job_info.get_tenant_id(), job_info.get_powner(), user_infos));
+      OV (1 == user_infos.count(), OB_ERR_UNEXPECTED, K(job_info), K(user_infos));
+      CK (OB_NOT_NULL(user_info = user_infos.at(0)));
+    } else {
+      ObString user = job_info.get_powner();
+      if (OB_SUCC(ret)) {
+        const char *c = user.reverse_find('@');
+        if (OB_ISNULL(c)) {
+          OZ (schema_guard.get_user_info(
+            job_info.get_tenant_id(), user, user_infos));
+          if (OB_SUCC(ret) && user_infos.count() > 1) {
+            OZ(reserve_user_with_minimun_id(user_infos));
+          }
+          OV (1 == user_infos.count(), OB_ERR_UNEXPECTED, K(job_info), K(user_infos));
+          CK (OB_NOT_NULL(user_info = user_infos.at(0)));
+        } else {
+          ObString user_name;
+          ObString host_name;
+          user_name = user.split_on(c);
+          host_name = user;
+          OZ (schema_guard.get_user_info(
+            job_info.get_tenant_id(), user_name, host_name, user_info));
+        }
+      }
+    }
+    CK (OB_NOT_NULL(user_info));
+    CK (OB_NOT_NULL(tenant_info));
+    CK (OB_NOT_NULL(database_schema));
+    OZ (exec_env.init(job_info.get_exec_env()));
+    OZ (init_session(session,
+                    schema_guard,
+                    tenant_info->get_tenant_name(),
+                    job_info.get_tenant_id(),
+                    database_schema->get_database_name(),
+                    database_schema->get_database_id(),
+                    user_info,
+                    job_info));
+    OZ (exec_env.store(session));
+  }
   return ret;
 }
 

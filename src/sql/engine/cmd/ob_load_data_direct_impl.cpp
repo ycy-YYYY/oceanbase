@@ -67,6 +67,7 @@ ObLoadDataDirectImpl::LoadExecuteParam::LoadExecuteParam()
     ignore_row_num_(-1),
     dup_action_(ObLoadDupActionType::LOAD_INVALID_MODE)
 {
+  store_column_idxs_.set_tenant_id(MTL_ID());
 }
 
 bool ObLoadDataDirectImpl::LoadExecuteParam::is_valid() const
@@ -233,6 +234,7 @@ int ObLoadDataDirectImpl::Logger::log_error_line(const ObString &file_name, int6
 ObLoadDataDirectImpl::DataDescIterator::DataDescIterator()
   : pos_(0)
 {
+  data_descs_.set_tenant_id(MTL_ID());
 }
 
 ObLoadDataDirectImpl::DataDescIterator::~DataDescIterator()
@@ -438,11 +440,12 @@ ObLoadDataDirectImpl::DataReader::DataReader()
     : allocator_("TLD_DataReader"),
       execute_ctx_(nullptr),
       file_reader_(nullptr),
-      end_offset_(0),
+      end_offset_(-1),
       read_raw_(false),
       is_iter_end_(false),
       is_inited_(false)
 {
+  allocator_.set_tenant_id(MTL_ID());
 }
 
 ObLoadDataDirectImpl::DataReader::~DataReader()
@@ -632,7 +635,7 @@ bool ObLoadDataDirectImpl::DataReader::is_end_file() const
   bool ret = false;
   if (file_reader_->eof()) {
     ret = true;
-  } else if (end_offset_ > 0) {
+  } else if (end_offset_ >= 0) {
     ret = file_reader_->get_offset() >= end_offset_;
   }
   return ret;
@@ -901,6 +904,7 @@ ObLoadDataDirectImpl::FileLoadExecutor::FileLoadExecutor()
     total_line_count_(0),
     is_inited_(false)
 {
+  handle_resource_.set_tenant_id(MTL_ID());
 }
 
 ObLoadDataDirectImpl::FileLoadExecutor::~FileLoadExecutor()
@@ -1720,7 +1724,21 @@ int ObLoadDataDirectImpl::execute(ObExecContext &ctx, ObLoadDataStmt &load_stmt)
   ctx_ = &ctx;
   load_stmt_ = &load_stmt;
   const ObLoadArgument &load_args = load_stmt_->get_load_arguments();
+  ObSQLSessionInfo *session = nullptr;
   int64_t total_line_count = 0;
+
+  if (OB_ISNULL(session = ctx.get_my_session()) || OB_ISNULL(ctx.get_stmt_factory()) ||
+      OB_ISNULL(ctx.get_stmt_factory()->get_query_ctx())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("ctx is unexpected", KR(ret), K(ctx));
+  } else if (OB_FAIL(plan_.set_vars(ctx.get_stmt_factory()->get_query_ctx()->variables_))) {
+    LOG_WARN("fail to set vars", KR(ret));
+  } else if (OB_FAIL(session->set_cur_phy_plan(&plan_))) {
+    LOG_WARN("fail to set cur phy plan", KR(ret));
+  } else if (FALSE_IT(ctx.reference_my_plan(&plan_))) {
+  } else if (OB_FAIL(ctx.init_phy_op(1))) {
+    LOG_WARN("fail to init phy op", KR(ret));
+  }
 
   if (OB_SUCC(ret)) {
     int64_t query_timeout = 0;
@@ -1730,20 +1748,17 @@ int ObLoadDataDirectImpl::execute(ObExecContext &ctx, ObLoadDataStmt &load_stmt)
       ret = OB_TIMEOUT;
       LOG_WARN("session is timeout", K(ret));
     } else if (0 == query_timeout) {
-      ObSQLSessionInfo *session = nullptr;
-      if (OB_ISNULL(session = ctx.get_my_session())) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("session is null", KR(ret));
-      } else if (OB_FAIL(session->get_query_timeout(query_timeout))) {
+      if (OB_FAIL(session->get_query_timeout(query_timeout))) {
         LOG_WARN("fail to get query timeout", KR(ret));
       } else if (query_timeout <= 0) {
         ret = OB_TIMEOUT;
         LOG_WARN("session is timeout", K(ret));
-      } else {
-        THIS_WORKER.set_timeout_ts(ctx.get_my_session()->get_query_start_time() + query_timeout);
       }
-    } else {
-      THIS_WORKER.set_timeout_ts(ctx.get_my_session()->get_query_start_time() + query_timeout);
+    }
+    if (OB_SUCC(ret)) {
+      const int64_t timeout_ts = session->get_query_start_time() + query_timeout;
+      ctx.get_physical_plan_ctx()->set_timeout_timestamp(timeout_ts);
+      THIS_WORKER.set_timeout_ts(timeout_ts);
     }
   }
 
@@ -1824,6 +1839,9 @@ int ObLoadDataDirectImpl::execute(ObExecContext &ctx, ObLoadDataStmt &load_stmt)
   }
 
   direct_loader_.destroy();
+  if (OB_NOT_NULL(session)) {
+    session->reset_cur_phy_plan_to_null();
+  }
 
   return ret;
 }
@@ -1959,7 +1977,8 @@ int ObLoadDataDirectImpl::init_store_column_idxs(ObIArray<int64_t> &store_column
   const uint64_t table_id = load_args.table_id_;
   ObSchemaGetterGuard schema_guard;
   const ObTableSchema *table_schema = nullptr;
-  ObSEArray<ObColDesc, 64> column_descs;
+  ObArray<ObColDesc> column_descs;
+  column_descs.set_tenant_id(MTL_ID());
   if (OB_FAIL(ObMultiVersionSchemaService::get_instance().get_tenant_schema_guard(tenant_id,
                                                                                   schema_guard))) {
     LOG_WARN("fail to get tenant schema guard", KR(ret), K(tenant_id));

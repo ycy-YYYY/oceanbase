@@ -19,6 +19,7 @@
 #include "lib/stat/ob_diagnose_info.h"
 #include "lib/stat/ob_session_stat.h"
 #include "lib/allocator/ob_page_manager.h"
+#include "lib/allocator/ob_sql_mem_leak_checker.h"
 #include "lib/rc/context.h"
 #include "lib/thread/ob_thread_name.h"
 #include "ob_tenant.h"
@@ -38,10 +39,6 @@ using namespace oceanbase::rpc::frame;
 
 namespace oceanbase
 {
-namespace memtable
-{
-extern TLOCAL(bool, TLOCAL_NEED_WAIT_IN_LOCK_WAIT_MGR);
-}
 
 namespace omt
 {
@@ -224,7 +221,7 @@ ObThWorker::Status ObThWorker::check_wait()
   } else if (curr_time > last_check_time_ + WORKER_CHECK_PERIOD) {
     st = check_throttle();
     if (st != WS_OUT_OF_THROTTLE) {
-      if (OB_UNLIKELY(curr_time > get_query_start_time() + threshold)) {
+      if (OB_UNLIKELY(0 != threshold && curr_time > get_query_start_time() + threshold)) {
         tenant_->lq_yield(*this);
       }
     }
@@ -243,7 +240,6 @@ inline void ObThWorker::process_request(rpc::ObRequest &req)
   reset_sql_throttle_current_priority();
   set_req_flag(&req);
 
-  memtable::TLOCAL_NEED_WAIT_IN_LOCK_WAIT_MGR = false;
   MTL(memtable::ObLockWaitMgr*)->setup(req.get_lock_wait_node(), req.get_receive_timestamp());
   if (OB_FAIL(procor_.process(req))) {
     LOG_WARN("process request fail", K(ret));
@@ -310,6 +306,7 @@ void ObThWorker::worker(int64_t &tenant_id, int64_t &req_recv_timestamp, int32_t
   blocking_ts_ = &Thread::blocking_ts_;
 
   ObTLTaGuard ta_guard(tenant_->id());
+  ObMemVersionNodeGuard mem_version_node_guard;
   // Avoid adding and deleting entities from the root node for every request, the parameters are meaningless
   CREATE_WITH_TEMP_ENTITY(RESOURCE_OWNER, OB_SERVER_TENANT_ID) {
     auto *pm = common::ObPageManager::thread_local_instance();
@@ -397,10 +394,12 @@ void ObThWorker::worker(int64_t &tenant_id, int64_t &req_recv_timestamp, int32_t
               ret = OB_SUCCESS;
             }
             IGNORE_RETURN ATOMIC_FAA(&idle_us_, (wait_end_time - wait_start_time));
-            if (this->get_worker_level() == 0 && !is_group_worker()) {
+            if (this->get_worker_level() != 0) {
+              // nesting workers not allowed to calling check_worker_count
+            } else if (this->get_group() == nullptr) {
               tenant_->check_worker_count(*this);
               tenant_->lq_end(*this);
-            } else if (this->is_group_worker()) {
+            } else {
               group_->check_worker_count(*this);
             }
           }

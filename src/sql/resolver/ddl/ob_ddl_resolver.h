@@ -110,7 +110,10 @@ public:
   enum INDEX_KEYNAME {
     NORMAL_KEY = 0,
     UNIQUE_KEY = 1,
-    SPATIAL_KEY = 2
+    SPATIAL_KEY = 2,
+    FTS_KEY = 3,
+    MULTI_KEY = 4,
+    MULTI_UNIQUE_KEY = 5
   };
   enum COLUMN_NODE {
     COLUMN_REF_NODE = 0,
@@ -188,7 +191,8 @@ public:
       const common::ObCollationType table_collation_type);
   static int check_string_column_length(
       const share::schema::ObColumnSchemaV2 &column,
-      const bool is_oracle_mode);
+      const bool is_oracle_mode,
+      const bool is_prepare_stage=false);
   static int check_raw_column_length(
       const share::schema::ObColumnSchemaV2 &column);
   static int check_urowid_column_length(
@@ -285,9 +289,18 @@ public:
       const common::ObTimeZoneInfoWrap &tz_info_wrap,
       const common::ObString *nls_formats,
       common::ObIAllocator &allocator);
+  static int check_udt_default_value(ObObj &default_value,
+                                     const common::ObTimeZoneInfoWrap &tz_info_wrap,
+                                     const common::ObString *nls_formats,
+                                     ObIAllocator &allocator,
+                                     ObTableSchema &table_schema,
+                                     ObColumnSchemaV2 &column,
+                                     const ObSQLMode sql_mode,
+                                     ObSQLSessionInfo *session_info,
+                                     ObSchemaChecker *schema_checker,
+                                     obrpc::ObDDLArg &ddl_arg);
   static int get_udt_column_default_values(const ObObj &default_value,
                                            const common::ObTimeZoneInfoWrap &tz_info_wrap,
-                                           const common::ObString *nls_formats,
                                            ObIAllocator &allocator,
                                            ObColumnSchemaV2 &column,
                                            const ObSQLMode sql_mode,
@@ -468,6 +481,7 @@ protected:
       const uint64_t cg_id,
       share::schema::ObColumnGroupSchema &column_group);
   int parse_cg_node(const ParseNode &cg_node, bool &exist_all_column_group) const;
+  int parse_column_group(const ParseNode *cg_node,const share::schema::ObTableSchema &table_schema, share::schema::ObTableSchema &dst_table_schema);
   int resolve_index_column_group(const ParseNode *node, obrpc::ObCreateIndexArg &create_index_arg);
   bool need_column_group(const ObTableSchema &table_schema);
   int resolve_hints(const ParseNode *parse_node, ObDDLStmt &stmt, const ObTableSchema &table_schema);

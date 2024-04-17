@@ -48,7 +48,8 @@ void ObTenantTxDataAllocator::init_throttle_config(int64_t &resource_limit,
     max_duration = TX_DATA_THROTTLE_MAX_DURATION;
   }
 }
-void ObTenantTxDataAllocator::adaptive_update_limit(const int64_t holding_size,
+void ObTenantTxDataAllocator::adaptive_update_limit(const int64_t tenant_id,
+                                                    const int64_t holding_size,
                                                     const int64_t config_specify_resource_limit,
                                                     int64_t &resource_limit,
                                                     int64_t &last_update_limit_ts,
@@ -95,18 +96,57 @@ void *ObTenantTxDataAllocator::alloc(const bool enable_throttle, const int64_t a
     bool is_throttled = false;
     (void)throttle_tool_->alloc_resource<ObTenantTxDataAllocator>(
         storage::TX_DATA_SLICE_SIZE, abs_expire_time, is_throttled);
+
     if (OB_UNLIKELY(is_throttled)) {
-      if (MTL(ObTenantFreezer *)->exist_ls_freezing()) {
-        (void)throttle_tool_->skip_throttle<ObTenantTxDataAllocator>(storage::TX_DATA_SLICE_SIZE);
-      } else {
-        (void)throttle_tool_->do_throttle<ObTenantTxDataAllocator>(abs_expire_time);
-      }
+      share::tx_data_throttled_alloc() += storage::TX_DATA_SLICE_SIZE;
     }
   }
 
   // allocate memory
   void *res = slice_allocator_.alloc();
   return res;
+}
+
+ObTxDataThrottleGuard::ObTxDataThrottleGuard(const bool for_replay, const int64_t abs_expire_time)
+    : for_replay_(for_replay), abs_expire_time_(abs_expire_time)
+{
+  throttle_tool_ = &(MTL(ObSharedMemAllocMgr *)->share_resource_throttle_tool());
+  if (0 == abs_expire_time) {
+    abs_expire_time_ =
+        ObClockGenerator::getClock() + ObThrottleUnit<ObTenantTxDataAllocator>::DEFAULT_MAX_THROTTLE_TIME;
+  }
+  share::tx_data_throttled_alloc() = 0;
+}
+
+ObTxDataThrottleGuard::~ObTxDataThrottleGuard()
+{
+  ObThrottleInfoGuard share_ti_guard;
+  ObThrottleInfoGuard module_ti_guard;
+
+  if (OB_ISNULL(throttle_tool_)) {
+    MDS_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "throttle tool is unexpected nullptr", KP(throttle_tool_));
+  } else if (throttle_tool_->is_throttling<ObTenantTxDataAllocator>(share_ti_guard, module_ti_guard)) {
+    (void)TxShareMemThrottleUtil::do_throttle<ObTenantTxDataAllocator>(for_replay_,
+                                                                       abs_expire_time_,
+                                                                       share::tx_data_throttled_alloc(),
+                                                                       *throttle_tool_,
+                                                                       share_ti_guard,
+                                                                       module_ti_guard);
+
+    if (throttle_tool_->still_throttling<ObTenantTxDataAllocator>(share_ti_guard, module_ti_guard)) {
+      (void)throttle_tool_->skip_throttle<ObTenantTxDataAllocator>(
+          share::tx_data_throttled_alloc(), share_ti_guard, module_ti_guard);
+
+      if (module_ti_guard.is_valid()) {
+        module_ti_guard.throttle_info()->reset();
+      }
+    }
+
+    // reset tx data throttled alloc size
+    share::tx_data_throttled_alloc() = 0;
+  } else {
+    // do not need throttle, exit directly
+  }
 }
 
 }  // namespace share

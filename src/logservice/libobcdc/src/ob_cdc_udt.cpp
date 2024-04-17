@@ -104,10 +104,11 @@ int ObCDCUdtValueMap::set_main_column_value_(
 {
   int ret = OB_SUCCESS;
   if (main_column_schema_info.is_xmltype()) {
-    if (set_xmltype_main_column_value_(value, udt_val)) {
+    if (OB_FAIL(set_xmltype_main_column_value_(value, udt_val))) {
       LOG_WARN("xmltype main column value not correct", KR(ret), K(value));
     }
   } else {
+    ret = OB_ERR_UNEXPECTED;
     LOG_ERROR(
         "not supported column type, only support xmltype currently",
         KR(ret),
@@ -276,7 +277,9 @@ int ObCDCUdtValueBuilder::build_xmltype(
     if (OB_FAIL(ret)) {
     } else if (OB_ISNULL(col_str)) {
       LOG_INFO("col_str is null", K(is_new_value), K(value->is_out_row_), K(value->column_id_));
-    } else if (OB_FALSE_IT(cv.value_.set_string(ObUserDefinedSQLType, *col_str))) {
+    } else if (OB_FALSE_IT(cv.value_.set_sql_udt(col_str->ptr(),
+                                                 static_cast<int32_t>(col_str->length()),
+                                                 ObXMLSqlType))) {
     } else if (OB_FAIL(dml_stmt_task.parse_col(
         dml_stmt_task.get_tenant_id(),
         cv.column_id_,

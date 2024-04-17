@@ -202,7 +202,9 @@ public:
       common::ObIArray<int64_t> &cg_micro_cnt_arr) const;
 protected:
   int check_tenant_out_of_memstore_limit_(bool &is_out_of_mem);
-
+  int check_data_disk_full_(
+      const share::ObLSID &ls_id,
+      bool &is_full);
   int get_write_store_ctx_guard_(
       const share::ObLSID &ls_id,
       const int64_t timeout,
@@ -225,6 +227,7 @@ protected:
       const common::ObTabletID &tablet_id,
       const ObStoreAccessType access_type,
       const ObDMLBaseParam &dml_param,
+      const int64_t lock_wait_timeout_ts,
       transaction::ObTxDesc &tx_desc,
       ObTabletHandle &tablet_handle,
       ObStoreCtxGuard &ctx_guard);
@@ -243,6 +246,11 @@ protected:
       const share::SCN &snapshot,
       ObTabletHandle &tablet_handle,
       ObStoreCtxGuard &ctx_guard);
+  static OB_INLINE int64_t get_lock_wait_timeout_(const int64_t abs_lock_timeout, const int64_t stmt_timeout)
+  {
+    return (abs_lock_timeout < 0 ? stmt_timeout : (abs_lock_timeout > stmt_timeout ? stmt_timeout : abs_lock_timeout));
+  }
+
 private:
   bool is_inited_;
   uint64_t tenant_id_;

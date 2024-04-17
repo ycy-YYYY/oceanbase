@@ -18,7 +18,6 @@ ob_define(ENABLE_MEMORY_DIAGNOSIS OFF)
 ob_define(ENABLE_OBJ_LEAK_CHECK OFF)
 ob_define(ENABLE_FATAL_ERROR_HANG ON)
 ob_define(ENABLE_SMART_VAR_CHECK OFF)
-ob_define(ENABLE_SERIALIZATION_CHECK OFF)
 ob_define(ENABLE_COMPILE_DLL_MODE OFF)
 ob_define(OB_CMAKE_RULES_CHECK ON)
 ob_define(OB_STATIC_LINK_LGPL_DEPS ON)
@@ -40,6 +39,8 @@ ob_define(OB_MAX_UNITY_BATCH_SIZE 30)
 ob_define(OB_ENABLE_UNITY ON)
 
 ob_define(OB_BUILD_OPENSOURCE ON)
+
+ob_define(OB_DISABLE_LSE OFF)
 
 
 if(WITH_COVERAGE)
@@ -63,8 +64,8 @@ ob_define(THIN_LTO_OPT "")
 ob_define(THIN_LTO_CONCURRENCY_LINK "")
 
 if(ENABLE_THIN_LTO)
-  set(THIN_LTO_OPT "-flto=thin -fwhole-program-vtables")
-  set(THIN_LTO_CONCURRENCY_LINK "-Wl,--thinlto-jobs=${LTO_JOBS},--lto-whole-program-visibility")
+  set(THIN_LTO_OPT "-flto=thin")
+  set(THIN_LTO_CONCURRENCY_LINK "-Wl,--thinlto-jobs=${LTO_JOBS}")
 endif()
 
 set(ob_close_modules_static_name "")
@@ -94,6 +95,9 @@ if(OB_BUILD_CLOSE_MODULES)
   ob_define(OB_BUILD_DBLINK ON)
   # 仲裁功能
   ob_define(OB_BUILD_ARBITRATION ON)
+
+  # 日志存储压缩
+  ob_define(OB_BUILD_LOG_STORAGE_COMPRESS ON)
 
   # 默认使用BABASSL
   ob_define(OB_USE_BABASSL ON)
@@ -138,6 +142,10 @@ endif()
 
 if(OB_BUILD_ARBITRATION)
   add_definitions(-DOB_BUILD_ARBITRATION)
+endif()
+
+if(OB_BUILD_LOG_STORAGE_COMPRESS)
+  add_definitions(-DOB_BUILD_LOG_STORAGE_COMPRESS)
 endif()
 
 if(OB_BUILD_DBLINK)
@@ -273,7 +281,13 @@ if( ${ARCHITECTURE} STREQUAL "x86_64" )
     set(ARCH_LDFLAGS "")
     set(OCI_DEVEL_INC "${DEP_3RD_DIR}/usr/include/oracle/12.2/client64")
 else()
-    set(MARCH_CFLAGS "-march=armv8-a+crc" )
+    if (${OB_DISABLE_LSE})
+      message(STATUS "build with no-lse")
+      set(MARCH_CFLAGS "-march=armv8-a+crc")
+    else()
+      message(STATUS "build with lse")
+      set(MARCH_CFLAGS "-march=armv8-a+crc+lse")
+    endif()
     set(MTUNE_CFLAGS "-mtune=generic" )
     set(ARCH_LDFLAGS "-l:libatomic.a")
     set(OCI_DEVEL_INC "${DEP_3RD_DIR}/usr/include/oracle/19.10/client64")

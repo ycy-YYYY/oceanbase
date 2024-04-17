@@ -287,6 +287,7 @@ int ObTableRedefinitionTask::send_build_replica_request_by_sql()
     }
     ObSchemaGetterGuard schema_guard;
     const ObTableSchema *orig_table_schema = nullptr;
+    const ObTableSchema *hidden_table_schema = nullptr;
     ObDDLRedefinitionSSTableBuildTask task(
         task_id_,
         tenant_id_,
@@ -309,7 +310,9 @@ int ObTableRedefinitionTask::send_build_replica_request_by_sql()
       LOG_WARN("get schema guard failed", K(ret));
     } else if (OB_FAIL(schema_guard.get_table_schema(tenant_id_, object_id_, orig_table_schema))) {
       LOG_WARN("failed to get orig table schema", K(ret));
-    } else if (OB_FAIL(task.init(*orig_table_schema, alter_table_arg_.alter_table_schema_, alter_table_arg_.tz_info_wrap_, alter_table_arg_.based_schema_object_infos_))) {
+    } else if (OB_FAIL(schema_guard.get_table_schema(dst_tenant_id_, target_object_id_, hidden_table_schema))) {
+      LOG_WARN("fail to get table schema", K(ret), K(target_object_id_));
+    } else if (OB_FAIL(task.init(*orig_table_schema, *hidden_table_schema, alter_table_arg_.alter_table_schema_, alter_table_arg_.tz_info_wrap_, alter_table_arg_.based_schema_object_infos_))) {
       LOG_WARN("fail to init table redefinition sstable build task", K(ret));
     } else if (OB_FAIL(root_service->submit_ddl_single_replica_build_task(task))) {
       LOG_WARN("fail to submit ddl build single replica", K(ret));
@@ -1060,7 +1063,8 @@ int64_t ObTableRedefinitionTask::get_serialize_param_size() const
          + serialization::encoded_length_i8(copy_indexes) + serialization::encoded_length_i8(copy_triggers)
          + serialization::encoded_length_i8(copy_constraints) + serialization::encoded_length_i8(copy_foreign_keys)
          + serialization::encoded_length_i8(ignore_errors) + serialization::encoded_length_i8(do_finish)
-         + serialization::encoded_length_i64(target_cg_cnt_);
+         + serialization::encoded_length_i64(target_cg_cnt_)
+         + serialization::encoded_length_i64(complete_sstable_job_ret_code_);
 }
 
 int ObTableRedefinitionTask::serialize_params_to_message(char *buf, const int64_t buf_len, int64_t &pos) const
@@ -1093,6 +1097,8 @@ int ObTableRedefinitionTask::serialize_params_to_message(char *buf, const int64_
     LOG_WARN("fail to serialize is_do_finish", K(ret));
   } else if (OB_FAIL(serialization::encode_i64(buf, buf_len, pos, target_cg_cnt_))) {
     LOG_WARN("fail to serialize target_cg_cnt", K(ret));
+  } else if (OB_FAIL(serialization::encode_i64(buf, buf_len, pos, complete_sstable_job_ret_code_))) {
+    LOG_WARN("fail to serialize complete sstable job ret code", K(ret));
   }
   FLOG_INFO("serialize message for table redefinition", K(ret),
       K(copy_indexes), K(copy_triggers), K(copy_constraints), K(copy_foreign_keys), K(ignore_errors), K(do_finish), K(*this));
@@ -1143,6 +1149,11 @@ int ObTableRedefinitionTask::deserlize_params_from_message(const uint64_t tenant
       is_copy_foreign_keys_ = static_cast<bool>(copy_foreign_keys);
       is_ignore_errors_ = static_cast<bool>(ignore_errors);
       is_do_finish_ = static_cast<bool>(do_finish);
+    }
+    if (OB_SUCC(ret) && pos < data_len) {
+      if (OB_FAIL(serialization::decode_i64(buf, data_len, pos, &complete_sstable_job_ret_code_))) {
+        LOG_WARN("fail to deserialize is_do_finish_", K(ret));
+      }
     }
   }
   FLOG_INFO("deserialize message for table redefinition", K(ret),
@@ -1348,9 +1359,9 @@ int ObTableRedefinitionTask::collect_longops_stat(ObLongopsValue &value)
           job_stat.parallel_,
           job_stat.max_allowed_error_rows_,
           job_stat.detected_error_rows_,
-          job_stat.coordinator.received_rows_,
-          job_stat.coordinator.status_.length(),
-          job_stat.coordinator.status_.ptr());
+          job_stat.coordinator_.received_rows_,
+          job_stat.coordinator_.status_.length(),
+          job_stat.coordinator_.status_.ptr());
     }
   }
 
@@ -1458,10 +1469,10 @@ int ObTableRedefinitionTask::get_direct_load_job_stat(common::ObArenaAllocator &
         EXTRACT_INT_FIELD_MYSQL(*select_result, "PARALLEL", job_stat.parallel_, int64_t);
         EXTRACT_INT_FIELD_MYSQL(*select_result, "MAX_ALLOWED_ERROR_ROWS", job_stat.max_allowed_error_rows_, int64_t);
         EXTRACT_INT_FIELD_MYSQL(*select_result, "DETECTED_ERROR_ROWS", job_stat.detected_error_rows_, int64_t);
-        EXTRACT_INT_FIELD_MYSQL(*select_result, "COORDINATOR_RECEIVED_ROWS", job_stat.coordinator.received_rows_, int64_t);
+        EXTRACT_INT_FIELD_MYSQL(*select_result, "COORDINATOR_RECEIVED_ROWS", job_stat.coordinator_.received_rows_, int64_t);
         EXTRACT_VARCHAR_FIELD_MYSQL(*select_result, "COORDINATOR_STATUS", load_status);
         if (OB_SUCC(ret)
-            && OB_FAIL(ob_write_string(allocator, load_status, job_stat.coordinator.status_))) {
+            && OB_FAIL(ob_write_string(allocator, load_status, job_stat.coordinator_.status_))) {
           LOG_WARN("failed to write string", KR(ret));
         }
       }

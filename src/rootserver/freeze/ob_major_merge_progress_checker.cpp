@@ -412,8 +412,13 @@ void ObMajorMergeProgressChecker::deal_with_unfinish_table_ids(
     }
   }
   if (OB_FAIL(ret)) {
-  } else if (assgin_flag && OB_FAIL(table_ids_.assign(unfinish_table_id_array))) {
-    LOG_WARN("failed to assign table ids", KR(ret), K(unfinish_table_id_array));
+  } else if (assgin_flag) {
+    int64_t retry_times = 0;
+    do {
+      if (OB_FAIL(table_ids_.assign(unfinish_table_id_array))) {
+        LOG_WARN("failed to assign table ids", KR(ret), K(unfinish_table_id_array));
+      }
+    } while (OB_ALLOCATE_MEMORY_FAILED == ret && (++retry_times < ASSGIN_FAILURE_RETRY_TIMES));
   }
 }
 
@@ -470,7 +475,7 @@ int ObMajorMergeProgressChecker::check_index_and_rest_table()
     LOG_WARN("deal with rest data table", KR(ret), K_(compaction_scn));
   } else if (progress_.is_merge_finished()) {
     LOG_INFO("progress is check finished", KR(ret), K_(progress));
-  } else if (progress_.only_remain_special_table_to_verified()) {
+  } else if (progress_.only_remain_special_table_to_verified() || table_ids_.empty()) {
     bool finish_validate = false;
 #ifdef ERRSIM
     ret = OB_E(EventTable::EN_RS_CHECK_SPECIAL_TABLE) ret;
@@ -485,10 +490,6 @@ int ObMajorMergeProgressChecker::check_index_and_rest_table()
     } else if (finish_validate) {
       progress_.deal_with_special_tablet();
     }
-  } else if (table_ids_.empty()) {
-    // DEBUG LOG
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("cnt in progress is not equal to table_ids", KR(ret), K(table_ids_), K(progress_));
   }
   (void) ckm_validator_.batch_update_report_scn();
   (void) ckm_validator_.batch_write_tablet_ckm();
@@ -600,6 +601,7 @@ void ObMajorMergeProgressChecker::print_unfinish_info(const int64_t cost_us)
   int ret = OB_SUCCESS;
   const int64_t array_cnt = ObUncompactInfo::DEBUG_INFO_CNT;
   ObSEArray<uint64_t, array_cnt> tmp_table_id_array;
+  ObSEArray<uint64_t, array_cnt> tmp_tablets_array;
   ObSEArray<ObTabletReplica, array_cnt> uncompacted_replica_array;
   ObSEArray<uint64_t, array_cnt> uncompacted_table_array;
   (void) uncompact_info_.get_uncompact_info(uncompacted_replica_array, uncompacted_table_array);
@@ -611,6 +613,12 @@ void ObMajorMergeProgressChecker::print_unfinish_info(const int64_t cost_us)
       }
     }
   }
+  for (int64_t idx = 0; OB_SUCC(ret) && idx < uncompacted_replica_array.count(); ++idx) {
+    if (OB_FAIL(tmp_tablets_array.push_back(
+            uncompacted_replica_array.at(idx).get_tablet_id().id()))) {
+      LOG_WARN("failed to push array", KR(ret));
+    }
+  }
   // table in table_ids_ may finish verified in deal_with_rest_data_table()
   // need next loop to delete from array
   ADD_RS_COMPACTION_EVENT(
@@ -619,6 +627,7 @@ void ObMajorMergeProgressChecker::print_unfinish_info(const int64_t cost_us)
     common::ObTimeUtility::fast_current_time(),
     K(cost_us), K_(progress), "remain_table_id_count", table_ids_.count(),
     "remain_table_ids", tmp_table_id_array,
+    "remain_tablet_ids", tmp_tablets_array,
     K_(total_time_guard), K_(validator_statistics));
   LOG_INFO("succ to check merge progress", K_(tenant_id), K_(loop_cnt), K_(compaction_scn), K(cost_us),
     K_(progress), "remain_table_id_count", table_ids_.count(),
@@ -697,15 +706,17 @@ int ObMajorMergeProgressChecker::set_table_compaction_info_status(
 int ObMajorMergeProgressChecker::validate_index_ckm()
 {
   int ret = OB_SUCCESS;
-  if (idx_ckm_validate_array_.count() < 50
-    && progress_.get_wait_index_ckm_table_cnt() > 100
-    && !is_extra_check_round()) {
-    // do nothing
-  } else if (idx_ckm_validate_array_.count() > 0) {
-    if (OB_FAIL(loop_index_ckm_validate_array())) {
-      LOG_WARN("failed to loop index ckm validate array", KR(ret), K_(tenant_id));
+  if (idx_ckm_validate_array_.count() > 0) {
+    if (idx_ckm_validate_array_.count() < 50
+      && progress_.get_wait_index_ckm_table_cnt() > 100
+      && !is_extra_check_round()) {
+      // do nothing
+    } else {
+      if (OB_FAIL(loop_index_ckm_validate_array())) {
+        LOG_WARN("failed to loop index ckm validate array", KR(ret), K_(tenant_id));
+      }
     }
-    idx_ckm_validate_array_.reset();
+    idx_ckm_validate_array_.reuse(); // reuse array
   }
   return ret;
 }

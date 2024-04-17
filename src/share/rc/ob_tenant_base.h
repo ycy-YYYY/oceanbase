@@ -24,6 +24,7 @@
 #include "share/ob_tenant_role.h"//ObTenantRole
 #ifdef OB_BUILD_DBLINK
 #include "lib/oracleclient/ob_oci_environment.h"
+#include "lib/mysqlclient/ob_dblink_error_trans.h"
 #endif
 #include "lib/mysqlclient/ob_tenant_oci_envs.h"
 namespace oceanbase
@@ -84,6 +85,7 @@ class ObTenantMdsService;
   namespace checkpoint {
     class ObCheckPointService;
     class ObTabletGCService;
+    class ObCheckpointDiagnoseMgr;
   }
   class ObLobManager;
   class ObTransferService;
@@ -94,6 +96,7 @@ class ObTenantMdsService;
   class ObTenantDirectLoadMgr;
   class ObEmptyReadBucket;
   class ObTabletMemtableMgrPool;
+  class ObGlobalIteratorPool;
 } // namespace storage
 namespace transaction {
   class ObTenantWeakReadService; // 租户弱一致性读服务
@@ -352,7 +355,10 @@ using ObTableScanIteratorObjPool = common::ObServerObjectPool<oceanbase::storage
       rootserver::ObCloneScheduler*,                \
       share::ObIndexUsageInfoMgr*,                  \
       storage::ObTabletMemtableMgrPool*,            \
-      rootserver::ObMViewMaintenanceService*        \
+      rootserver::ObMViewMaintenanceService*,       \
+      storage::checkpoint::ObCheckpointDiagnoseMgr*, \
+      common::sqlclient::ObTenantDblinkKeeper*,      \
+      storage::ObGlobalIteratorPool*                 \
   )
 
 
@@ -389,8 +395,6 @@ using ObTableScanIteratorObjPool = common::ObServerObjectPool<oceanbase::storage
 #define MTL_MEM_SIZE() share::ObTenantEnv::get_tenant()->unit_memory_size()
 
 // 注意MTL_BIND调用需要在租户创建之前，否则会导致租户创建时无法调用到绑定的函数。
-#define MTL_BIND(INIT, DESTROY) \
-  share::ObTenantBase::mtl_bind_func(nullptr, INIT, nullptr, nullptr, nullptr, DESTROY);
 #define MTL_BIND2(NEW, INIT, START, STOP, WAIT, DESTROY) \
   share::ObTenantBase::mtl_bind_func(NEW, INIT, START, STOP, WAIT, DESTROY);
 

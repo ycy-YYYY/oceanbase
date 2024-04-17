@@ -52,8 +52,9 @@ struct ObMicroIndexInfo;
   do {                                                                      \
     if (nullptr != ptr) {                                                   \
       ptr->~T();                                                            \
-      if (OB_LIKELY(nullptr != ctx && nullptr != ctx->stmt_allocator_)) {   \
-        ctx->stmt_allocator_->free(ptr);                                    \
+      if (OB_LIKELY(nullptr != ctx &&                                       \
+          nullptr != ctx->get_long_life_allocator())) {                     \
+        ctx->get_long_life_allocator()->free(ptr);                          \
       }                                                                     \
       ptr = nullptr;                                                        \
     }                                                                       \
@@ -381,9 +382,12 @@ public:
       const int64_t begin_idx,
       int64_t &row_idx,
       bool &equal) = 0;
+  virtual int compare_rowkey(
+      const ObDatumRowkey &rowkey,
+      const int64_t index,
+      int32_t &compare_result) = 0;
   static int filter_white_filter(
       const sql::ObWhiteFilterExecutor &filter,
-      const common::ObObjMeta &obj_meta,
       const common::ObDatum &datum,
       bool &filtered);
   virtual bool has_lob_out_row() const = 0;

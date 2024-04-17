@@ -100,11 +100,21 @@ int ObTxCallbackList::append_callback(ObITransCallback *callback,
     TRANS_LOG(WARN, "before_append_cb failed", K(ret), KPC(callback));
   } else {
     const bool repos_lc = !for_replay && (log_cursor_ == &head_);
+    ObITransCallback *append_pos = NULL;
     if (!for_replay || parallel_replay || serial_final || !parallel_start_pos_) {
-      (void)get_tail()->append(callback);
+      append_pos = get_tail();
     } else {
-      parallel_start_pos_->get_prev()->append(callback);
+      append_pos = parallel_start_pos_->get_prev();
     }
+    // for replay, do sanity check: scn is incremental
+    if (for_replay
+        && append_pos != &head_  // the head with scn max
+        && append_pos->get_scn() > callback->get_scn()) {
+      ret = OB_ERR_UNEXPECTED;
+      TRANS_LOG(ERROR, "replay callback scn out of order", K(ret), KPC(callback), KPC(this));
+      ob_abort();
+    }
+    append_pos->append(callback);
     // start parallel replay, remember the position
     if (for_replay && parallel_replay && !serial_final && !parallel_start_pos_) {
       ATOMIC_STORE(&parallel_start_pos_, get_tail());
@@ -282,12 +292,20 @@ int ObTxCallbackList::remove_callbacks_for_fast_commit(const share::SCN stop_scn
   LockGuard guard(*this, LOCK_MODE::TRY_LOCK_ITERATE);
   if (guard.is_locked()) {
     int64_t remove_cnt = calc_need_remove_count_for_fast_commit_();
-    // use rm_logged_latch_ to protected multiple thread try to remove logged callbacks
-    bool skip_checksum = is_skip_checksum_();
-    const share::SCN right_bound = skip_checksum ? share::SCN::max_scn()
-      : (stop_scn.is_valid() ? stop_scn : sync_scn_);
+    share::SCN right_bound;
+    if (!stop_scn.is_valid()) {
+      // unspecified stop_scn, used callback_list's sync_scn_
+      right_bound = sync_scn_;
+    } else if (!sync_scn_.is_min()) {
+      // specified stop_scn, and callback_list's sync_scn_ is valid
+      // use mininum
+      right_bound = SCN::min(stop_scn, sync_scn_);
+    } else {
+      // callback_list's sync_scn is invalid, use stop_scn
+      right_bound = stop_scn;
+    }
     ObRemoveCallbacksForFastCommitFunctor functor(remove_cnt, right_bound);
-    if (!skip_checksum) {
+    if (!is_skip_checksum_()) {
       functor.set_checksumer(checksum_scn_, &batch_checksum_);
     }
     if (OB_FAIL(callback_(functor, get_guard(), log_cursor_, guard.state_))) {
@@ -381,14 +399,20 @@ int ObTxCallbackList::remove_callbacks_for_rollback_to(const transaction::ObTxSE
   struct Functor final : public ObRemoveCallbacksWCondFunctor {
     Functor(const share::SCN right_bound, const bool need_remove_data = true)
       : ObRemoveCallbacksWCondFunctor(right_bound, need_remove_data) {}
-    bool cond_for_remove(ObITransCallback *callback) {
+    bool cond_for_remove(ObITransCallback *callback, int &ret) {
       transaction::ObTxSEQ dseq = callback->get_seq_no();
-      // sanity check
-      OB_ASSERT(to_seq_.support_branch() == dseq.support_branch());
-      return (to_seq_.get_branch() == 0                     // match all branches
-              || to_seq_.get_branch() == dseq.get_branch()) // match target branch
-        && dseq.get_seq() > to_seq_.get_seq()               // exclusive
-        && dseq.get_seq() < from_seq_.get_seq();            // inclusive
+      bool match = false;
+      if (to_seq_.get_branch() == 0                          // match all branches
+          || to_seq_.get_branch() == dseq.get_branch()) {    // match target branch
+        if (dseq.get_seq() >= from_seq_.get_seq()) {
+          ret = OB_ERR_UNEXPECTED;
+          TRANS_LOG(ERROR, "found callback with seq_no larger than rollback from point",
+                    K(ret), K(dseq), K_(from_seq), K_(to_seq), KPC(callback));
+        } else {
+          match = dseq.get_seq() > to_seq_.get_seq();          // exclusive
+        }
+      }
+      return match;
     }
     transaction::ObTxSEQ to_seq_;
     transaction::ObTxSEQ from_seq_;
@@ -569,8 +593,14 @@ int ObTxCallbackList::tx_calc_checksum_before_scn(const SCN scn)
 int ObTxCallbackList::tx_calc_checksum_all()
 {
   int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(checksum_scn_.is_max())) {
-    // skip repeate calc checksum
+  if (OB_UNLIKELY(checksum_scn_.is_max() &&
+                  0 != checksum_)) {
+    // There could be a scenario where, under the condition that checksum_scn is
+    // persisted at its maximum value, while checksum_ might be 0. In such a
+    // scenario, we still rely on calculating the checksum to prevent mistakenly
+    // using 0 for checksum verification and avoid potential errors.
+    //
+    // skip the unnecessary repeate calc checksum
   } else {
     LockGuard guard(*this, LOCK_MODE::LOCK_ALL);
     ObCalcChecksumFunctor functor;
@@ -695,6 +725,7 @@ int ObTxCallbackList::replay_fail(const SCN scn, const bool serial_replay)
 void ObTxCallbackList::get_checksum_and_scn(uint64_t &checksum, SCN &checksum_scn)
 {
   LockGuard guard(*this, LOCK_MODE::LOCK_ITERATE);
+
   if (checksum_scn_.is_max()) {
     checksum = checksum_;
     checksum_scn = checksum_scn_;
@@ -712,10 +743,12 @@ void ObTxCallbackList::update_checksum(const uint64_t checksum, const SCN checks
 {
   LockGuard guard(*this, LOCK_MODE::LOCK_ITERATE);
   if (checksum_scn.is_max()) {
-    if (checksum == 0) {
+    if (checksum == 0 && id_ > 0) {
+      // only check extends list, because version before 4.3 with 0 may happen
+      // and they will be replayed into first list (id_ equals to 0)
       TRANS_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "checksum should not be 0 if checksum_scn is max", KPC(this));
     }
-    checksum_ = checksum;
+    checksum_ = checksum ?: 1;
   }
   batch_checksum_.set_base(checksum);
   checksum_scn_.atomic_set(checksum_scn);
@@ -778,7 +811,7 @@ int ObTxCallbackList::get_stat_for_display(ObTxCallbackListStat &stat) const
 {
   int ret = OB_SUCCESS;
 #define _ASSIGN_STAT_(x) stat.x = x;
-  LST_DO(_ASSIGN_STAT_, (), id_, sync_scn_, checksum_scn_, length_, logged_, removed_);
+  LST_DO(_ASSIGN_STAT_, (), id_, sync_scn_, length_, logged_, removed_, branch_removed_);
 #undef __ASSIGN_STAT_
   return ret;
 }
@@ -824,7 +857,27 @@ inline bool ObTxCallbackList::is_append_only_() const
   return callback_mgr_.is_callback_list_append_only(id_);
 }
 
-ObTxCallbackList::LockGuard::LockGuard(ObTxCallbackList &list,
+bool ObTxCallbackList::is_logging_blocked() const
+{
+  bool blocked = false;
+  if (log_latch_.try_lock()) {
+    // acquire APPEND lock to prevent append callback and
+    // reset log_cursor_ when log_cursor_ is point to head_
+    // due to no callback need to logging
+    // _NOTE_: the caller thread has hold TxCtx's FLUSH_REDO
+    // lock which prevent operations of remove callbacks
+    LockGuard guard(*this, LOCK_MODE::TRY_LOCK_APPEND);
+    if (guard.is_locked()) {
+      if (log_cursor_ != &head_ && log_cursor_->is_logging_blocked()) {
+        blocked = true;
+      }
+    }
+    log_latch_.unlock();
+  }
+  return blocked;
+}
+
+ObTxCallbackList::LockGuard::LockGuard(const ObTxCallbackList &list,
                                        const ObTxCallbackList::LOCK_MODE mode,
                                        ObTimeGuard *tg)
   : host_(list)
@@ -836,10 +889,13 @@ ObTxCallbackList::LockGuard::LockGuard(ObTxCallbackList &list,
     if (tg) {
       tg->click();
     }
-    lock_append_();
+    lock_append_(false);
     break;
   case LOCK_MODE::LOCK_APPEND:
-    lock_append_();
+    lock_append_(false);
+    break;
+  case LOCK_MODE::TRY_LOCK_APPEND:
+    lock_append_(true);
     break;
   case LOCK_MODE::LOCK_ITERATE:
     lock_iterate_(false);
@@ -865,17 +921,23 @@ void ObTxCallbackList::LockGuard::lock_iterate_(const bool try_lock)
     }
     if (state_.ITERATE_LOCKED_) {
       if (!host_.is_append_only_()) {
-        lock_append_();
+        lock_append_(false);
       }
     }
   }
 }
 
-void ObTxCallbackList::LockGuard::lock_append_()
+void ObTxCallbackList::LockGuard::lock_append_(const bool try_lock)
 {
   if (!state_.APPEND_LOCKED_) {
-    host_.append_latch_.lock();
-    state_.APPEND_LOCKED_ = true;
+    if (try_lock) {
+      if (host_.append_latch_.try_lock()) {
+        state_.APPEND_LOCKED_ = true;
+      }
+    } else {
+      host_.append_latch_.lock();
+      state_.APPEND_LOCKED_ = true;
+    }
   }
 }
 

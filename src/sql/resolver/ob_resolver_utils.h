@@ -23,6 +23,7 @@
 #include "sql/parser/parse_node.h"
 #include "sql/session/ob_sql_session_info.h"
 #include "pl/ob_pl.h"
+#include "pl/ob_pl_stmt.h"
 
 #define LOG_WARN_IGNORE_COL_NOTFOUND(ret, fmt, args...) \
   do {\
@@ -137,6 +138,23 @@ public:
                                            const ObString &column_name,
                                            bool& exists);
 
+  static int collect_schema_version(share::schema::ObSchemaGetterGuard &schema_guard,
+                                    const ObSQLSessionInfo *session_info,
+                                    ObRawExpr *expr,
+                                    ObIArray<ObSchemaObjVersion> &dependency_objects,
+                                    bool is_called_in_sql = false,
+                                    ObIArray<uint64_t> *dep_db_array = NULL);
+
+  static int add_dependency_synonym_object(share::schema::ObSchemaGetterGuard *schema_guard,
+                                            const ObSQLSessionInfo *session_info,
+                                            const ObSynonymChecker &synonym_checker,
+                                            DependenyTableStore &dep_table);
+
+  static int add_dependency_synonym_object(share::schema::ObSchemaGetterGuard *schema_guard,
+                                            const ObSQLSessionInfo *session_info,
+                                            const ObSynonymChecker &synonym_checker,
+                                            const pl::ObPLDependencyTable &dep_table);
+
   static int resolve_extended_type_info(const ParseNode &str_list_node,
                                         ObIArray<ObString>& type_info_array);
   // type_infos is %ori_cs_type, need convert to %cs_type first
@@ -166,7 +184,8 @@ public:
                               const share::schema::ObRoutineType routine_type,
                               common::ObIArray<const share::schema::ObIRoutineInfo *> &routines,
                               uint64_t udt_id = OB_INVALID_ID,
-                              const pl::ObPLResolveCtx *resolve_ctx = NULL);
+                              const pl::ObPLResolveCtx *resolve_ctx = NULL,
+                              ObSynonymChecker *synonym_checker = NULL);
   static int check_routine_exists(const ObSQLSessionInfo *session_info,
                                   ObSchemaChecker *schema_checker,
                                   pl::ObPLBlockNS *secondary_namespace,
@@ -239,7 +258,8 @@ public:
                          const common::ObIArray<ObRawExpr *> &expr_params,
                          const share::schema::ObRoutineInfo *&routine,
                          const ObString &dblink_name = ObString(""),
-                         ObIAllocator *allocator = NULL);
+                         ObIAllocator *allocator = NULL,
+                         ObSynonymChecker *synonym_checker = NULL);
   static int get_routine(const pl::ObPLResolveCtx &resolve_ctx,
                          uint64_t tenant_id,
                          const ObString &current_database,
@@ -248,7 +268,8 @@ public:
                          const ObString &routine_name,
                          const share::schema::ObRoutineType routine_type,
                          const common::ObIArray<ObRawExpr *> &expr_params,
-                         const share::schema::ObRoutineInfo *&routine);
+                         const share::schema::ObRoutineInfo *&routine,
+                         ObSynonymChecker *synonym_checker = NULL);
   static int resolve_sp_access_name(ObSchemaChecker &schema_checker,
                                     ObIAllocator &allocator,
                                     uint64_t tenant_id,
@@ -289,7 +310,8 @@ public:
   static int set_parallel_info(sql::ObSQLSessionInfo &session_info,
                                share::schema::ObSchemaGetterGuard &schema_guard,
                                ObRawExpr &expr,
-                               bool &contain_select_stmt);
+                               ObQueryCtx &ctx,
+                               ObIArray<ObSchemaObjVersion> &return_value_version);
 
   static int resolve_external_symbol(common::ObIAllocator &allocator,
                                      sql::ObRawExprFactory &expr_factory,
@@ -302,6 +324,7 @@ public:
                                      ObIArray<ObQualifiedName> &columns,
                                      ObIArray<ObRawExpr*> &real_exprs,
                                      ObRawExpr *&expr,
+                                     pl::ObPLPackageGuard *package_guard,
                                      bool is_prepare_protocol = false,
                                      bool is_check_mode = false,
                                      bool is_sql_scope = false);
@@ -311,6 +334,7 @@ public:
                                          ObRawExpr *&expr);
 
   static int revert_external_param_info(ExternalParams &param_info,
+                                        ObRawExprFactory &expr_factory,
                                         ObRawExpr *expr);
 
    /**
@@ -786,6 +810,9 @@ public:
       const uint64_t tenant_id,
       const obrpc::ObAlterTableArg &arg,
       const share::schema::ObTableSchema &table_schema);
+
+  static int64_t get_mysql_max_partition_num(const uint64_t tenant_id);
+  static int check_schema_valid_for_mview(const share::schema::ObTableSchema &table_schema);
 private:
   static int try_convert_to_unsiged(const ObExprResType restype,
                                     ObRawExpr& src_expr,

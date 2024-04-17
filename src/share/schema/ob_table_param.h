@@ -320,6 +320,8 @@ public:
   inline const common::ObIArray<int32_t> &get_pad_col_projector() const { return pad_col_projector_; }
   inline void disable_padding() { pad_col_projector_.reset(); }
   inline const storage::ObTableReadInfo &get_read_info() const { return main_read_info_; }
+  inline const common::ObIArray<storage::ObTableReadInfo *> *get_cg_read_infos() const
+  { return cg_read_infos_.empty() ? nullptr : &cg_read_infos_; }
 
   DECLARE_TO_STRING;
 
@@ -379,17 +381,23 @@ private:
   Projector pad_col_projector_;
 
   // need to serialize
+  // version of the mixture read info
+  int16_t read_param_version_;
   storage::ObTableReadInfo main_read_info_;
+  storage::ObFixedMetaObjArray<storage::ObTableReadInfo *> cg_read_infos_;
 
   bool has_virtual_column_;
   // specified to use lob locator or not
   bool use_lob_locator_;
   int64_t rowid_version_;
   Projector rowid_projector_;
+  ObString parser_name_;
   // if min cluster version < 4.1 use lob locator v1, else use lob locator v2.
   // use enable_lob_locator_v2_ to avoid locator type sudden change while table scan is running
   bool enable_lob_locator_v2_;
   bool is_spatial_index_;
+  bool is_fts_index_;
+  bool is_multivalue_index_;
 };
 } //namespace schema
 } //namespace share

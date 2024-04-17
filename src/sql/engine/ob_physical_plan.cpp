@@ -33,6 +33,7 @@
 #include "share/ob_truncated_string.h"
 #include "sql/spm/ob_spm_evolution_plan.h"
 #include "sql/engine/ob_exec_feedback_info.h"
+#include "sql/engine/expr/ob_expr_sql_udt_utils.h"
 
 namespace oceanbase
 {
@@ -97,8 +98,6 @@ ObPhysicalPlan::ObPhysicalPlan(MemoryContext &mem_context /* = CURRENT_CONTEXT *
     stat_(),
     op_stats_(),
     need_drive_dml_query_(false),
-    tx_id_(-1),
-    tm_sessid_(-1),
     var_init_exprs_(allocator_),
     is_returning_(false),
     is_late_materialized_(false),
@@ -135,7 +134,12 @@ ObPhysicalPlan::ObPhysicalPlan(MemoryContext &mem_context /* = CURRENT_CONTEXT *
     is_enable_px_fast_reclaim_(false),
     use_rich_format_(false),
     subschema_ctx_(allocator_),
-    all_local_session_vars_(&allocator_)
+    disable_auto_memory_mgr_(false),
+    all_local_session_vars_(&allocator_),
+    udf_has_dml_stmt_(false),
+    mview_ids_(&allocator_),
+    enable_inc_direct_load_(false),
+    enable_replace_(false)
 {
 }
 
@@ -225,16 +229,16 @@ void ObPhysicalPlan::reset()
   append_table_id_ = 0;
   stat_.expected_worker_map_.destroy();
   stat_.minimal_worker_map_.destroy();
-  tx_id_ = -1;
-  tm_sessid_ = -1;
-  var_init_exprs_.reset();
   need_record_plan_info_ = false;
   logical_plan_.reset();
   is_enable_px_fast_reclaim_ = false;
   subschema_ctx_.reset();
   all_local_session_vars_.reset();
+  udf_has_dml_stmt_ = false;
+  mview_ids_.reset();
+  enable_inc_direct_load_ = false;
+  enable_replace_ = false;
 }
-
 void ObPhysicalPlan::destroy()
 {
 #ifndef NDEBUG
@@ -261,6 +265,7 @@ int ObPhysicalPlan::copy_common_info(ObPhysicalPlan &src)
   //copy plan_id/hint/privs
   object_id_ = src.object_id_;
   min_cluster_version_ = src.min_cluster_version_;
+  disable_auto_memory_mgr_ = src.disable_auto_memory_mgr_;
   if (OB_FAIL(set_phy_plan_hint(src.get_phy_plan_hint()))) {
     LOG_WARN("Failed to copy query hint", K(ret));
   } else if (OB_FAIL(set_stmt_need_privs(src.get_stmt_need_privs()))) {
@@ -476,7 +481,8 @@ void ObPhysicalPlan::update_plan_stat(const ObAuditRecordData &record,
   if (record.is_timeout()) {
     ATOMIC_INC(&(stat_.timeout_count_));
     ATOMIC_AAF(&(stat_.total_process_time_), record.get_process_time());
-  } else if (!GCONF.enable_perf_event) { // short route
+  }
+  if (!GCONF.enable_perf_event) { // short route
     ATOMIC_AAF(&(stat_.elapsed_time_), record.get_elapsed_time());
     ATOMIC_AAF(&(stat_.cpu_time_), record.get_elapsed_time() - record.exec_record_.wait_time_end_
                                    - (record.exec_timestamp_.run_ts_ - record.exec_timestamp_.receive_ts_));
@@ -788,8 +794,14 @@ OB_SERIALIZE_MEMBER(ObPhysicalPlan,
                     is_enable_px_fast_reclaim_,
                     gtt_session_scope_ids_,
                     gtt_trans_scope_ids_,
+                    subschema_ctx_,
                     use_rich_format_,
-                    subschema_ctx_);
+                    disable_auto_memory_mgr_,
+                    udf_has_dml_stmt_,
+                    stat_.format_sql_id_,
+                    mview_ids_,
+                    enable_inc_direct_load_,
+                    enable_replace_);
 
 int ObPhysicalPlan::set_table_locations(const ObTablePartitionInfoArray &infos,
                                         ObSchemaGetterGuard &schema_guard)
@@ -1118,7 +1130,7 @@ void ObPhysicalPlan::calc_whether_need_trans()
     }
   }
   // mysql允许select udf中有dml，需要保证select 整体原子性
-  if (!bool_ret && contain_pl_udf_or_trigger() && lib::is_mysql_mode() && stmt::T_EXPLAIN != stmt_type_) {
+  if (!bool_ret && contain_pl_udf_or_trigger() && udf_has_dml_stmt() && lib::is_mysql_mode() && stmt::T_EXPLAIN != stmt_type_) {
     bool_ret = true;
   }
   is_need_trans_ = bool_ret;
@@ -1178,7 +1190,6 @@ int ObPhysicalPlan::update_cache_obj_stat(ObILibCacheCtx &ctx)
     stat_.plan_hash_value_ = get_signature();
     stat_.gen_time_ = ObTimeUtility::current_time();
     stat_.schema_version_ = get_tenant_schema_version();
-    stat_.last_active_time_ = stat_.gen_time_;
     stat_.hit_count_ = 0;
     stat_.mem_used_ = get_mem_size();
     stat_.slow_count_ = 0;
@@ -1275,6 +1286,11 @@ int ObPhysicalPlan::update_cache_obj_stat(ObILibCacheCtx &ctx)
         pos += 1;
         stat_.plan_tmp_tbl_name_str_len_ = static_cast<int32_t>(pos);
       }
+    }
+    if (OB_SUCC(ret)) {
+      // Update last_active_time_ last, because last_active_time_ is used to
+      // indicate whether the cache stat has been updated.
+      stat_.last_active_time_ = stat_.gen_time_;
     }
   }
   return ret;

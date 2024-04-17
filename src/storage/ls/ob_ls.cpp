@@ -106,7 +106,8 @@ ObLS::ObLS()
     switch_epoch_(0),
     ls_meta_(),
     rs_reporter_(nullptr),
-    startup_transfer_info_()
+    startup_transfer_info_(),
+    need_delay_resource_recycle_(false)
 {}
 
 ObLS::~ObLS()
@@ -211,6 +212,7 @@ int ObLS::init(const share::ObLSID &ls_id,
       LOG_WARN("register to service failed", K(ret));
     } else {
       election_priority_.set_ls_id(ls_id);
+      need_delay_resource_recycle_ = false;
       is_inited_ = true;
       LOG_INFO("ls init success", K(ls_id));
     }
@@ -444,25 +446,6 @@ bool ObLS::is_create_committed() const
 {
   ObLSPersistentState persistent_state = ls_meta_.get_persistent_state();
   return (persistent_state.is_normal_state() || persistent_state.is_ha_state());
-}
-
-bool ObLS::is_need_gc() const
-{
-  int ret = OB_SUCCESS;
-  bool bool_ret = false;
-  ObMigrationStatus migration_status;
-  ObLSPersistentState create_status = ls_meta_.get_persistent_state();
-  if (create_status.is_need_gc()) {
-    bool_ret = true;
-  } else if (OB_FAIL(ls_meta_.get_migration_status(migration_status))) {
-    LOG_WARN("get migration status failed", K(ret), K(ls_meta_.ls_id_));
-  } else if (ObMigrationStatusHelper::check_allow_gc_abandoned_ls(migration_status)) {
-    bool_ret = true;
-  }
-  if (bool_ret) {
-    FLOG_INFO("ls need gc", K(bool_ret), K(create_status), K(migration_status));
-  }
-  return bool_ret;
 }
 
 bool ObLS::is_clone_first_step() const
@@ -740,6 +723,7 @@ void ObLS::destroy()
   tenant_id_ = OB_INVALID_TENANT_ID;
   startup_transfer_info_.reset();
   ls_transfer_status_.reset();
+  need_delay_resource_recycle_ = false;
 }
 
 int ObLS::offline_tx_(const int64_t start_ts)
@@ -776,6 +760,8 @@ int ObLS::offline_(const int64_t start_ts)
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("ls is not inited", K(ret));
+  } else if (running_state_.is_stopped()) {
+    LOG_INFO("ls is stopped state, do nothing", K(ret), K(ls_meta_));
   } else if (OB_FAIL(running_state_.pre_offline(ls_meta_.ls_id_))) {
     LOG_WARN("ls pre offline failed", K(ret), K(ls_meta_));
   } else if (FALSE_IT(update_state_seq_())) {
@@ -1320,7 +1306,8 @@ int ObLS::get_replica_status(ObReplicaStatus &replica_status)
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("migration status is not valid", K(ret), K(migration_status));
   } else if (OB_MIGRATION_STATUS_NONE == migration_status
-      || OB_MIGRATION_STATUS_REBUILD == migration_status) {
+      || OB_MIGRATION_STATUS_REBUILD == migration_status
+      || OB_MIGRATION_STATUS_REBUILD_WAIT == migration_status) {
     replica_status = REPLICA_STATUS_NORMAL;
   } else {
     replica_status = REPLICA_STATUS_OFFLINE;
@@ -1699,13 +1686,8 @@ int ObLS::finish_slog_replay()
     LOG_WARN("failed to set migration status", K(ret), K(new_migration_status));
   } else if (OB_FAIL(running_state_.create_finish(ls_meta_.ls_id_))) {
     LOG_WARN("create finish failed", KR(ret), K(ls_meta_));
-  } else if (is_need_gc()) {
-    LOG_INFO("this ls should be gc later", KPC(this));
-    // ls will be gc later and tablets in the ls are not complete,
-    // so skip the following steps, otherwise load_ls_inner_tablet maybe encounter error.
   } else {
     // after slog replayed, the ls must be offlined state.
-    ls_tablet_svr_.enable_to_read();
     update_state_seq_();
   }
   return ret;
@@ -1714,6 +1696,7 @@ int ObLS::finish_slog_replay()
 int ObLS::replay_get_tablet_no_check(
     const common::ObTabletID &tablet_id,
     const SCN &scn,
+    const bool replay_allow_tablet_not_exist,
     ObTabletHandle &handle) const
 {
   int ret = OB_SUCCESS;
@@ -1747,9 +1730,10 @@ int ObLS::replay_get_tablet_no_check(
       } else if (!max_scn.is_valid()) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("max_scn is invalid", KR(ret), K(key), K(scn), K(tablet_change_checkpoint_scn));
-      } else if (scn > SCN::scn_inc(max_scn)) {
+      } else if (scn > SCN::scn_inc(max_scn) || !replay_allow_tablet_not_exist) {
         ret = OB_EAGAIN;
-        LOG_INFO("tablet does not exist, but need retry", KR(ret), K(key), K(scn), K(tablet_change_checkpoint_scn), K(max_scn));
+        LOG_INFO("tablet does not exist, but need retry", KR(ret), K(key), K(scn),
+            K(tablet_change_checkpoint_scn), K(max_scn), K(replay_allow_tablet_not_exist));
       } else {
         ret = OB_OBSOLETE_CLOG_NEED_SKIP;
         LOG_INFO("tablet already gc, but scn is more than tablet_change_checkpoint_scn", KR(ret),
@@ -1777,11 +1761,12 @@ int ObLS::replay_get_tablet(
   ObTablet *tablet = nullptr;
   ObTabletCreateDeleteMdsUserData data;
   bool is_committed = false;
+  const bool replay_allow_tablet_not_exist = true;
 
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("ls is not inited", KR(ret));
-  } else if (OB_FAIL(replay_get_tablet_no_check(tablet_id, scn, tablet_handle))) {
+  } else if (OB_FAIL(replay_get_tablet_no_check(tablet_id, scn, replay_allow_tablet_not_exist, tablet_handle))) {
     LOG_WARN("failed to get tablet", K(ret), K(ls_id), K(tablet_id), K(scn));
   } else if (tablet_id.is_ls_inner_tablet()) {
     // do nothing
@@ -1830,7 +1815,7 @@ int ObLS::replay_get_tablet(
   return ret;
 }
 
-int ObLS::logstream_freeze(const bool is_sync, const int64_t abs_timeout_ts)
+int ObLS::logstream_freeze(const int64_t trace_id, const bool is_sync, const int64_t abs_timeout_ts)
 {
   int ret = OB_SUCCESS;
   ObFuture<int> result;
@@ -1848,7 +1833,7 @@ int ObLS::logstream_freeze(const bool is_sync, const int64_t abs_timeout_ts)
     } else if (OB_UNLIKELY(is_offline())) {
       ret = OB_MINOR_FREEZE_NOT_ALLOW;
       LOG_WARN("offline ls not allowed freeze", K(ret), K_(ls_meta));
-    } else if (OB_FAIL(ls_freezer_.logstream_freeze(&result))) {
+    } else if (OB_FAIL(ls_freezer_.logstream_freeze(trace_id, &result))) {
       LOG_WARN("logstream freeze failed", K(ret), K_(ls_meta));
     } else {
       // do nothing
@@ -1919,9 +1904,10 @@ int ObLS::tablet_freeze_with_rewrite_meta(const ObTabletID &tablet_id, const int
   return ret;
 }
 
-int ObLS::batch_tablet_freeze(const ObIArray<ObTabletID> &tablet_ids,
-                              const bool is_sync,
-                              const int64_t abs_timeout_ts)
+int ObLS::batch_tablet_freeze(const int64_t trace_id,
+    const ObIArray<ObTabletID> &tablet_ids,
+    const bool is_sync,
+    const int64_t abs_timeout_ts)
 {
   int ret = OB_SUCCESS;
   ObFuture<int> result;
@@ -1939,7 +1925,7 @@ int ObLS::batch_tablet_freeze(const ObIArray<ObTabletID> &tablet_ids,
     } else if (OB_UNLIKELY(is_offline())) {
       ret = OB_MINOR_FREEZE_NOT_ALLOW;
       LOG_WARN("offline ls not allowed freeze", K(ret), K_(ls_meta));
-    } else if (OB_FAIL(ls_freezer_.batch_tablet_freeze(tablet_ids, &result))) {
+    } else if (OB_FAIL(ls_freezer_.batch_tablet_freeze(trace_id, tablet_ids, &result))) {
       LOG_WARN("batch tablet freeze failed", K(ret));
     } else {
       // do nothing
@@ -2507,12 +2493,27 @@ int ObLS::set_ls_migration_gc(
   } else if (OB_FAIL(ls_meta_.set_migration_status(change_status, write_slog))) {
     LOG_WARN("failed to set migration status", K(ret), K(change_status));
   } else {
-    ls_tablet_svr_.disable_to_read();
     allow_gc = true;
   }
   return ret;
 }
 
+bool ObLS::need_delay_resource_recycle() const
+{
+  LOG_INFO("need delay resource recycle", KPC(this));
+  return need_delay_resource_recycle_;
+}
 
+void ObLS::set_delay_resource_recycle()
+{
+  need_delay_resource_recycle_ = true;
+  LOG_INFO("set delay resource recycle", KPC(this));
+}
+
+void ObLS::clear_delay_resource_recycle()
+{
+  need_delay_resource_recycle_ = false;
+  LOG_INFO("clear delay resource recycle", KPC(this));
+}
 }
 }

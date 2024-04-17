@@ -1176,9 +1176,9 @@ int ObBackupStorageInfo::parse_storage_info_(const char *storage_info, bool &has
   int ret = OB_SUCCESS;
   if (OB_ISNULL(storage_info) || strlen(storage_info) >= OB_MAX_BACKUP_STORAGE_INFO_LENGTH) {
     ret = OB_INVALID_BACKUP_DEST;
-    LOG_WARN("storage info is invalid", K(ret), K(storage_info), K(strlen(storage_info)));
+    LOG_WARN("storage info is invalid", K(ret), KP(storage_info), K(strlen(storage_info)));
   } else if (OB_FAIL(ObObjectStorageInfo::parse_storage_info_(storage_info, has_needed_extension))) {
-    LOG_WARN("failed to parse storage info", K(ret), K(storage_info));
+    LOG_WARN("failed to parse storage info", K(ret), KP(storage_info));
   } else {
     char tmp[OB_MAX_BACKUP_STORAGE_INFO_LENGTH] = { 0 };
     char serialize_key[OB_MAX_BACKUP_SERIALIZEKEY_LENGTH] = { 0 };
@@ -1260,7 +1260,7 @@ int ObBackupStorageInfo::decrypt_access_key_(const char *buf)
   } else if (OB_FAIL(ObEncryptionUtil::decrypt_sys_data(OB_SYS_TENANT_ID,
       deserialize_buf, deserialize_size,
       decrypt_key, sizeof(decrypt_key), key_len))) {
-    LOG_WARN("failed to decrypt authorization key", K(ret), K(deserialize_buf), K(deserialize_size));
+    LOG_WARN("failed to decrypt authorization key", K(ret), KP(deserialize_buf), K(deserialize_size));
   } else if (key_len >= sizeof(decrypt_key) || (key_len + strlen(ACCESS_KEY)) >= sizeof(access_key_)) {
     ret = OB_SIZE_OVERFLOW;
     LOG_WARN("decrypt key size overflow", K(ret), K(key_len), K(sizeof(decrypt_key)));
@@ -3034,7 +3034,8 @@ int ObBackupTaskStatus::set_status(const char *str)
 }
 
 OB_SERIALIZE_MEMBER(ObBackupStats, input_bytes_, output_bytes_, tablet_count_, finish_tablet_count_,
-    macro_block_count_, finish_macro_block_count_, extra_bytes_, finish_file_count_);
+    macro_block_count_, finish_macro_block_count_, extra_bytes_, finish_file_count_,
+    log_file_count_, finish_log_file_count_);
 
 ObBackupStats::ObBackupStats()
   : input_bytes_(0),
@@ -3044,7 +3045,9 @@ ObBackupStats::ObBackupStats()
     macro_block_count_(0),
     finish_macro_block_count_(0),
     extra_bytes_(0),
-    finish_file_count_(0)
+    finish_file_count_(0),
+    log_file_count_(0),
+    finish_log_file_count_(0)
 {
 }
 

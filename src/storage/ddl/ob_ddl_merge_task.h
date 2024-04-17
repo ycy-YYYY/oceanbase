@@ -84,6 +84,22 @@ private:
   DISALLOW_COPY_AND_ASSIGN(ObDDLTableMergeTask);
 };
 
+class ObDDLMacroBlockIterator final
+{
+public:
+  ObDDLMacroBlockIterator();
+  ~ObDDLMacroBlockIterator();
+  int open(blocksstable::ObSSTable *sstable, const blocksstable::ObDatumRange &query_range, const ObITableReadInfo &read_info, ObIAllocator &allocator);
+
+  int get_next(blocksstable::ObDataMacroBlockMeta &data_macro_meta, int64_t &end_row_offset);
+private:
+  bool is_inited_;
+  blocksstable::ObSSTable *sstable_;
+  ObIAllocator *allocator_;
+  blocksstable::ObIMacroBlockIterator *macro_block_iter_;
+  blocksstable::ObSSTableSecMetaIterator *sec_meta_iter_;
+  blocksstable::DDLBtreeIterator ddl_iter_;
+};
 
 class ObTabletDDLUtil
 {
@@ -95,13 +111,23 @@ public:
       const uint64_t data_format_version,
       const blocksstable::ObSSTable *first_ddl_sstable,
       const share::SCN &end_scn,
+      const ObStorageSchema *storage_schema,
       blocksstable::ObWholeDataStoreDesc &data_desc);
 
+  static int get_compact_meta_array(
+      ObTablet &tablet,
+      ObIArray<blocksstable::ObSSTable *> &sstables,
+      const ObTabletDDLParam &ddl_param,
+      const ObITableReadInfo &read_info,
+      const ObStorageSchema *storage_schema,
+      common::ObArenaAllocator &allocator,
+      ObArray<ObDDLBlockMeta> &sorted_metas);
   static int create_ddl_sstable(
       ObTablet &tablet,
       const ObTabletDDLParam &ddl_param,
-      const ObIArray<const blocksstable::ObDataMacroBlockMeta *> &meta_array,
+      const ObIArray<ObDDLBlockMeta> &meta_array,
       const blocksstable::ObSSTable *first_ddl_sstable,
+      const ObStorageSchema *storage_schema,
       common::ObArenaAllocator &allocator,
       ObTableHandleV2 &sstable_handle);
 
@@ -109,6 +135,7 @@ public:
       ObLS &ls,
       ObTablet &tablet,
       const ObTabletDDLParam &ddl_param,
+      const ObStorageSchema *storage_schema,
       common::ObArenaAllocator &allocator,
       blocksstable::ObSSTable *sstable);
 
@@ -127,7 +154,8 @@ public:
                                  const int64_t execution_id,
                                  const int64_t ddl_task_id,
                                  const int64_t *column_checksums,
-                                 const int64_t column_count);
+                                 const int64_t column_count,
+                                 const uint64_t data_format_version);
 
   static int check_and_get_major_sstable(
       const share::ObLSID &ls_id,
@@ -158,6 +186,7 @@ private:
       const ObTabletDDLParam &ddl_param,
       const blocksstable::ObSSTable *first_ddl_sstable,
       const int64_t macro_block_column_count,
+      const ObStorageSchema *storage_schema,
       common::ObArenaAllocator &allocator,
       ObTableHandleV2 &sstable_handle);
 

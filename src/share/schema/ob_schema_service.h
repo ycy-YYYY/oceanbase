@@ -119,6 +119,8 @@ enum ObSchemaOperationCategory
   ACT(OB_DDL_MODIFY_MATERIALIZED_VIEW_STATUS, = 62)              \
   ACT(OB_DDL_ADD_COLUMN_GROUP, = 63)                             \
   ACT(OB_DDL_DROP_COLUMN_GROUP, = 64)                            \
+  ACT(OB_DDL_EXCHANGE_PARTITION, = 65)                           \
+  ACT(OB_DDL_MODIFY_MVIEW_REFERENCE_TABLE_STATUS, = 66)          \
   ACT(OB_DDL_TABLE_OPERATION_END, = 100)                         \
   ACT(OB_DDL_TENANT_OPERATION_BEGIN, = 101)                      \
   ACT(OB_DDL_ADD_TENANT,)                                        \
@@ -582,6 +584,7 @@ public:
       new_part_name_()
   {
   }
+  DISABLE_COPY_ASSIGN(AlterTableSchema);
   inline const common::ObString &get_origin_table_name() const { return origin_table_name_; }
   inline int set_origin_table_name(const common::ObString &origin_table_name);
   inline const common::ObString &get_database_name() const { return new_database_name_; }

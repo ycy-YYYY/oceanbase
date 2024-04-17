@@ -24,6 +24,7 @@ ob_set_subtarget(ob_rootserver backup
 
 ob_set_subtarget(ob_rootserver common
   ob_bootstrap.cpp
+  ob_admin_drtask_util.cpp
   ob_disaster_recovery_task_table_updater.cpp
   ob_balance_group_ls_stat_operator.cpp
   ob_disaster_recovery_info.cpp
@@ -84,6 +85,7 @@ ob_set_subtarget(ob_rootserver common
   ob_ls_service_helper.cpp
   ob_tenant_role_transition_service.cpp
   ob_tenant_transfer_service.cpp
+  ob_transfer_partition_task.cpp
   ob_tenant_balance_service.cpp
   ob_ls_balance_helper.cpp
   ob_balance_task_execute_service.cpp
@@ -97,6 +99,7 @@ ob_set_subtarget(ob_rootserver common
   ob_lob_meta_builder.cpp
   ob_ls_recovery_stat_handler.cpp
   ob_shrink_expand_resource_pool_checker.cpp
+  ob_transfer_partition_command.cpp
 )
 
 ob_set_subtarget(ob_rootserver balance
@@ -111,7 +114,6 @@ ob_set_subtarget(ob_rootserver balance
 ob_set_subtarget(ob_rootserver ddl_task
   ddl_task/ob_column_redefinition_task.cpp
   ddl_task/ob_constraint_task.cpp
-
   ddl_task/ob_ddl_retry_task.cpp
   ddl_task/ob_ddl_scheduler.cpp
   ddl_task/ob_ddl_single_replica_executor.cpp
@@ -182,6 +184,7 @@ ob_set_subtarget(ob_rootserver mview
   mview/ob_mlog_maintenance_task.cpp
   mview/ob_mview_maintenance_task.cpp
   mview/ob_mview_refresh_stats_maintenance_task.cpp
+  mview/ob_mview_timer_task.cpp
 )
 
 ob_server_add_target(ob_rootserver)

@@ -183,7 +183,6 @@ public:
                              const bool need_update_schema_version = true);
   virtual int drop_database(const share::schema::ObDatabaseSchema &db_schema,
                             common::ObMySQLTransaction &trans,
-                            share::schema::ObSchemaGetterGuard &guard,
                             const common::ObString *ddl_stmt_str = NULL);
   virtual int create_tablegroup(share::schema::ObTablegroupSchema &tablegroup_schema,
                                 common::ObMySQLTransaction &trans,
@@ -477,7 +476,6 @@ public:
 
   virtual int drop_database_to_recyclebin(const share::schema::ObDatabaseSchema &database_schema,
                                           common::ObMySQLTransaction &trans,
-                                          share::schema::ObSchemaGetterGuard &guard,
                                           const common::ObString *ddl_stmt_str);
   virtual int flashback_database_from_recyclebin(const share::schema::ObDatabaseSchema &database_schema,
                                                  common::ObMySQLTransaction &trans,
@@ -485,11 +483,9 @@ public:
                                                  share::schema::ObSchemaGetterGuard &schema_guard,
                                                  const common::ObString &ddl_stmt_str);
   virtual int purge_table_of_database(const share::schema::ObDatabaseSchema &db_schema,
-                                      common::ObMySQLTransaction &trans,
-                                      share::schema::ObSchemaGetterGuard &guard);
+                                      common::ObMySQLTransaction &trans);
   virtual int purge_database_in_recyclebin(const share::schema::ObDatabaseSchema &database_schema,
                                            common::ObMySQLTransaction &trans,
-                                           share::schema::ObSchemaGetterGuard &guard,
                                            const common::ObString *ddl_stmt_str);
   virtual int purge_table_with_aux_table(
       const share::schema::ObTableSchema &table_schema,
@@ -783,6 +779,7 @@ public:
                      common::ObIArray<share::schema::ObDependencyInfo> &dep_infos,
                      const common::ObString *ddl_stmt_str/*=NULL*/);
   int alter_package(const share::schema::ObPackageInfo &package_info,
+                    ObSchemaGetterGuard &schema_guard,
                     common::ObMySQLTransaction &trans,
                     ObIArray<ObRoutineInfo> &public_routine_infos,
                     share::schema::ObErrorInfo &error_info,
@@ -979,7 +976,6 @@ public:
                            share::schema::ObColumnSchemaV2 &column_schema);
   int update_single_column_group(common::ObMySQLTransaction &trans,
                                  const ObTableSchema &origin_table_schema,
-                                 const ObColumnSchemaV2 &origin_column_schema,
                                  const ObColumnSchemaV2 &new_column_schema);
   int update_partition_option(common::ObMySQLTransaction &trans,
                               share::schema::ObTableSchema &table_schema);
@@ -1078,8 +1074,7 @@ private:
                                      common::ObMySQLTransaction &trans,
                                      share::schema::ObSchemaGetterGuard &schema_guard);
   int update_table_version_of_db(const share::schema::ObDatabaseSchema &database_schema,
-                                  common::ObMySQLTransaction &trans,
-                                  share::schema::ObSchemaGetterGuard &schema_guard);
+                                 common::ObMySQLTransaction &trans);
   int drop_trigger_cascade(const share::schema::ObTableSchema &table_schema,
                            common::ObMySQLTransaction &trans);
   template <typename SchemaType>

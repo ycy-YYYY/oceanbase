@@ -282,10 +282,11 @@ int ObTableLoadMerger::build_merge_ctx()
   merge_param.is_fast_heap_table_ = store_ctx_->is_fast_heap_table_;
   merge_param.online_opt_stat_gather_ = param_.online_opt_stat_gather_;
   merge_param.is_column_store_ = store_ctx_->ctx_->schema_.is_column_store_;
+  merge_param.fill_cg_thread_cnt_ = param_.session_count_;
   merge_param.px_mode_ = param_.px_mode_;
   merge_param.insert_table_ctx_ = store_ctx_->insert_table_ctx_;
   merge_param.dml_row_handler_ = store_ctx_->error_row_handler_;
-  if (OB_FAIL(merge_ctx_.init(merge_param, store_ctx_->ls_partition_ids_,
+  if (OB_FAIL(merge_ctx_.init(store_ctx_->ctx_, merge_param, store_ctx_->ls_partition_ids_,
                               store_ctx_->target_ls_partition_ids_))) {
     LOG_WARN("fail to init merge ctx", KR(ret));
   } else if (store_ctx_->is_multiple_mode_) {
@@ -304,6 +305,9 @@ int ObTableLoadMerger::build_merge_ctx()
       } else {
         table_array = &tablet_result->table_array_;
       }
+      if (OB_NOT_NULL(tablet_result)) {
+        table_compact_ctx_.result_.tablet_result_map_.revert(tablet_result);
+      }
     } else {
       table_array = &empty_table_array;
     }
@@ -311,6 +315,7 @@ int ObTableLoadMerger::build_merge_ctx()
       // for optimize split range is too slow
       ObArray<ObDirectLoadMultipleSSTable *> multiple_sstable_array;
       ObDirectLoadMultipleMergeRangeSplitter range_splitter;
+      multiple_sstable_array.set_tenant_id(MTL_ID());
       for (int64_t i = 0; OB_SUCC(ret) && i < table_array->count(); ++i) {
         ObDirectLoadMultipleSSTable *sstable = nullptr;
         if (OB_ISNULL(sstable = dynamic_cast<ObDirectLoadMultipleSSTable *>(table_array->at(i)))) {
@@ -379,6 +384,9 @@ int ObTableLoadMerger::build_merge_ctx()
           LOG_WARN("fail to build merge task", KR(ret));
         }
       }
+      if (OB_NOT_NULL(tablet_result)) {
+        table_compact_ctx_.result_.tablet_result_map_.revert(tablet_result);
+      }
     }
   }
   if (OB_SUCC(ret)) {
@@ -395,6 +403,7 @@ int ObTableLoadMerger::collect_dml_stat(ObTableLoadDmlStat &dml_stats)
   if (store_ctx_->is_fast_heap_table_) {
     ObDirectLoadMultiMap<ObTabletID, ObDirectLoadFastHeapTable *> tables;
     ObArray<ObTableLoadTransStore *> trans_store_array;
+    trans_store_array.set_tenant_id(MTL_ID());
     if (OB_FAIL(tables.init())) {
       LOG_WARN("fail to init table", KR(ret));
     } else if (OB_FAIL(store_ctx_->get_committed_trans_stores(trans_store_array))) {
@@ -421,7 +430,8 @@ int ObTableLoadMerger::collect_dml_stat(ObTableLoadDmlStat &dml_stats)
       }
       for (int i = 0; OB_SUCC(ret) && i < merge_ctx_.get_tablet_merge_ctxs().count(); ++i) {
         ObDirectLoadTabletMergeCtx *tablet_ctx = merge_ctx_.get_tablet_merge_ctxs().at(i);
-        ObArray<ObDirectLoadFastHeapTable *> heap_table_array ;
+        ObArray<ObDirectLoadFastHeapTable *> heap_table_array;
+        heap_table_array.set_tenant_id(MTL_ID());
         if (OB_FAIL(tables.get(tablet_ctx->get_tablet_id(), heap_table_array))) {
           LOG_WARN("get heap sstable failed", KR(ret));
         } else if (OB_FAIL(tablet_ctx->collect_dml_stat(heap_table_array, dml_stats))) {
@@ -432,8 +442,8 @@ int ObTableLoadMerger::collect_dml_stat(ObTableLoadDmlStat &dml_stats)
   } else {
     for (int i = 0; OB_SUCC(ret) && i < merge_ctx_.get_tablet_merge_ctxs().count(); ++i) {
       ObDirectLoadTabletMergeCtx *tablet_ctx = merge_ctx_.get_tablet_merge_ctxs().at(i);
-      ObArray<ObDirectLoadFastHeapTable *> heap_table_array ;
-      if (OB_FAIL(tablet_ctx->collect_dml_stat(heap_table_array, dml_stats))) {
+      ObArray<ObDirectLoadFastHeapTable *> empty_heap_table_array;
+      if (OB_FAIL(tablet_ctx->collect_dml_stat(empty_heap_table_array, dml_stats))) {
         LOG_WARN("fail to collect sql statics", KR(ret));
       }
     }
@@ -447,6 +457,7 @@ int ObTableLoadMerger::collect_sql_statistics(ObTableLoadSqlStatistics &sql_stat
   if (store_ctx_->is_fast_heap_table_) {
     ObDirectLoadMultiMap<ObTabletID, ObDirectLoadFastHeapTable *> tables;
     ObArray<ObTableLoadTransStore *> trans_store_array;
+    trans_store_array.set_tenant_id(MTL_ID());
     if (OB_FAIL(tables.init())) {
       LOG_WARN("fail to init table", KR(ret));
     } else if (OB_FAIL(store_ctx_->get_committed_trans_stores(trans_store_array))) {
@@ -473,7 +484,8 @@ int ObTableLoadMerger::collect_sql_statistics(ObTableLoadSqlStatistics &sql_stat
       }
       for (int i = 0; OB_SUCC(ret) && i < merge_ctx_.get_tablet_merge_ctxs().count(); ++i) {
         ObDirectLoadTabletMergeCtx *tablet_ctx = merge_ctx_.get_tablet_merge_ctxs().at(i);
-        ObArray<ObDirectLoadFastHeapTable *> heap_table_array ;
+        ObArray<ObDirectLoadFastHeapTable *> heap_table_array;
+        heap_table_array.set_tenant_id(MTL_ID());
         if (OB_FAIL(tables.get(tablet_ctx->get_tablet_id(), heap_table_array))) {
           LOG_WARN("get heap sstable failed", KR(ret));
         } else if (OB_FAIL(tablet_ctx->collect_sql_statistics(heap_table_array, sql_statistics))) {
@@ -484,7 +496,8 @@ int ObTableLoadMerger::collect_sql_statistics(ObTableLoadSqlStatistics &sql_stat
   } else {
     for (int i = 0; OB_SUCC(ret) && i < merge_ctx_.get_tablet_merge_ctxs().count(); ++i) {
       ObDirectLoadTabletMergeCtx *tablet_ctx = merge_ctx_.get_tablet_merge_ctxs().at(i);
-      ObArray<ObDirectLoadFastHeapTable *> heap_table_array ;
+      ObArray<ObDirectLoadFastHeapTable *> heap_table_array;
+      heap_table_array.set_tenant_id(MTL_ID());
       if (OB_FAIL(tablet_ctx->collect_sql_statistics(heap_table_array, sql_statistics))) {
         LOG_WARN("fail to collect sql statics", KR(ret));
       }
@@ -656,6 +669,11 @@ int ObTableLoadMerger::handle_merge_thread_finish(int ret_code)
     if (OB_UNLIKELY(is_stop_ || has_error_)) {
     } else {
       LOG_INFO("LOAD MERGE COMPLETED");
+      // release tmpfile
+      // TODO(suzhi.yt) release all tables and merge tasks
+      if (!store_ctx_->is_fast_heap_table_) {
+        table_compact_ctx_.result_.release_all_table_data();
+      }
       if (store_ctx_->ctx_->schema_.is_column_store_) {
         if (OB_FAIL(build_rescan_ctx())) {
           LOG_WARN("fail to build rescan ctx", KR(ret));

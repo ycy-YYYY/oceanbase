@@ -40,7 +40,7 @@
 #include "sql/parser/ob_parser.h"
 #include "share/system_variable/ob_sys_var_class_type.h"
 
-#include "sql/ob_select_stmt_printer.h"
+#include "sql/printer/ob_select_stmt_printer.h"
 #include "observer/ob_server_struct.h"
 #include "observer/ob_server.h"
 #include "observer/ob_server_event_history_table_operator.h"
@@ -578,6 +578,7 @@ int ObCreateTableExecutor::execute(ObExecContext &ctx, ObCreateTableStmt &stmt)
         DEBUG_SYNC(BEFORE_SEND_PARALLEL_CREATE_TABLE);
         int64_t start_time = ObTimeUtility::current_time();
         ObTimeoutCtx ctx;
+        create_table_arg.is_parallel_ = true;
         if (OB_FAIL(ctx.set_timeout(common_rpc_proxy->get_timeout()))) {
           LOG_WARN("fail to set timeout ctx", K(ret));
         } else if (OB_FAIL(common_rpc_proxy->parallel_create_table(create_table_arg, res))) {
@@ -585,7 +586,7 @@ int ObCreateTableExecutor::execute(ObExecContext &ctx, ObCreateTableStmt &stmt)
         } else {
           int64_t refresh_time = ObTimeUtility::current_time();
           if (OB_FAIL(ObSchemaUtils::try_check_parallel_ddl_schema_in_sync(
-              ctx, tenant_id, res.schema_version_))) {
+              ctx, my_session, tenant_id, res.schema_version_))) {
             LOG_WARN("fail to check paralleld ddl schema in sync", KR(ret), K(res));
           }
           int64_t end_time = ObTimeUtility::current_time();
@@ -2226,6 +2227,7 @@ int ObTruncateTableExecutor::execute(ObExecContext &ctx, ObTruncateTableStmt &st
       } else {
         // new parallel truncate
         ObTimeoutCtx ctx;
+        tmp_arg.is_parallel_ = true;
         if (OB_FAIL(ctx.set_timeout(common_rpc_proxy->get_timeout()))) {
           LOG_WARN("fail to set timeout ctx", K(ret));
         } else {
@@ -2252,7 +2254,7 @@ int ObTruncateTableExecutor::execute(ObExecContext &ctx, ObTruncateTableStmt &st
             ret = OB_ERR_UNEXPECTED;
             LOG_WARN("truncate invalid ddl_res", KR(ret), K(res));
           } else if (OB_FAIL(ObSchemaUtils::try_check_parallel_ddl_schema_in_sync(
-                     ctx, tenant_id, res.task_id_))) {
+                     ctx, my_session, tenant_id, res.task_id_))) {
             LOG_WARN("fail to check parallel ddl schema in sync", KR(ret), K(res));
           }
           int64_t end_time = ObTimeUtility::current_time();

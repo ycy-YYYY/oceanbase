@@ -1080,6 +1080,8 @@ int ObHashGroupByVecOp::load_data_batch(int64_t max_row_cnt)
         for (int64_t i = 0; i < MY_SPEC.aggr_infos_.count(); ++i) {
           if (MY_SPEC.aggr_infos_.at(i).param_exprs_.count() == 1) {
             aggr_vectors_[i] = MY_SPEC.aggr_infos_.at(i).param_exprs_.at(0)->get_vector(eval_ctx_);
+          } else if (MY_SPEC.aggr_infos_.at(i).is_implicit_first_aggr()) {
+            aggr_vectors_[i] = MY_SPEC.aggr_infos_.at(i).expr_->get_vector(eval_ctx_);
           } else {
             aggr_vectors_[i] = nullptr;
           }
@@ -1475,13 +1477,13 @@ int ObHashGroupByVecOp::batch_process_duplicate_data(
       int64_t new_group_cnt = 0;
       memset(static_cast<void *> (batch_old_rows_), 0, sizeof(char *) * MY_SPEC.max_batch_size_);
       memset(static_cast<void *> (batch_new_rows_), 0, sizeof(char *) * MY_SPEC.max_batch_size_);
-      if (nullptr == store_rows && !use_sstr_aggr_) {
+      if (nullptr == store_rows && !local_group_rows_.is_sstr_aggr_valid()) {
         ret = calc_groupby_exprs_hash_batch(dup_groupby_exprs_, child_brs);
         local_group_rows_.prefetch(child_brs, hash_vals_);
       }
       bool can_append_batch = (NULL == bloom_filter
                               && (!enable_dump_
-                                || use_sstr_aggr_
+                                || local_group_rows_.is_sstr_aggr_valid()
                                 || local_group_rows_.size() < MIN_INMEM_GROUPS
                                 || process_check_dump
                                 || !need_start_dump(input_rows, est_part_cnt, force_check_dump)));
@@ -1719,7 +1721,7 @@ int ObHashGroupByVecOp::group_child_batch_rows(const ObCompactRow **store_rows,
   } else if ((ObThreeStageAggrStage::SECOND_STAGE == MY_SPEC.aggr_stage_ && !use_distinct_data_)
               && FALSE_IT(aggr_code_vec = aggr_code_expr->get_vector(eval_ctx_))) {
   } else {
-    if (nullptr == store_rows && !use_sstr_aggr_) {
+    if (nullptr == store_rows && !local_group_rows_.is_sstr_aggr_valid()) {
       ret = calc_groupby_exprs_hash_batch(dup_groupby_exprs_, child_brs);
       local_group_rows_.prefetch(child_brs, hash_vals_);
     }
@@ -1753,7 +1755,7 @@ int ObHashGroupByVecOp::group_child_batch_rows(const ObCompactRow **store_rows,
     }
     bool can_append_batch = (NULL == bloom_filter
                             && (!enable_dump_
-                              || use_sstr_aggr_
+                              || local_group_rows_.is_sstr_aggr_valid()
                               || local_group_rows_.size() < MIN_INMEM_GROUPS
                               || process_check_dump
                               || !need_start_dump(input_rows, est_part_cnt, force_check_dump)));

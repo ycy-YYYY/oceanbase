@@ -140,6 +140,12 @@ enum ObLogBaseType
   // for share storage net throt
   SHARE_STORAGE_NRT_THROT_LOG_BASE_TYPE = 44,
 
+  // for DBMS_SCHEDULER
+  DBMS_SCHEDULER_LOG_BASE_TYPE = 45,
+
+  // for shared storage pre warm
+  SHARED_STORAGE_PRE_WARM_LOG_BASE_TYPE = 46,
+
   // pay attention!!!
   // add log type in log_base_type_to_string
   // max value
@@ -230,6 +236,8 @@ int log_base_type_to_string(const ObLogBaseType log_type,
     strncpy(str ,"COMMON_LS_SERVICE", str_len);
   } else if (log_type == LS_BLOCK_TX_SERVICE_LOG_BASE_TYPE) {
     strncpy(str ,"BLOCK_TX_SERVICE", str_len);
+  } else if (log_type == DBMS_SCHEDULER_LOG_BASE_TYPE) {
+    strncpy(str ,"DBMS_SCHEDULER", str_len);
   } else if (log_type == WORKLOAD_REPOSITORY_SERVICE_LOG_BASE_TYPE) {
     strncpy(str ,"WORKLOAD_REPOSITORY_SERVICE", str_len);
   } else if (log_type == TTL_LOG_BASE_TYPE) {
@@ -244,6 +252,8 @@ int log_base_type_to_string(const ObLogBaseType log_type,
     strncpy(str, "MVIEW_MAINTENANCE_SERVICE_LOG_BASE_TYPE", str_len);
   } else if (log_type == SHARE_STORAGE_NRT_THROT_LOG_BASE_TYPE) {
     strncpy(str ,"SHARE_STORAGE_NRT_THROT_SERVICE", str_len);
+  } else if (log_type == SHARED_STORAGE_PRE_WARM_LOG_BASE_TYPE) {
+    strncpy(str ,"SHARED_STORAGE_PRE_WARM_LOG_BASE_TYPE", str_len);
   } else {
     ret = OB_INVALID_ARGUMENT;
   }

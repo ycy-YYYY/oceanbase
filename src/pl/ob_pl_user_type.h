@@ -64,7 +64,7 @@ public:
   virtual int64_t get_member_count() const;
   virtual const ObPLDataType *get_member(int64_t i) const;
   virtual int generate_assign_with_null(
-    ObPLCodeGenerator &generator, const ObPLBlockNS &ns,
+    ObPLCodeGenerator &generator, const ObPLINS &ns,
     jit::ObLLVMValue &allocator, jit::ObLLVMValue &dest) const;
   virtual int generate_default_value(
     ObPLCodeGenerator &generator,const ObPLINS &ns,
@@ -88,7 +88,7 @@ public:
                    const ObPLINS *ns,
                    int64_t &ptr) const;
 
-  virtual int get_size(const ObPLINS &ns, ObPLTypeSize type, int64_t &size) const;
+  virtual int get_size(ObPLTypeSize type, int64_t &size) const;
   virtual int init_session_var(const ObPLResolveCtx &resolve_ctx,
                                common::ObIAllocator &obj_allocator,
                                sql::ObExecContext &exec_ctx,
@@ -144,10 +144,31 @@ public:
 
   static int deep_copy_obj(
     ObIAllocator &allocator, const ObObj &src, ObObj &dst, bool need_new_allocator = true, bool ignore_del_element = false);
-  static int destruct_obj(ObObj &src, sql::ObSQLSessionInfo *session = NULL, bool set_null = true);
+  static int destruct_obj(ObObj &src, sql::ObSQLSessionInfo *session = NULL);
+  static int alloc_sub_composite(ObObj &dest_element, ObIAllocator &allocator);
+  static int alloc_for_second_level_composite(ObObj &src, ObIAllocator &allocator);
   static int serialize_obj(const ObObj &obj, char* buf, const int64_t len, int64_t& pos);
   static int deserialize_obj(ObObj &obj, const char* buf, const int64_t len, int64_t& pos);
   static int64_t get_serialize_obj_size(const ObObj &obj);
+
+  int text_protocol_prefix_info_for_each_item(share::schema::ObSchemaGetterGuard &schema_guard,
+                                              const ObPLDataType &type,
+                                              char *buf,
+                                              const int64_t len,
+                                              int64_t &pos) const;
+  int text_protocol_suffix_info_for_each_item(const ObPLDataType &type,
+                                              char *buf,
+                                              const int64_t len,
+                                              int64_t &pos,
+                                              const bool is_last_item,
+                                              const bool is_null) const;
+  int text_protocol_base_type_convert(const ObPLDataType &type, char *buf, int64_t &pos, int64_t len) const;
+  int base_type_serialize_for_text(ObObj* obj,
+                                   const ObTimeZoneInfo *tz_info,
+                                   char *dst,
+                                   const int64_t dst_len,
+                                   int64_t &dst_pos,
+                                   bool &has_serialized) const;
 
   VIRTUAL_TO_STRING_KV(K_(type), K_(user_type_id), K_(type_name));
 protected:
@@ -195,7 +216,7 @@ public:
   virtual int get_all_depended_user_type(const ObPLResolveCtx &resolve_ctx,
                                          const ObPLBlockNS &current_ns) const;
 
-  virtual int get_size(const ObPLINS &ns, ObPLTypeSize type, int64_t &size) const;
+  virtual int get_size(ObPLTypeSize type, int64_t &size) const;
   virtual int serialize(share::schema::ObSchemaGetterGuard &schema_guard,
                        const common::ObTimeZoneInfo *tz_info, obmysql::MYSQL_PROTOCOL_TYPE type,
                        char *&src, char *dst, const int64_t dst_len, int64_t &dst_pos) const;
@@ -240,9 +261,10 @@ public:
   virtual int64_t get_member_count() const { return 0; }
   virtual const ObPLDataType *get_member(int64_t i) const { UNUSED(i); return NULL; }
   virtual int generate_assign_with_null(ObPLCodeGenerator &generator,
-                                      jit::ObLLVMValue &allocator,
-                                      jit::ObLLVMValue &dest) const
-  { UNUSED(generator); UNUSED(allocator); UNUSED(dest); return OB_SUCCESS;}
+                                        ObPLINS &ns,
+                                        jit::ObLLVMValue &allocator,
+                                        jit::ObLLVMValue &dest) const
+  { UNUSED(generator); UNUSED(ns), UNUSED(allocator); UNUSED(dest); return OB_SUCCESS;}
   virtual int generate_construct(ObPLCodeGenerator &generator,
                                  const ObPLINS &ns,
                                  jit::ObLLVMValue &value,
@@ -258,8 +280,7 @@ public:
 public:
   int deep_copy(common::ObIAllocator &alloc, const ObRefCursorType &other);
 
-  virtual int get_size(
-    const ObPLINS &ns, ObPLTypeSize type, int64_t &size) const;
+  virtual int get_size(ObPLTypeSize type, int64_t &size) const;
 
   virtual int init_obj(
     share::schema::ObSchemaGetterGuard &schema_guard,
@@ -391,7 +412,7 @@ public:
   virtual const ObPLDataType *get_member(int64_t i) const { return get_record_member_type(i); }
 
   virtual int generate_assign_with_null(ObPLCodeGenerator &generator,
-                                        const ObPLBlockNS &ns,
+                                        const ObPLINS &ns,
                                         jit::ObLLVMValue &allocator,
                                         jit::ObLLVMValue &dest) const;
 
@@ -412,7 +433,7 @@ public:
                      const ObPLINS *ns,
                      int64_t &ptr) const;
 
-  virtual int get_size(const ObPLINS &ns, ObPLTypeSize type, int64_t &size) const;
+  virtual int get_size(ObPLTypeSize type, int64_t &size) const;
 
   virtual int init_session_var(const ObPLResolveCtx &resolve_ctx,
                                common::ObIAllocator &obj_allocator,
@@ -489,7 +510,7 @@ public:
   virtual int64_t get_member_count() const { return 0; }
   virtual const ObPLDataType *get_member(int64_t i) const { UNUSED(i); return NULL; }
 
-  virtual int get_size(const ObPLINS &ns, ObPLTypeSize type, int64_t &size) const;
+  virtual int get_size(ObPLTypeSize type, int64_t &size) const;
 
   virtual int get_all_depended_user_type(
     const ObPLResolveCtx &resolve_ctx, const ObPLBlockNS &current_ns) const
@@ -549,18 +570,18 @@ public:
                                  jit::ObLLVMValue &value,
                                  const pl::ObPLStmt *stmt = NULL) const;
   virtual int generate_assign_with_null(ObPLCodeGenerator &generator,
-                                        const ObPLBlockNS &ns,
+                                        const ObPLINS &ns,
                                         jit::ObLLVMValue &allocator,
                                         jit::ObLLVMValue &dest) const;
   virtual int generate_new(ObPLCodeGenerator &generator,
-                                                const ObPLINS &ns,
-                                                jit::ObLLVMValue &value,
-                                                const pl::ObPLStmt *s = NULL) const;
+                           const ObPLINS &ns,
+                           jit::ObLLVMValue &value,
+                           const pl::ObPLStmt *s = NULL) const;
   virtual int newx(common::ObIAllocator &allocator,
                      const ObPLINS *ns,
                      int64_t &ptr) const;
 
-  virtual int get_size(const ObPLINS &ns, ObPLTypeSize type, int64_t &size) const;
+  virtual int get_size(ObPLTypeSize type, int64_t &size) const;
 
   virtual int init_session_var(const ObPLResolveCtx &resolve_ctx,
                                common::ObIAllocator &obj_allocator,
@@ -825,6 +846,7 @@ public:
   int serialize(char *buf, int64_t len, int64_t &pos) const;
   int deserialize(const char* buf, const int64_t len, int64_t &pos);
   void print() const;
+  static bool obj_is_null(ObObj* obj);
 
   TO_STRING_KV(K_(type), K_(id), K_(is_null));
 
@@ -884,7 +906,7 @@ public:
   inline bool is_inited() const { return count_ != OB_INVALID_COUNT; }
   void print() const;
 
-  TO_STRING_KV(K_(type), K_(count));
+  TO_STRING_KV(K_(type), K_(count), K(id_), K(is_null_));
 
 private:
   int32_t count_; //field count
@@ -1430,7 +1452,8 @@ public:
   ObPLJsonBaseType()
     : ObPLOpaque(ObPLOpaqueType::PL_JSON_TYPE),
       data_(NULL),
-      behavior_(0)
+      behavior_(0),
+      is_shallow_copy_(0)
       {}
 
   virtual ~ObPLJsonBaseType()
@@ -1445,12 +1468,15 @@ public:
   void set_err_behavior(int behavior) { behavior_ = behavior; }
   int get_err_behavior() { return behavior_ ; }
   ObJsonNode* get_data() { return data_; }
+  bool need_shallow_copy() { return is_shallow_copy_ > 0; }
+  void set_shallow_copy(int value) { is_shallow_copy_ = value; }
 
-  TO_STRING_KV(KPC(data_), K_(behavior));
+  TO_STRING_KV(KPC(data_), K_(behavior), K_(is_shallow_copy));
 
 private:
   ObJsonNode *data_;
   int behavior_;
+  int is_shallow_copy_;
 };
 
 #endif

@@ -5696,6 +5696,7 @@ question_mask_size: 0
             }
           ]
         },
+         { },
          { }
       ]
     }
@@ -5793,6 +5794,7 @@ question_mask_size: 0
             }
           ]
         },
+         { },
          { }
       ]
     }
@@ -5895,6 +5897,7 @@ question_mask_size: 0
             }
           ]
         },
+         { },
          { }
       ]
     }
@@ -17425,18 +17428,26 @@ question_mask_size: 0
   "str_val":"",
   "children": [
      {
-      "type":"T_SET_NAMES",
+      "type":"T_VARIABLE_SET",
       "int_val":0,
       "str_len":0,
       "str_val":"",
       "children": [
          {
-          "type":"T_CHAR_CHARSET",
+          "type":"T_SET_NAMES",
           "int_val":9223372036854775807,
-          "str_len":6,
-          "str_val":"latin1"
-        },
-         { }
+          "str_len":0,
+          "str_val":"",
+          "children": [
+             {
+              "type":"T_CHAR_CHARSET",
+              "int_val":9223372036854775807,
+              "str_len":6,
+              "str_val":"latin1"
+            },
+             { }
+          ]
+        }
       ]
     }
   ]
@@ -17451,18 +17462,26 @@ question_mask_size: 0
   "str_val":"",
   "children": [
      {
-      "type":"T_SET_NAMES",
+      "type":"T_VARIABLE_SET",
       "int_val":0,
       "str_len":0,
       "str_val":"",
       "children": [
          {
-          "type":"T_VARCHAR",
+          "type":"T_SET_NAMES",
           "int_val":9223372036854775807,
-          "str_len":6,
-          "str_val":"latin1"
-        },
-         { }
+          "str_len":0,
+          "str_val":"",
+          "children": [
+             {
+              "type":"T_VARCHAR",
+              "int_val":9223372036854775807,
+              "str_len":6,
+              "str_val":"latin1"
+            },
+             { }
+          ]
+        }
       ]
     }
   ]
@@ -17477,22 +17496,30 @@ question_mask_size: 0
   "str_val":"",
   "children": [
      {
-      "type":"T_SET_NAMES",
+      "type":"T_VARIABLE_SET",
       "int_val":0,
       "str_len":0,
       "str_val":"",
       "children": [
          {
-          "type":"T_CHAR_CHARSET",
+          "type":"T_SET_NAMES",
           "int_val":9223372036854775807,
-          "str_len":4,
-          "str_val":"utf8"
-        },
-         {
-          "type":"T_COLLATION",
-          "int_val":9223372036854775807,
-          "str_len":15,
-          "str_val":"utf8_general_ci"
+          "str_len":0,
+          "str_val":"",
+          "children": [
+             {
+              "type":"T_CHAR_CHARSET",
+              "int_val":9223372036854775807,
+              "str_len":4,
+              "str_val":"utf8"
+            },
+             {
+              "type":"T_COLLATION",
+              "int_val":9223372036854775807,
+              "str_len":15,
+              "str_val":"utf8_general_ci"
+            }
+          ]
         }
       ]
     }
@@ -17508,22 +17535,30 @@ question_mask_size: 0
   "str_val":"",
   "children": [
      {
-      "type":"T_SET_NAMES",
+      "type":"T_VARIABLE_SET",
       "int_val":0,
       "str_len":0,
       "str_val":"",
       "children": [
          {
-          "type":"T_CHAR_CHARSET",
+          "type":"T_SET_NAMES",
           "int_val":9223372036854775807,
-          "str_len":4,
-          "str_val":"utf8"
-        },
-         {
-          "type":"T_COLLATION",
-          "int_val":9223372036854775807,
-          "str_len":15,
-          "str_val":"utf8_general_ci"
+          "str_len":0,
+          "str_val":"",
+          "children": [
+             {
+              "type":"T_CHAR_CHARSET",
+              "int_val":9223372036854775807,
+              "str_len":4,
+              "str_val":"utf8"
+            },
+             {
+              "type":"T_COLLATION",
+              "int_val":9223372036854775807,
+              "str_len":15,
+              "str_val":"utf8_general_ci"
+            }
+          ]
         }
       ]
     }
@@ -17539,16 +17574,24 @@ question_mask_size: 0
   "str_val":"",
   "children": [
      {
-      "type":"T_SET_CHARSET",
+      "type":"T_VARIABLE_SET",
       "int_val":0,
       "str_len":0,
       "str_val":"",
       "children": [
          {
-          "type":"T_CHAR_CHARSET",
+          "type":"T_SET_CHARSET",
           "int_val":9223372036854775807,
-          "str_len":4,
-          "str_val":"utf8"
+          "str_len":0,
+          "str_val":"",
+          "children": [
+             {
+              "type":"T_CHAR_CHARSET",
+              "int_val":9223372036854775807,
+              "str_len":4,
+              "str_val":"utf8"
+            }
+          ]
         }
       ]
     }
@@ -17564,16 +17607,24 @@ question_mask_size: 0
   "str_val":"",
   "children": [
      {
-      "type":"T_SET_CHARSET",
+      "type":"T_VARIABLE_SET",
       "int_val":0,
       "str_len":0,
       "str_val":"",
       "children": [
          {
-          "type":"T_VARCHAR",
+          "type":"T_SET_CHARSET",
           "int_val":9223372036854775807,
-          "str_len":4,
-          "str_val":"utf8"
+          "str_len":0,
+          "str_val":"",
+          "children": [
+             {
+              "type":"T_VARCHAR",
+              "int_val":9223372036854775807,
+              "str_len":4,
+              "str_val":"utf8"
+            }
+          ]
         }
       ]
     }
@@ -17589,16 +17640,24 @@ question_mask_size: 0
   "str_val":"",
   "children": [
      {
-      "type":"T_SET_CHARSET",
+      "type":"T_VARIABLE_SET",
       "int_val":0,
       "str_len":0,
       "str_val":"",
       "children": [
          {
-          "type":"T_CHAR_CHARSET",
+          "type":"T_SET_CHARSET",
           "int_val":9223372036854775807,
-          "str_len":4,
-          "str_val":"utf8"
+          "str_len":0,
+          "str_val":"",
+          "children": [
+             {
+              "type":"T_CHAR_CHARSET",
+              "int_val":9223372036854775807,
+              "str_len":4,
+              "str_val":"utf8"
+            }
+          ]
         }
       ]
     }
@@ -23022,6 +23081,338 @@ question_mask_size: 0
                   "str_val":"10.101.74.122:41425"
                 }
               ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+**************   Case 188   ***************
+alter system transfer partition table_id = 1, object_id = 1 to ls 1001;
+question_mask_size: 0
+{
+  "type":"T_STMT_LIST",
+  "int_val":9223372036854775807,
+  "str_len":0,
+  "str_val":"",
+  "children": [
+     {
+      "type":"T_TRANSFER_PARTITION",
+      "int_val":0,
+      "str_len":0,
+      "str_val":"",
+      "children": [
+         {
+          "type":"T_TRANSFER_PARTITION_TO_LS",
+          "int_val":9223372036854775807,
+          "str_len":0,
+          "str_val":"",
+          "children": [
+             {
+              "type":"T_PARTITION_INFO",
+              "int_val":9223372036854775807,
+              "str_len":0,
+              "str_val":"",
+              "children": [
+                 {
+                  "type":"T_INT",
+                  "int_val":1,
+                  "str_len":1,
+                  "str_val":"1"
+                },
+                 {
+                  "type":"T_INT",
+                  "int_val":1,
+                  "str_len":1,
+                  "str_val":"1"
+                }
+              ]
+            },
+             {
+              "type":"T_INT",
+              "int_val":1001,
+              "str_len":4,
+              "str_val":"1001"
+            }
+          ]
+        },
+         { }
+      ]
+    }
+  ]
+}
+**************   Case 189   ***************
+alter system transfer partition table_id = 1, object_id = 1 to ls 1001 tenant 'mysql';
+question_mask_size: 0
+{
+  "type":"T_STMT_LIST",
+  "int_val":9223372036854775807,
+  "str_len":0,
+  "str_val":"",
+  "children": [
+     {
+      "type":"T_TRANSFER_PARTITION",
+      "int_val":0,
+      "str_len":0,
+      "str_val":"",
+      "children": [
+         {
+          "type":"T_TRANSFER_PARTITION_TO_LS",
+          "int_val":9223372036854775807,
+          "str_len":0,
+          "str_val":"",
+          "children": [
+             {
+              "type":"T_PARTITION_INFO",
+              "int_val":9223372036854775807,
+              "str_len":0,
+              "str_val":"",
+              "children": [
+                 {
+                  "type":"T_INT",
+                  "int_val":1,
+                  "str_len":1,
+                  "str_val":"1"
+                },
+                 {
+                  "type":"T_INT",
+                  "int_val":1,
+                  "str_len":1,
+                  "str_val":"1"
+                }
+              ]
+            },
+             {
+              "type":"T_INT",
+              "int_val":1001,
+              "str_len":4,
+              "str_val":"1001"
+            }
+          ]
+        },
+         {
+          "type":"T_TENANT_NAME",
+          "int_val":9223372036854775807,
+          "str_len":0,
+          "str_val":"",
+          "children": [
+             {
+              "type":"T_VARCHAR",
+              "int_val":9223372036854775807,
+              "str_len":5,
+              "str_val":"mysql"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+**************   Case 190   ***************
+alter system cancel transfer partition  table_id = 1, object_id = 1;
+question_mask_size: 0
+{
+  "type":"T_STMT_LIST",
+  "int_val":9223372036854775807,
+  "str_len":0,
+  "str_val":"",
+  "children": [
+     {
+      "type":"T_CANCEL_TRANSFER_PARTITION",
+      "int_val":0,
+      "str_len":0,
+      "str_val":"",
+      "children": [
+         {
+          "type":"T_PARTITION_INFO",
+          "int_val":9223372036854775807,
+          "str_len":0,
+          "str_val":"",
+          "children": [
+             {
+              "type":"T_INT",
+              "int_val":1,
+              "str_len":1,
+              "str_val":"1"
+            },
+             {
+              "type":"T_INT",
+              "int_val":1,
+              "str_len":1,
+              "str_val":"1"
+            }
+          ]
+        },
+         { }
+      ]
+    }
+  ]
+}
+**************   Case 191   ***************
+alter system cancel transfer partition  table_id = 1, object_id = 1 tenant 'mysql';
+question_mask_size: 0
+{
+  "type":"T_STMT_LIST",
+  "int_val":9223372036854775807,
+  "str_len":0,
+  "str_val":"",
+  "children": [
+     {
+      "type":"T_CANCEL_TRANSFER_PARTITION",
+      "int_val":0,
+      "str_len":0,
+      "str_val":"",
+      "children": [
+         {
+          "type":"T_PARTITION_INFO",
+          "int_val":9223372036854775807,
+          "str_len":0,
+          "str_val":"",
+          "children": [
+             {
+              "type":"T_INT",
+              "int_val":1,
+              "str_len":1,
+              "str_val":"1"
+            },
+             {
+              "type":"T_INT",
+              "int_val":1,
+              "str_len":1,
+              "str_val":"1"
+            }
+          ]
+        },
+         {
+          "type":"T_TENANT_NAME",
+          "int_val":9223372036854775807,
+          "str_len":0,
+          "str_val":"",
+          "children": [
+             {
+              "type":"T_VARCHAR",
+              "int_val":9223372036854775807,
+              "str_len":5,
+              "str_val":"mysql"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+**************   Case 192   ***************
+alter system cancel transfer partition ALL;
+question_mask_size: 0
+{
+  "type":"T_STMT_LIST",
+  "int_val":9223372036854775807,
+  "str_len":0,
+  "str_val":"",
+  "children": [
+     {
+      "type":"T_CANCEL_TRANSFER_PARTITION",
+      "int_val":0,
+      "str_len":0,
+      "str_val":"",
+      "children": [
+         {
+          "type":"T_ALL",
+          "int_val":9223372036854775807,
+          "str_len":0,
+          "str_val":""
+        },
+         { }
+      ]
+    }
+  ]
+}
+**************   Case 193   ***************
+alter system cancel transfer partition ALL tenant 'mysql';
+question_mask_size: 0
+{
+  "type":"T_STMT_LIST",
+  "int_val":9223372036854775807,
+  "str_len":0,
+  "str_val":"",
+  "children": [
+     {
+      "type":"T_CANCEL_TRANSFER_PARTITION",
+      "int_val":0,
+      "str_len":0,
+      "str_val":"",
+      "children": [
+         {
+          "type":"T_ALL",
+          "int_val":9223372036854775807,
+          "str_len":0,
+          "str_val":""
+        },
+         {
+          "type":"T_TENANT_NAME",
+          "int_val":9223372036854775807,
+          "str_len":0,
+          "str_val":"",
+          "children": [
+             {
+              "type":"T_VARCHAR",
+              "int_val":9223372036854775807,
+              "str_len":5,
+              "str_val":"mysql"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+**************   Case 194   ***************
+alter system cancel balance job;
+question_mask_size: 0
+{
+  "type":"T_STMT_LIST",
+  "int_val":9223372036854775807,
+  "str_len":0,
+  "str_val":"",
+  "children": [
+     {
+      "type":"T_CANCEL_BALANCE_JOB",
+      "int_val":0,
+      "str_len":0,
+      "str_val":"",
+      "children": [
+         { }
+      ]
+    }
+  ]
+}
+**************   Case 195   ***************
+alter system cancel balance job tenant 'mysql';
+question_mask_size: 0
+{
+  "type":"T_STMT_LIST",
+  "int_val":9223372036854775807,
+  "str_len":0,
+  "str_val":"",
+  "children": [
+     {
+      "type":"T_CANCEL_BALANCE_JOB",
+      "int_val":0,
+      "str_len":0,
+      "str_val":"",
+      "children": [
+         {
+          "type":"T_TENANT_NAME",
+          "int_val":9223372036854775807,
+          "str_len":0,
+          "str_val":"",
+          "children": [
+             {
+              "type":"T_VARCHAR",
+              "int_val":9223372036854775807,
+              "str_len":5,
+              "str_val":"mysql"
             }
           ]
         }

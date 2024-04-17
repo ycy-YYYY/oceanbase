@@ -37,6 +37,7 @@ namespace oceanbase
 namespace common
 {
 
+static const int OSS_BAD_REQUEST = 400;
 static const int OSS_OBJECT_NOT_EXIST = 404;
 static const int OSS_PERMISSION_DENIED = 403;
 static const int OSS_OBJECT_PWRITE_OFFSET_NOT_MATH = 409;
@@ -123,7 +124,7 @@ public:
   virtual bool is_inited();
   int get_oss_file_meta(const common::ObString &bucket, const common::ObString &object,
                         bool &is_file_exist, char *&remote_md5, int64_t &file_length);
-  void print_oss_info(aos_table_t *resp_headers, aos_status_s *aos_ret);
+  void print_oss_info(aos_table_t *resp_headers, aos_status_s *aos_ret, const int ob_errcode);
 
   int init_with_storage_info(common::ObObjectStorageInfo *storage_info);
   int init_oss_endpoint();
@@ -133,6 +134,7 @@ public:
   char oss_endpoint_[MAX_OSS_ENDPOINT_LENGTH];
   bool is_inited_;
   ObOssAccount oss_account_;
+  ObStorageChecksumType checksum_type_;
   
   DISALLOW_COPY_AND_ASSIGN(ObStorageOssBase);
 };
@@ -157,7 +159,7 @@ private:
   DISALLOW_COPY_AND_ASSIGN(ObStorageOssWriter);
 };
 
-class ObStorageOssMultiPartWriter: public ObStorageOssBase, public ObIStorageWriter
+class ObStorageOssMultiPartWriter: public ObStorageOssBase, public ObIStorageMultiPartWriter
 {
 
 public:
@@ -166,8 +168,9 @@ public:
   int open(const common::ObString &uri, common::ObObjectStorageInfo *storage_info);
   int write(const char *buf,const int64_t size);
   int pwrite(const char *buf, const int64_t size, const int64_t offset);
+  virtual int complete() override;
+  virtual int abort() override;
   int close();
-  int cleanup();
   int64_t get_length() const { return file_length_; }
   virtual bool is_opened() const { return is_opened_; }
 

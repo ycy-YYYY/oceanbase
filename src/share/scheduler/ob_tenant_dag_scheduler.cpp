@@ -131,9 +131,10 @@ int ObINodeWithChild::add_parent_node(ObINodeWithChild &parent)
 {
   int ret = OB_SUCCESS;
   ObMutexGuard guard(lock_);
-  inc_indegree();
   if (OB_FAIL(parent_.push_back(&parent))) {
     COMMON_LOG(WARN, "failed to add parent", K(ret), K(parent));
+  } else {
+    inc_indegree();
   }
   return ret;
 }
@@ -563,7 +564,7 @@ int ObIDag::add_task(ObITask &task)
     if (OB_FAIL(check_cycle())) {
       COMMON_LOG(WARN, "check_cycle failed", K(ret), K_(id));
       if (OB_ISNULL(task_list_.remove(&task))) {
-        COMMON_LOG(WARN, "failed to remove task from task_list", K_(id));
+        COMMON_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "failed to remove task from task_list", K_(id));
       }
     }
   }
@@ -593,7 +594,7 @@ int ObIDag::add_child(ObIDag &child)
     if (OB_UNLIKELY(nullptr != child.get_dag_net() && dag_net_ != child.get_dag_net())) { // already belongs to other dag_net
       ret = OB_INVALID_ARGUMENT;
       COMMON_LOG(WARN, "child's dag net is not null", K(ret), K(child), KP_(dag_net));
-    } else if (child.deep_copy_children(get_child_nodes())) { // child is a new node, no concurrency
+    } else if (OB_FAIL(child.deep_copy_children(get_child_nodes()))) { // child is a new node, no concurrency
       COMMON_LOG(WARN, "failed to deep copy child", K(ret), K(child));
     } else if (nullptr == child.get_dag_net() && OB_FAIL(dag_net_->add_dag_into_dag_net(child))) {
       COMMON_LOG(WARN, "failed to add dag into dag net", K(ret), K(child), KPC(dag_net_));
@@ -876,9 +877,7 @@ int ObIDag::finish(const ObDagStatus status, bool &dag_net_finished)
 {
   int ret = OB_SUCCESS;
   {
-    // If force_cancel_flag is set but status is not DAG_STATUS_ABORT, the final task actually succeed.
-    if (OB_UNLIKELY(force_cancel_flag_ && DAG_STATUS_ABORT == status)) {
-    } else if (OB_FAIL(remove_child_for_parents())) {
+    if (OB_FAIL(remove_child_for_parents())) {
       COMMON_LOG(WARN, "failed to remove child for parents", K(ret));
     } else if (OB_FAIL(remove_parent_for_children())) {
       COMMON_LOG(WARN, "failed to remove parent for children", K(ret));
@@ -890,6 +889,15 @@ int ObIDag::finish(const ObDagStatus status, bool &dag_net_finished)
     update_status_in_dag_net(dag_net_finished);
   }
   return ret;
+}
+
+void ObIDag::set_force_cancel_flag()
+{
+  force_cancel_flag_ = true;
+  // dag_net and dags in the same dag net should be canceled too.
+  if (OB_NOT_NULL(dag_net_)) {
+    dag_net_->set_cancel();
+  }
 }
 
 int ObIDag::add_child_without_inheritance(ObIDag &child)
@@ -1003,6 +1011,10 @@ ObIDagNet::ObIDagNet(
 {
 }
 
+/*
+ * ATTENTION: DO NOT call this function if if this dag has parent dag.
+ * When parent adds child, child will be add into the same dag net with parent.
+ */
 int ObIDagNet::add_dag_into_dag_net(ObIDag &dag)
 {
   int ret = OB_SUCCESS;
@@ -1566,6 +1578,7 @@ ObTenantDagWorker::ObTenantDagWorker()
     function_type_(0),
     group_id_(0),
     tg_id_(-1),
+    hold_by_compaction_dag_(false),
     is_inited_(false)
 {
 }
@@ -1696,6 +1709,17 @@ bool ObTenantDagWorker::get_force_cancel_flag()
     flag = dag->get_force_cancel_flag();
   }
   return flag;
+}
+
+void ObTenantDagWorker::set_task(ObITask *task)
+{
+  task_ = task;
+  hold_by_compaction_dag_ = false;
+
+  ObIDag *dag = nullptr;
+  if (OB_NOT_NULL(task_) && OB_NOT_NULL(dag = task_->get_dag())) {
+    hold_by_compaction_dag_ = is_compaction_dag(dag->get_type());
+  }
 }
 
 void ObTenantDagWorker::run1()
@@ -2561,6 +2585,8 @@ int ObDagPrioScheduler::finish_dag_(
     if (need_add) {
       if (OB_TMP_FAIL(MTL(ObDagWarningHistoryManager*)->add_dag_warning_info(&dag))) {
         COMMON_LOG(WARN, "failed to add dag warning info", K(tmp_ret), K(dag));
+      } else if (ObDagType::DAG_TYPE_BATCH_FREEZE_TABLETS == dag.get_type()) {
+        // no need to add diagnose
       } else {
         compaction::ObTabletMergeDag *merge_dag = static_cast<compaction::ObTabletMergeDag*>(&dag);
         if (OB_SUCCESS != dag.get_dag_ret()) {
@@ -2805,7 +2831,7 @@ int ObDagPrioScheduler::inner_add_dag(
   { \
     info_list[idx].tenant_id_ = MTL_ID(); \
     info_list[idx].value_type_ = value_type; \
-    strcpy(info_list[idx].key_, key_str); \
+    strncpy(info_list[idx].key_, key_str, MIN(common::OB_DAG_KEY_LENGTH - 1, strlen(key_str))); \
     info_list[idx].value_ = value; \
     (void)scheduler_infos.push_back(&info_list[idx++]); \
   }
@@ -2933,7 +2959,6 @@ int ObDagPrioScheduler::check_ls_compaction_dag_exist_with_cancel(
 {
   int ret = OB_SUCCESS;
   int tmp_ret = OB_SUCCESS;
-  compaction::ObTabletMergeDag *dag = nullptr;
   exist = false;
   ObDagListIndex loop_list[2] = { READY_DAG_LIST, RANK_DAG_LIST };
   ObIDag *cancel_dag = nullptr;
@@ -2947,8 +2972,9 @@ int ObDagPrioScheduler::check_ls_compaction_dag_exist_with_cancel(
     ObIDag *head = dag_list_[list_idx].get_header();
     ObIDag *cur = head->get_next();
     while (head != cur) {
-      dag = static_cast<compaction::ObTabletMergeDag *>(cur);
-      cancel_flag = (ls_id == dag->get_ls_id());
+      cancel_flag = ObDagType::DAG_TYPE_BATCH_FREEZE_TABLETS == cur->get_type()
+                  ? (ls_id == static_cast<compaction::ObBatchFreezeTabletsDag *>(cur)->get_param().ls_id_)
+                  : (ls_id == static_cast<compaction::ObTabletMergeDag *>(cur)->get_ls_id());
 
       if (cancel_flag) {
         if (cur->get_dag_status() == ObIDag::DAG_STATUS_READY) {
@@ -3680,7 +3706,7 @@ int ObDagNetScheduler::loop_running_dag_net_list()
     if (dag_net->is_started() && OB_TMP_FAIL(dag_net->schedule_rest_dag())) {
       LOG_WARN("failed to schedule rest dag", K(tmp_ret));
     } else if (dag_net->check_finished_and_mark_stop()) {
-      LOG_WARN("dag net is in finish state, move to finished list", K(ret), KPC(dag_net));
+      LOG_INFO("dag net is in finish state, move to finished list", K(ret), KPC(dag_net));
       (void) erase_dag_net_list_or_abort(RUNNING_DAG_NET_LIST, dag_net);
       (void) add_dag_net_list_or_abort(FINISHED_DAG_NET_LIST, dag_net);
     } else if (dag_net->is_co_dag_net()
@@ -3918,6 +3944,8 @@ void ObTenantDagScheduler::reload_config()
     set_thread_score(ObDagPrio::DAG_PRIO_HA_HIGH, tenant_config->ha_high_thread_score);
     set_thread_score(ObDagPrio::DAG_PRIO_HA_MID, tenant_config->ha_mid_thread_score);
     set_thread_score(ObDagPrio::DAG_PRIO_HA_LOW, tenant_config->ha_low_thread_score);
+    set_thread_score(ObDagPrio::DAG_PRIO_DDL, tenant_config->ddl_thread_score);
+    set_thread_score(ObDagPrio::DAG_PRIO_TTL, tenant_config->ttl_thread_score);
   }
 }
 
@@ -4388,20 +4416,21 @@ int ObTenantDagScheduler::check_ls_compaction_dag_exist_with_cancel(const ObLSID
   int ret = OB_SUCCESS;
   exist = false;
   bool tmp_exist = false;
-  for (int64_t i = 0; OB_SUCC(ret) && i < ObIDag::MergeDagPrioCnt; ++i) {
-    tmp_exist = false;
-    if (OB_FAIL(prio_sche_[ObIDag::MergeDagPrio[i]].check_ls_compaction_dag_exist_with_cancel(ls_id, tmp_exist))) {
-      LOG_WARN("failed to check ls compaction dag exist", K(ret), K(ls_id));
-    } else if (tmp_exist) {
-      exist = true;
-    }
-  }
-  if (OB_FAIL(ret)) {
-  } else if (FALSE_IT(tmp_exist = false)) {
-  } else if (OB_FAIL(dag_net_sche_.check_ls_compaction_dag_exist_with_cancel(ls_id, tmp_exist))) {
+  if (OB_FAIL(dag_net_sche_.check_ls_compaction_dag_exist_with_cancel(ls_id, tmp_exist))) {
     LOG_WARN("failed to check ls compaction dag exist", K(ret), K(ls_id));
   } else if (tmp_exist) {
     exist = true;
+  }
+  if (OB_FAIL(ret)) {
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && i < ObIDag::MergeDagPrioCnt; ++i) {
+      tmp_exist = false;
+      if (OB_FAIL(prio_sche_[ObIDag::MergeDagPrio[i]].check_ls_compaction_dag_exist_with_cancel(ls_id, tmp_exist))) {
+        LOG_WARN("failed to check ls compaction dag exist", K(ret), K(ls_id));
+      } else if (tmp_exist) {
+        exist = true;
+      }
+    }
   }
   return ret;
 }

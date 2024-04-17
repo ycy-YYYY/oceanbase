@@ -22,6 +22,7 @@ namespace oceanbase
 namespace blocksstable
 {
 struct ObSSTableColumnMeta;
+class ObStorageDatum;
 }
 
 namespace storage
@@ -136,9 +137,10 @@ public:
   OB_INLINE bool is_rowkey_column_group() const { return type_ == share::schema::ROWKEY_COLUMN_GROUP; }
   OB_INLINE bool is_single_column_group() const { return type_ == share::schema::SINGLE_COLUMN_GROUP; }
   OB_INLINE bool has_multi_version_column() const { return is_all_column_group() || is_rowkey_column_group(); }
+  OB_INLINE bool is_inited() const { return row_store_type_ != MAX_ROW_STORE; };
 
-  TO_STRING_KV(K_(version), K_(type), K_(compressor_type), K_(row_store_type), K_(block_size),
-      K_(column_cnt), "column_idxs", ObArrayWrap<uint16_t>(column_idxs_, column_cnt_));
+  TO_STRING_KV(K_(version), K_(type), K_(compressor_type), K_(row_store_type), K_(block_size), K_(schema_column_cnt), K_(rowkey_column_cnt),
+      K_(schema_rowkey_column_cnt), K_(column_cnt), "column_idxs", ObArrayWrap<uint16_t>(column_idxs_, column_cnt_));
 public:
   static const int64_t COLUMN_GRUOP_SCHEMA_VERSION = 1;
   uint8_t version_;
@@ -245,9 +247,16 @@ public:
   virtual int init_column_meta_array(
       common::ObIArray<blocksstable::ObSSTableColumnMeta> &meta_array) const override;
   int get_orig_default_row(const common::ObIArray<share::schema::ObColDesc> &column_ids,
-                                          blocksstable::ObDatumRow &default_row) const;
+                           bool need_trim,
+                           blocksstable::ObDatumRow &default_row) const;
   const ObStorageColumnSchema *get_column_schema(const int64_t column_id) const;
-
+  int mock_row_store_cg(ObStorageColumnGroupSchema &mocked_row_store_cg) const;
+  int get_base_rowkey_column_group_index(int32_t &cg_idx) const;
+  // This function only get cg idx for actually stored column
+  int get_column_group_index(
+      const uint64_t &column_id,
+      const int32_t &column_idx,
+      int32_t &cg_idx) const;
   // Use this comparison function to determine which schema has been updated later
   // true: input_schema is newer
   // false: current schema is newer
@@ -294,11 +303,12 @@ private:
   int deserialize_column_group_array(ObIAllocator &allocator, const char *buf, const int64_t data_len, int64_t &pos);
   int64_t get_column_array_serialize_length(const common::ObIArray<ObStorageColumnSchema> &array) const;
   int deserialize_skip_idx_attr_array(const char *buf, const int64_t data_len, int64_t &pos);
-  int generate_all_column_group_schema(ObStorageColumnGroupSchema &column_group, const ObRowStoreType row_store_type);
+  int generate_all_column_group_schema(ObStorageColumnGroupSchema &column_group, const ObRowStoreType row_store_type) const;
   template <typename T>
   int64_t get_array_serialize_length(const common::ObIArray<T> &array) const;
   template <typename T>
   bool check_column_array_valid(const common::ObIArray<T> &array) const;
+  void trim(const ObCollationType type, blocksstable::ObStorageDatum &storage_datum) const;
 
 public:
   static const uint32_t INVALID_ID = UINT32_MAX;
@@ -365,9 +375,7 @@ public:
     : ObStorageSchema(),
       table_id_(common::OB_INVALID_ID),
       index_status_(share::schema::ObIndexStatus::INDEX_STATUS_UNAVAILABLE),
-      truncate_version_(OB_INVALID_VERSION),
-      tenant_data_version_(0),
-      need_create_empty_major_(true)
+      truncate_version_(OB_INVALID_VERSION)
       {}
 
   int serialize(char *buf, const int64_t buf_len, int64_t &pos) const;
@@ -380,12 +388,6 @@ public:
   { return table_id_; }
   int64_t get_truncate_version() const
   { return truncate_version_; }
-  uint64_t get_tenant_data_version() const
-  { return tenant_data_version_; }
-  bool get_need_create_empty_major () const
-  { return need_create_empty_major_; }
-  void set_need_create_empty_major(const bool need_create_empty_major)
-  { need_create_empty_major_ = need_create_empty_major; }
   bool is_valid() const
   {
     return ObStorageSchema::is_valid() && common::OB_INVALID_ID != table_id_;
@@ -394,13 +396,10 @@ public:
       const share::schema::ObTableSchema &input_schema,
       const lib::Worker::CompatMode compat_mode,
       const bool skip_column_info,
-      const int64_t compat_version,
-      const uint64_t tenant_data_version,
-      const bool need_create_empty_major);
+      const int64_t compat_version);
   int init(common::ObIAllocator &allocator,
       const ObCreateTabletSchema &old_schema);
-  INHERIT_TO_STRING_KV("ObStorageSchema", ObStorageSchema, K_(table_id), K_(index_status), K_(truncate_version),
-      K_(tenant_data_version), K_(need_create_empty_major));
+  INHERIT_TO_STRING_KV("ObStorageSchema", ObStorageSchema, K_(table_id), K_(index_status), K_(truncate_version));
 private:
   // for cdc
   uint64_t table_id_;
@@ -408,8 +407,6 @@ private:
   share::schema::ObIndexStatus index_status_;
   // for tablet throttling
   int64_t truncate_version_;
-  uint64_t tenant_data_version_;
-  bool need_create_empty_major_;
 };
 
 template <typename T>

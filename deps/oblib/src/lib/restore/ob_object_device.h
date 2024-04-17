@@ -21,7 +21,7 @@ namespace oceanbase
 {
 namespace common
 {
-
+const char *get_storage_access_type_str(const ObStorageAccessType &type);
 /*
 there are three write mode
 ------use write interface----
@@ -57,9 +57,15 @@ public:
   //file/dir interfaces
   virtual int open(const char *pathname, const int flags, const mode_t mode, 
                    ObIOFd &fd, ObIODOpts *opts= NULL) override;
+  virtual int complete(const ObIOFd &fd) override;
+  virtual int abort(const ObIOFd &fd) override;
   virtual int close(const ObIOFd &fd) override;
   virtual int mkdir(const char *pathname, mode_t mode) override;
   virtual int rmdir(const char *pathname) override;
+  // When attempting to delete a non-existent file, NFS will return an OB_BACKUP_FILE_NOT_EXIST error.
+  // OSS/COS/S3/OBS will not report any error, while GCS will return a 'file not found' error.
+  // Since GCS is accessed using the S3 SDK, to maintain consistency across different object storage services
+  // that are accessed via the S3 SDK, no error code is returned when attempting to delete a non-existent object.
   virtual int unlink(const char *pathname) override;
   virtual int exist(const char *pathname, bool &is_exist) override;
   //sync io interfaces
@@ -189,6 +195,7 @@ private:
   virtual int64_t get_max_block_count(int64_t reserved_size) const override;
   virtual int64_t get_reserved_block_count() const override;
   virtual int check_space_full(const int64_t required_size) const override;
+  virtual int check_write_limited() const override;
 };
 
 

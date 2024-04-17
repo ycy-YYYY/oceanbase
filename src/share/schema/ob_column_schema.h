@@ -54,15 +54,14 @@ static common::ColumnType convert_str_to_column_type(const char *str);
 //constructor and destructor
 ObColumnSchemaV2();
 explicit ObColumnSchemaV2(common::ObIAllocator *allocator);
-ObColumnSchemaV2(const ObColumnSchemaV2 &src_schema);
+DISABLE_COPY_ASSIGN(ObColumnSchemaV2);
 virtual ~ObColumnSchemaV2();
 
 //operators
-ObColumnSchemaV2 &operator=(const ObColumnSchemaV2 &src_schema);
 bool operator==(const ObColumnSchemaV2 &r) const;
 bool operator!=(const ObColumnSchemaV2 &r) const;
 
-int assign(const ObColumnSchemaV2 &other);
+int assign(const ObColumnSchemaV2 &src_schema);
 
 //set methods
   inline void set_tenant_id(const uint64_t id) { tenant_id_ = id; }
@@ -202,7 +201,8 @@ int assign(const ObColumnSchemaV2 &other);
   }
   inline bool is_extend() const { return meta_type_.is_ext() || meta_type_.is_user_defined_sql_type(); }
   inline bool is_udt_hidden_column() const { return get_udt_set_id() > 0 && is_hidden(); }
-  inline bool is_udt_related_column() const { return is_extend() || is_udt_hidden_column(); }
+  inline bool is_udt_related_column(bool is_oracle_mode) const { return is_extend() || is_udt_hidden_column() ||
+                                                                        (is_oracle_mode && is_geometry()); }
   inline common::ObCharsetType get_charset_type() const { return charset_type_; }
   inline common::ObCollationType get_collation_type() const { return meta_type_.get_collation_type(); }
   inline const common::ObObj &get_orig_default_value()  const { return orig_default_value_; }

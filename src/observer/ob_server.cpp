@@ -122,6 +122,7 @@
 #ifdef OB_BUILD_ORACLE_XML
 #include "lib/xml/ob_libxml2_sax_handler.h"
 #endif
+#include "ob_check_params.h"
 
 using namespace oceanbase::lib;
 using namespace oceanbase::common;
@@ -197,6 +198,7 @@ ObServer::ObServer()
     refresh_active_time_task_(),
     refresh_network_speed_task_(),
     refresh_cpu_frequency_task_(),
+    refresh_io_calibration_task_(),
     schema_status_proxy_(sql_proxy_),
     is_log_dir_empty_(false),
     conn_res_mgr_(),
@@ -264,7 +266,10 @@ int ObServer::init(const ObServerOptions &opts, const ObPLogWriterCfg &log_cfg)
   if (OB_FAIL(init_config())) {
     LOG_ERROR("init config failed", KR(ret));
   }
-
+  //check os params
+  if (OB_SUCC(ret) && OB_FAIL(check_os_params(GCONF.strict_check_os_params))) {
+    LOG_ERROR("check OS params failed", K(GCONF.strict_check_os_params));
+  }
   // set large page param
   ObLargePageHelper::set_param(config_.use_large_pages);
 
@@ -437,6 +442,8 @@ int ObServer::init(const ObServerOptions &opts, const ObPLogWriterCfg &log_cfg)
       LOG_ERROR("init refresh network speed task failed", KR(ret));
     } else if (OB_FAIL(init_refresh_cpu_frequency())) {
       LOG_ERROR("init refresh cpu frequency failed", KR(ret));
+    } else if (OB_FAIL(init_refresh_io_calibration())) {
+      LOG_ERROR("init refresh io calibration failed", KR(ret));
     } else if (OB_FAIL(ObOptStatManager::get_instance().init(
                          &sql_proxy_, &config_))) {
       LOG_ERROR("init opt stat manager failed", KR(ret));
@@ -877,6 +884,12 @@ int ObServer::start()
       FLOG_INFO("success to start multi tenant");
     }
 
+    if (FAILEDx(wr_service_.start())) {
+      LOG_ERROR("failed to start wr service", K(ret));
+    } else {
+      LOG_INFO("success to start wr service");
+    }
+
     if (FAILEDx(ObServerCheckpointSlogHandler::get_instance().start())) {
       LOG_ERROR("fail to start server checkpoint slog handler", KR(ret));
     } else {
@@ -887,12 +900,6 @@ int ObServer::start()
       LOG_ERROR("fail to start log pool", KR(ret));
     } else {
       FLOG_INFO("success to start log pool");
-    }
-
-    if (FAILEDx(wr_service_.start())) {
-      LOG_ERROR("failed to start wr service", K(ret));
-    } else {
-      LOG_INFO("success to start wr service");
     }
 
     if (FAILEDx(try_update_hidden_sys())) {
@@ -1015,37 +1022,26 @@ int ObServer::start()
       FLOG_INFO("success to refresh server configure");
     }
 
-    bool synced = false;
-    while (OB_SUCC(ret) && !stop_ && !synced) {
-      synced = multi_tenant_.has_synced();
-      if (!synced) {
-        SLEEP(1);
-      }
-    }
-    FLOG_INFO("check if multi tenant synced", KR(ret), K(stop_), K(synced));
-
-    bool schema_ready = false;
-    while (OB_SUCC(ret) && !stop_ && !schema_ready) {
-      schema_ready = schema_service_.is_sys_full_schema();
-      if (!schema_ready) {
-        SLEEP(1);
-      }
-    }
-    FLOG_INFO("check if schema ready", KR(ret), K(stop_), K(schema_ready));
-
-    bool timezone_usable = false;
-    if (FAILEDx(tenant_timezone_mgr_.start())) {
-      LOG_ERROR("fail to start tenant timezone mgr", KR(ret));
+    // check if multi tenant synced
+    if (FAILEDx(check_if_multi_tenant_synced())) {
+      LOG_ERROR("fail to check if multi tenant synced", KR(ret));
     } else {
-      FLOG_INFO("success to start tenant timezone mgr");
+      FLOG_INFO("success to check if multi tenant synced");
     }
-    while (OB_SUCC(ret) && !stop_ && !timezone_usable) {
-      timezone_usable = tenant_timezone_mgr_.is_usable();
-      if (!timezone_usable) {
-        SLEEP(1);
-      }
+
+    // check if schema ready
+    if (FAILEDx(check_if_schema_ready())) {
+      LOG_ERROR("fail to check if schema ready", KR(ret));
+    } else {
+      FLOG_INFO("success to check if schema ready");
     }
-    FLOG_INFO("check if timezone usable", KR(ret), K(stop_), K(timezone_usable));
+
+    // check if timezone usable
+    if (FAILEDx(check_if_timezone_usable())) {
+      LOG_ERROR("fail to check if timezone usable", KR(ret));
+    } else {
+      FLOG_INFO("success to check if timezone usable");
+    }
 
     // check log replay and user tenant schema refresh status
     if (OB_SUCC(ret)) {
@@ -1120,6 +1116,52 @@ int ObServer::try_update_hidden_sys()
   return ret;
 }
 
+int ObServer::check_if_multi_tenant_synced()
+{
+  int ret = OB_SUCCESS;
+  bool synced = false;
+  while (OB_SUCC(ret) && !stop_ && !synced) {
+    synced = multi_tenant_.has_synced();
+    if (!synced) {
+      SLEEP(1);
+    }
+  }
+  FLOG_INFO("check if multi tenant synced", KR(ret), K(stop_), K(synced));
+  return ret;
+}
+
+int ObServer::check_if_schema_ready()
+{
+  int ret = OB_SUCCESS;
+  bool schema_ready = false;
+  while (OB_SUCC(ret) && !stop_ && !schema_ready) {
+    schema_ready = schema_service_.is_sys_full_schema();
+    if (!schema_ready) {
+      SLEEP(1);
+    }
+  }
+  FLOG_INFO("check if schema ready", KR(ret), K(stop_), K(schema_ready));
+  return ret;
+}
+
+int ObServer::check_if_timezone_usable()
+{
+  int ret = OB_SUCCESS;
+  bool timezone_usable = false;
+  if (FAILEDx(tenant_timezone_mgr_.start())) {
+    LOG_ERROR("fail to start tenant timezone mgr", KR(ret));
+  } else {
+    FLOG_INFO("success to start tenant timezone mgr");
+  }
+  while (OB_SUCC(ret) && !stop_ && !timezone_usable) {
+    timezone_usable = tenant_timezone_mgr_.is_usable();
+    if (!timezone_usable) {
+      SLEEP(1);
+    }
+  }
+  FLOG_INFO("check if timezone usable", KR(ret), K(stop_), K(timezone_usable));
+  return ret;
+}
 void ObServer::prepare_stop()
 {
   prepare_stop_ = true;
@@ -1748,7 +1790,47 @@ int ObServer::init_config()
   if (OB_FILE_NOT_EXIST == (ret = config_mgr_.load_config())) {
     has_config_file = false;
     ret = OB_SUCCESS;
+  } else if (OB_FAIL(ret)) {
+    LOG_ERROR("load config from file failed", KR(ret));
   }
+
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(init_opts_config(has_config_file))) {
+    LOG_ERROR("init opts config failed", KR(ret));
+  } else {
+    config_.print();
+  }
+
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(init_local_ip_and_devname())) {
+    LOG_ERROR("init local_ip and devname failed", KR(ret));
+  } else if (!is_arbitration_mode() && OB_FAIL(config_.strict_check_special())) {
+    LOG_ERROR("some config setting is not valid", KR(ret));
+  } else if (OB_FAIL(GMEMCONF.reload_config(config_))) {
+    LOG_ERROR("reload memory config failed", KR(ret));
+  } else if (!is_arbitration_mode() && OB_FAIL(set_running_mode())) {
+    LOG_ERROR("set running mode failed", KR(ret));
+  } else if (OB_FAIL(init_self_addr())) {
+    LOG_ERROR("init self_addr failed", KR(ret));
+  } else if (is_arbitration_mode()) {
+    // arbitration mode, dump config params to file directly
+    if (OB_FAIL(config_mgr_.dump2file())) {
+      LOG_ERROR("config_mgr_ dump2file failed", KR(ret));
+    } else {
+      LOG_INFO("config_mgr_ dump2file success", KR(ret));
+    }
+  } else if (OB_FAIL(init_config_module())) {
+    LOG_ERROR("init config module failed", KR(ret));
+  } else {
+    lib::g_runtime_enabled = true;
+  }
+
+  return ret;
+}
+
+int ObServer::init_opts_config(bool has_config_file)
+{
+  int ret = OB_SUCCESS;
 
   if (opts_.rpc_port_) {
     config_.rpc_port = opts_.rpc_port_;
@@ -1769,7 +1851,7 @@ int ObServer::init_config()
     config_.devname.set_value(opts_.devname_);
     config_.devname.set_version(start_time_);
   } else {
-    if (!has_config_file && 0 == strlen(config_.local_ip)) {
+    if (!has_config_file) {
       const char *devname = get_default_if();
       if (devname && '\0' != devname[0]) {
         LOG_INFO("guess interface name", K(devname));
@@ -1839,24 +1921,28 @@ int ObServer::init_config()
     config_.use_ipv6.set_version(start_time_);
   }
 
-  config_.print();
+  return ret;
+}
+
+int ObServer::init_local_ip_and_devname()
+{
+  int ret = OB_SUCCESS;
 
   // local_ip is a critical parameter, if it is set, then verify it; otherwise, set it via devname.
   if (strlen(config_.local_ip) > 0) {
     char if_name[MAX_IFNAME_LENGTH] = { '\0' };
-    if (0 != obsys::ObNetUtil::get_ifname_by_addr(config_.local_ip, if_name, sizeof(if_name))) {
-      // if it is incorrect, then ObServer should not be started.
-      ret = OB_ERR_OBSERVER_START;
-      LOG_DBA_ERROR(OB_ERR_OBSERVER_START, "local_ip is not a valid IP for this machine, local_ip", config_.local_ip.get_value());
-    } else {
-      if (0 != strcmp(config_.devname, if_name)) {
-        // this is done to ensure the consistency of local_ip and devname.
-        LOG_DBA_WARN(OB_ITEM_NOT_MATCH, "the devname has been rewritten, and the new value comes from local_ip, old value",
-                    config_.devname.get_value(), "new value", if_name, "local_ip", config_.local_ip.get_value());
-      }
-      // unconditionally call set_value to ensure that devname is written to the configuration file.
+    bool has_found = false;
+    if (OB_SUCCESS != obsys::ObNetUtil::get_ifname_by_addr(config_.local_ip, if_name, sizeof(if_name), has_found)) {
+      // if it is incorrect, then ObServer start but log a error.
+      LOG_DBA_WARN(OB_ERR_OBSERVER_START, "get ifname by local_ip failed, local_ip", config_.local_ip.get_value());
+    } else if (false == has_found) {
+      LOG_DBA_ERROR(OB_ERR_OBSERVER_START, "local_ip set failed, please check your local_ip", config_.local_ip.get_value());
+    } else if (0 != strcmp(config_.devname, if_name)) {
       config_.devname.set_value(if_name);
       config_.devname.set_version(start_time_);
+      // this is done to ensure the consistency of local_ip and devname.
+      LOG_DBA_WARN(OB_ITEM_NOT_MATCH, "the devname has been rewritten, and the new value comes from local_ip, old value",
+          config_.devname.get_value(), "new value", if_name, "local_ip", config_.local_ip.get_value());
     }
   } else {
     if (config_.use_ipv6) {
@@ -1886,35 +1972,38 @@ int ObServer::init_config()
     }
   }
 
-  if (OB_FAIL(ret)) {
-    // nop
-  } else if (!is_arbitration_mode() && OB_FAIL(config_.strict_check_special())) {
-    LOG_ERROR("some config setting is not valid", KR(ret));
-  } else if (OB_FAIL(GMEMCONF.reload_config(config_))) {
-    LOG_ERROR("reload memory config failed", KR(ret));
-  } else if (!is_arbitration_mode() && OB_FAIL(set_running_mode())) {
-    LOG_ERROR("set running mode failed", KR(ret));
+  return ret;
+}
+
+int ObServer::init_self_addr()
+{
+  int ret = OB_SUCCESS;
+
+  int32_t local_port = static_cast<int32_t>(config_.rpc_port);
+  if (strlen(config_.local_ip) > 0) {
+    self_addr_.set_ip_addr(config_.local_ip, local_port);
   } else {
-    int32_t local_port = static_cast<int32_t>(config_.rpc_port);
-    if (strlen(config_.local_ip) > 0) {
-      self_addr_.set_ip_addr(config_.local_ip, local_port);
-    } else {
-      if (config_.use_ipv6) {
+    if (config_.use_ipv6) {
       char ipv6[MAX_IP_ADDR_LENGTH] = { '\0' };
-      obsys::ObNetUtil::get_local_addr_ipv6(config_.devname, ipv6, sizeof(ipv6));
-      self_addr_.set_ip_addr(ipv6, local_port);
+      if (OB_FAIL(obsys::ObNetUtil::get_local_addr_ipv6(config_.devname, ipv6, sizeof(ipv6)))) {
+        LOG_ERROR("get ipv6 address by devname failed", "devname",
+            config_.devname.get_value(), KR(ret));
       } else {
-        uint32_t ipv4_net = 0;
-        if (OB_FAIL(obsys::ObNetUtil::get_local_addr_ipv4(config_.devname, ipv4_net))) {
-          LOG_ERROR("get ipv4 address by devname failed", "devname",
-              config_.devname.get_value(), KR(ret));
-        } else {
-          int32_t ipv4 = ntohl(ipv4_net);
-          self_addr_.set_ipv4_addr(ipv4, local_port);
-        }
+        self_addr_.set_ip_addr(ipv6, local_port);
+      }
+    } else {
+      uint32_t ipv4_net = 0;
+      if (OB_FAIL(obsys::ObNetUtil::get_local_addr_ipv4(config_.devname, ipv4_net))) {
+        LOG_ERROR("get ipv4 address by devname failed", "devname",
+            config_.devname.get_value(), KR(ret));
+      } else {
+        int32_t ipv4 = ntohl(ipv4_net);
+        self_addr_.set_ipv4_addr(ipv4, local_port);
       }
     }
+  }
 
+  if (OB_SUCC(ret)) {
     const char *syslog_file_info = ObServerUtils::build_syslog_file_info(self_addr_);
     OB_LOGGER.set_new_file_info(syslog_file_info);
     LOG_INFO("Build basic information for each syslog file", "info", syslog_file_info);
@@ -1923,50 +2012,46 @@ int ObServer::init_config()
     obrpc::ObRpcProxy::myaddr_ = self_addr_;
     LOG_INFO("my addr", K_(self_addr));
     config_.self_addr_ = self_addr_;
-
-
-    if (is_arbitration_mode()) {
-      // arbitration mode, dump config params to file directly
-      if (OB_FAIL(config_mgr_.dump2file())) {
-        LOG_ERROR("config_mgr_ dump2file failed", KR(ret));
-      } else {
-        LOG_INFO("config_mgr_ dump2file success", KR(ret));
-      }
-    } else {
-      omt::UpdateTenantConfigCb update_tenant_config_cb =
-        [&](uint64_t tenant_id)-> void
-      {
-        multi_tenant_.update_tenant_config(tenant_id);
-      };
-      // initialize configure module
-      if (!self_addr_.is_valid()) {
-        ret = OB_INVALID_ARGUMENT;
-        LOG_ERROR("local address isn't valid", K(self_addr_), KR(ret));
-      } else if (OB_FAIL(TG_START(lib::TGDefIDs::ServerGTimer))) {
-        LOG_ERROR("init timer fail", KR(ret));
-      } else if (OB_FAIL(TG_START(lib::TGDefIDs::FreezeTimer))) {
-        LOG_ERROR("init freeze timer fail", KR(ret));
-      } else if (OB_FAIL(TG_START(lib::TGDefIDs::SqlMemTimer))) {
-        LOG_ERROR("init sql memory manger timer fail", KR(ret));
-      } else if (OB_FAIL(TG_START(lib::TGDefIDs::ServerTracerTimer))) {
-        LOG_ERROR("fail to init server trace timer", KR(ret));
-      } else if (OB_FAIL(TG_START(lib::TGDefIDs::CTASCleanUpTimer))) {
-        LOG_ERROR("fail to init ctas clean up timer", KR(ret));
-      } else if (OB_FAIL(TG_START(lib::TGDefIDs::MemDumpTimer))) {
-        LOG_ERROR("fail to init memory dump timer", KR(ret));
-      } else if (OB_FAIL(config_mgr_.base_init())) {
-        LOG_ERROR("config_mgr_ base_init failed", KR(ret));
-      } else if (OB_FAIL(config_mgr_.init(sql_proxy_, self_addr_))) {
-        LOG_ERROR("config_mgr_ init failed", K_(self_addr), KR(ret));
-      } else if (OB_FAIL(tenant_config_mgr_.init(sql_proxy_, self_addr_,
-                         &config_mgr_, update_tenant_config_cb))) {
-        LOG_ERROR("tenant_config_mgr_ init failed", K_(self_addr), KR(ret));
-      } else if (OB_FAIL(tenant_config_mgr_.add_config_to_existing_tenant(opts_.optstr_))) {
-        LOG_ERROR("tenant_config_mgr_ add_config_to_existing_tenant failed", KR(ret));
-      }
-    }
   }
-  lib::g_runtime_enabled = true;
+
+  return ret;
+}
+
+int ObServer::init_config_module()
+{
+  int ret = OB_SUCCESS;
+
+  omt::UpdateTenantConfigCb update_tenant_config_cb =
+    [&](uint64_t tenant_id)-> void
+  {
+    multi_tenant_.update_tenant_config(tenant_id);
+  };
+  // initialize configure module
+  if (!self_addr_.is_valid()) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_ERROR("local address isn't valid", K(self_addr_), KR(ret));
+  } else if (OB_FAIL(TG_START(lib::TGDefIDs::ServerGTimer))) {
+    LOG_ERROR("init timer fail", KR(ret));
+  } else if (OB_FAIL(TG_START(lib::TGDefIDs::FreezeTimer))) {
+    LOG_ERROR("init freeze timer fail", KR(ret));
+  } else if (OB_FAIL(TG_START(lib::TGDefIDs::SqlMemTimer))) {
+    LOG_ERROR("init sql memory manger timer fail", KR(ret));
+  } else if (OB_FAIL(TG_START(lib::TGDefIDs::ServerTracerTimer))) {
+    LOG_ERROR("fail to init server trace timer", KR(ret));
+  } else if (OB_FAIL(TG_START(lib::TGDefIDs::CTASCleanUpTimer))) {
+    LOG_ERROR("fail to init ctas clean up timer", KR(ret));
+  } else if (OB_FAIL(TG_START(lib::TGDefIDs::MemDumpTimer))) {
+    LOG_ERROR("fail to init memory dump timer", KR(ret));
+  } else if (OB_FAIL(config_mgr_.base_init())) {
+    LOG_ERROR("config_mgr_ base_init failed", KR(ret));
+  } else if (OB_FAIL(config_mgr_.init(sql_proxy_, self_addr_))) {
+    LOG_ERROR("config_mgr_ init failed", K_(self_addr), KR(ret));
+  } else if (OB_FAIL(tenant_config_mgr_.init(sql_proxy_, self_addr_,
+                      &config_mgr_, update_tenant_config_cb))) {
+    LOG_ERROR("tenant_config_mgr_ init failed", K_(self_addr), KR(ret));
+  } else if (OB_FAIL(tenant_config_mgr_.add_config_to_existing_tenant(opts_.optstr_))) {
+    LOG_ERROR("tenant_config_mgr_ add_config_to_existing_tenant failed", KR(ret));
+  }
 
   return ret;
 }
@@ -1998,6 +2083,7 @@ int ObServer::init_pre_setting()
   reset_mem_leak_checker_label(GCONF.leak_mod_to_check.str());
   ObMallocSampleLimiter::set_interval(GCONF._max_malloc_sample_interval,
                                       GCONF._min_malloc_sample_interval);
+  enable_memleak_light_backtrace(GCONF._enable_memleak_light_backtrace);
 
   // oblog configuration
   if (OB_SUCC(ret)) {
@@ -2060,6 +2146,9 @@ int ObServer::init_pre_setting()
     LOG_INFO("set stack_size", K(stack_size));
     global_thread_stack_size = stack_size - SIG_STACK_SIZE - ACHUNK_PRESERVE_SIZE;
   }
+  if (OB_SUCC(ret) && GCONF.use_ipv6) {
+    enable_use_ipv6();
+  }
   return ret;
 }
 
@@ -2118,7 +2207,6 @@ int ObServer::init_io()
       }
       io_config.disk_io_thread_count_ = GCONF.disk_io_thread_count;
       const int64_t max_io_depth = 256;
-      ObTenantIOConfig server_tenant_io_config = ObTenantIOConfig::default_instance();
       if (OB_FAIL(ObIOManager::get_instance().set_io_config(io_config))) {
         LOG_ERROR("config io manager fail, ", KR(ret));
       } else {
@@ -2196,9 +2284,6 @@ int ObServer::init_io()
                                                                             io_config.disk_io_thread_count_ / 2,
                                                                             max_io_depth))) {
             LOG_ERROR("add device channel failed", KR(ret));
-          } else if (OB_FAIL(ObIOManager::get_instance().add_tenant_io_manager(OB_SERVER_TENANT_ID,
-                                                                               server_tenant_io_config))) {
-            LOG_ERROR("add server tenant io manager failed", KR(ret));
           }
         }
       }
@@ -3338,6 +3423,62 @@ int ObServer::refresh_network_speed()
   return ret;
 }
 
+ObServer::ObRefreshIOCalibrationTimeTask::ObRefreshIOCalibrationTimeTask()
+: obs_(nullptr), tg_id_(-1), is_inited_(false)
+{}
+
+int ObServer::ObRefreshIOCalibrationTimeTask::init(ObServer *obs, int tg_id)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(is_inited_)) {
+    ret = OB_INIT_TWICE;
+    LOG_ERROR("ObRefreshIOCalibrationTimeTask has already been inited", KR(ret));
+  } else if (OB_ISNULL(obs)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_ERROR("ObRefreshIOCalibrationTimeTask init with null ptr", KR(ret), K(obs));
+  } else {
+    obs_ = obs;
+    tg_id_ = tg_id;
+    is_inited_ = true;
+    if (OB_FAIL(TG_SCHEDULE(tg_id_, *this, REFRESH_INTERVAL, true /*schedule repeatly*/))) {
+      LOG_ERROR("fail to schedule task ObRefreshIOCalibrationTimeTask", KR(ret));
+    }
+  }
+  return ret;
+}
+
+void ObServer::ObRefreshIOCalibrationTimeTask::destroy()
+{
+  is_inited_ = false;
+  tg_id_ = -1;
+  obs_ = nullptr;
+}
+
+void ObServer::ObRefreshIOCalibrationTimeTask::runTimerTask()
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(!is_inited_)) {
+    ret = OB_NOT_INIT;
+    LOG_ERROR("ObRefreshIOCalibrationTimeTask has not been inited", KR(ret));
+  } else if (OB_ISNULL(obs_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_ERROR("ObRefreshIOCalibrationTimeTask task got null ptr", KR(ret));
+  } else if (OB_FAIL(obs_->refresh_io_calibration())) {
+    LOG_WARN("ObRefreshIOCalibrationTimeTask task failed", KR(ret));
+  } else {
+    TG_CANCEL(tg_id_, *this);
+  }
+}
+
+int ObServer::refresh_io_calibration()
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(ObIOCalibration::get_instance().read_from_table())) {
+    LOG_WARN("fail to refresh io calibration from table", KR(ret));
+  }
+  return ret;
+}
+
 int ObServer::init_refresh_active_time_task()
 {
   int ret = OB_SUCCESS;
@@ -3388,6 +3529,15 @@ int ObServer::init_refresh_cpu_frequency()
   int ret = OB_SUCCESS;
   if (OB_FAIL(refresh_cpu_frequency_task_.init(this, lib::TGDefIDs::ServerGTimer))) {
     LOG_ERROR("fail to init refresh cpu frequency task", KR(ret));
+  }
+  return ret;
+}
+
+int ObServer::init_refresh_io_calibration()
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(refresh_io_calibration_task_.init(this, lib::TGDefIDs::ServerGTimer))) {
+    LOG_ERROR("fail to init refresh io calibration task", KR(ret));
   }
   return ret;
 }

@@ -39,7 +39,8 @@ ObTxLogTypeChecker::need_replay_barrier(const ObTxLogType log_type,
         || data_source_type == ObTxDataSourceType::UNBIND_TABLET_NEW_MDS
         || data_source_type == ObTxDataSourceType::START_TRANSFER_OUT
         || data_source_type == ObTxDataSourceType::START_TRANSFER_OUT_PREPARE
-        || data_source_type == ObTxDataSourceType::FINISH_TRANSFER_OUT) {
+        || data_source_type == ObTxDataSourceType::FINISH_TRANSFER_OUT
+        || data_source_type == ObTxDataSourceType::START_TRANSFER_IN) {
 
       barrier_flag = logservice::ObReplayBarrierType::PRE_BARRIER;
 
@@ -105,6 +106,45 @@ int ObTxLogTypeChecker::decide_final_barrier_type(
   }
   return ret;
 }
+
+ObTxLogType ObTxPrevLogType::convert_to_tx_log_type()
+{
+  ObTxLogType tx_log_type = ObTxLogType::UNKNOWN;
+  if (TypeEnum::COMMIT_INFO == prev_log_type_) {
+    tx_log_type = ObTxLogType::TX_COMMIT_INFO_LOG;
+  } else if (TypeEnum::PREPARE == prev_log_type_) {
+    tx_log_type = ObTxLogType::TX_PREPARE_LOG;
+  }
+  return tx_log_type;
+}
+
+int ObTxPrevLogType::serialize(char *buf, const int64_t buf_len, int64_t &pos) const
+{
+  int8_t prev_val;
+  memcpy(&prev_val, &prev_log_type_, 1);
+  return serialization::encode_i8(buf, buf_len, pos, prev_val);
+}
+
+int ObTxPrevLogType::deserialize(const char *buf, const int64_t data_len, int64_t &pos)
+{
+  int ret = OB_SUCCESS;
+  int8_t prev_val = 0;
+  int64_t tmp_pos = pos;
+
+  if (OB_SUCC(serialization::decode_i8(buf, data_len, pos, &prev_val))) {
+    memcpy(&prev_log_type_, &prev_val, 1);
+    pos = tmp_pos;
+  }
+  return ret;
+}
+
+int64_t ObTxPrevLogType::get_serialize_size(void) const
+{
+  int8_t prev_val;
+  memcpy(&prev_val, &prev_log_type_, 1);
+  return serialization::encoded_length_i8(prev_val);
+}
+
 
 // ============================== Tx Log Header =============================
 
@@ -280,7 +320,8 @@ OB_TX_SERIALIZE_MEMBER(ObTxCommitInfoLog,
 OB_TX_SERIALIZE_MEMBER(ObTxPrepareLog,
                        compat_bytes_,
                        /* 1 */ incremental_participants_,
-                       /* 2 */ prev_lsn_);
+                       /* 2 */ prev_lsn_,
+                       /* 3 */ prev_log_type_);
 
 OB_TX_SERIALIZE_MEMBER(ObTxCommitLog,
                        compat_bytes_,
@@ -292,7 +333,8 @@ OB_TX_SERIALIZE_MEMBER(ObTxCommitLog,
                        /* 6 */ tx_data_backup_,
                        /* 7 */ prev_lsn_,
                        /* 8 */ ls_log_info_arr_,
-                       /* 9 */ checksum_sig_serde_);
+                       /* 9 */ checksum_sig_serde_,
+                       /* 10 */ prev_log_type_);
 
 OB_TX_SERIALIZE_MEMBER(ObTxClearLog, compat_bytes_, /* 1 */ incremental_participants_);
 
@@ -392,7 +434,7 @@ int ObTxPrepareLog::before_serialize()
       TRANS_LOG(WARN, "reset all compat_bytes_ valid failed", K(ret));
     }
   } else {
-    if (OB_FAIL(compat_bytes_.init(2))) {
+    if (OB_FAIL(compat_bytes_.init(3))) {
       TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
     }
   }
@@ -400,6 +442,7 @@ int ObTxPrepareLog::before_serialize()
   if (OB_SUCC(ret)) {
     TX_NO_NEED_SER(incremental_participants_.empty(), 1, compat_bytes_);
     TX_NO_NEED_SER(prev_lsn_.is_valid() == false, 2, compat_bytes_);
+    TX_NO_NEED_SER(prev_log_type_.is_valid() == false, 3, compat_bytes_);
   }
   return ret;
 }
@@ -413,7 +456,7 @@ int ObTxCommitLog::before_serialize()
       TRANS_LOG(WARN, "reset all compat_bytes_ valid failed", K(ret));
     }
   } else {
-    if (OB_FAIL(compat_bytes_.init(9))) {
+    if (OB_FAIL(compat_bytes_.init(10))) {
       TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
     }
   }
@@ -428,6 +471,7 @@ int ObTxCommitLog::before_serialize()
     TX_NO_NEED_SER(prev_lsn_.is_valid() == false, 7, compat_bytes_);
     TX_NO_NEED_SER(ls_log_info_arr_.empty(), 8, compat_bytes_);
     TX_NO_NEED_SER(checksum_sig_.count() == 0, 9, compat_bytes_);
+    TX_NO_NEED_SER(prev_log_type_.is_valid() == false, 10, compat_bytes_);
   }
   return ret;
 }
@@ -769,7 +813,7 @@ int ObTxRedoLog::format_mutator_row_(const memtable::ObMemtableMutatorRow &row,
     // old row
     arg.writer_ptr_->dump_key("OldRow Cols");
     arg.writer_ptr_->start_object();
-    if (OB_FAIL(format_row_data_(old_row, arg))) {
+    if (OB_SUCC(ret) && OB_FAIL(format_row_data_(old_row, arg))) {
       TRANS_LOG(WARN, "format old_row failed", K(ret));
     }
     arg.writer_ptr_->end_object();

@@ -574,6 +574,7 @@ static const NonReservedKeyword Mysql_none_reserved_keywords[] =
   {"nth_value", NTH_VALUE},
   {"obconfig_url", OBCONFIG_URL},
   {"object", OBJECT},
+  {"object_id", OBJECT_ID},
   {"of", OF},
   {"off", OFF},
   {"offset", OFFSET},
@@ -809,6 +810,7 @@ static const NonReservedKeyword Mysql_none_reserved_keywords[] =
   {"sql_buffer_result", SQL_BUFFER_RESULT},
   {"sql_cache", SQL_CACHE},
   {"sql_id", SQL_ID},
+  {"schema_id", SCHEMA_ID},
   {"sql_no_cache", SQL_NO_CACHE},
   {"sql_thread", SQL_THREAD},
   {"sql_tsi_day", SQL_TSI_DAY},
@@ -851,6 +853,7 @@ static const NonReservedKeyword Mysql_none_reserved_keywords[] =
   {"substr", SUBSTR},
   {"substring", SUBSTRING},
   {"sum", SUM},
+  {"sum_opnsize", SUM_OPNSIZE},
   {"super", SUPER},
   {"suspend", SUSPEND},
   {"successful", SUCCESSFUL},
@@ -900,6 +903,7 @@ static const NonReservedKeyword Mysql_none_reserved_keywords[] =
   {"trace", TRACE},
   {"traditional", TRADITIONAL},
   {"trailing", TRAILING},
+  {"transfer", TRANSFER},
   {"transaction", TRANSACTION},
   {"trigger", TRIGGER},
   {"triggers", TRIGGERS},
@@ -1015,6 +1019,7 @@ static const NonReservedKeyword Mysql_none_reserved_keywords[] =
   {"kv_attributes", KV_ATTRIBUTES},
   {"RESOURCE_POOL", RESOURCE_POOL},
   {"clone", CLONE},
+  {"_st_asmvt", _ST_ASMVT},
 };
 
 /** https://dev.mysql.com/doc/refman/5.7/en/sql-syntax-prepared-statements.html
@@ -1114,7 +1119,6 @@ static const NonReservedKeyword Mysql_sql_keywords_in_pl[] =
   {"truncate", TRUNCATE},
   {"uninstall", UNINSTALL},
   {"update", UPDATE},
-  {"user", USER},
   {"user_resources", USER_RESOURCES},
   {"view", VIEW},
   {"warnings", WARNINGS},

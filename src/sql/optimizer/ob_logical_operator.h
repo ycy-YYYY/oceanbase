@@ -31,6 +31,8 @@
 #include "sql/optimizer/ob_fd_item.h"
 #include "sql/monitor/ob_sql_plan.h"
 #include "sql/monitor/ob_plan_info_manager.h"
+#include "sql/optimizer/ob_px_resource_analyzer.h"
+
 namespace oceanbase
 {
 namespace sql
@@ -39,6 +41,7 @@ struct JoinFilterInfo;
 struct EstimateCostInfo;
 struct ObSqlPlanItem;
 struct PlanText;
+class ObPxResourceAnalyzer;
 struct partition_location
 {
   int64_t partition_id;
@@ -277,6 +280,17 @@ struct FilterCompare
   double get_selectivity(ObRawExpr *expr);
 
   common::ObIArray<ObExprSelPair> &predicate_selectivities_;
+};
+
+typedef std::pair<double, ObRawExpr *> ObExprRankPair;
+
+struct ObExprRankPairCompare
+{
+  ObExprRankPairCompare() {};
+  bool operator()(ObExprRankPair &left, ObExprRankPair &right)
+  {
+    return left.first < right.first;
+  }
 };
 
 class AdjustSortContext
@@ -1324,7 +1338,7 @@ public:
   virtual int compute_property();
 
   int check_property_valid() const;
-  int compute_normal_multi_child_parallel_and_server_info(bool is_partition_wise);
+  int compute_normal_multi_child_parallel_and_server_info();
   int set_parallel_and_server_info_for_match_all();
   int get_limit_offset_value(ObRawExpr *percent_expr,
                              ObRawExpr *limit_expr,
@@ -1358,10 +1372,11 @@ public:
    */
   int alloc_op_pre(AllocOpContext& ctx);
   int alloc_op_post(AllocOpContext& ctx);
-  int find_rownum_expr_recursively(bool &found, const ObRawExpr *expr);
-  int find_rownum_expr(bool &found, const ObIArray<ObRawExpr *> &exprs);
-  int find_rownum_expr(bool &found);
-  int disable_rownum_expr(hash::ObHashSet<uint64_t> &disabled_op_set, ObIArray<uint64_t> &cur_path);
+  int find_rownum_expr_recursively(const uint64_t &op_id, ObLogicalOperator *&rownum_op,
+                                   const ObRawExpr *expr);
+  int find_rownum_expr(const uint64_t &op_id, ObLogicalOperator *&rownum_op,
+                       const ObIArray<ObRawExpr *> &exprs);
+  int find_rownum_expr(const uint64_t &op_id, ObLogicalOperator *&rownum_op);
   int gen_temp_op_id(AllocOpContext& ctx);
   int recursively_disable_alloc_op_above(AllocOpContext& ctx);
   int alloc_nodes_above(AllocOpContext& ctx, const uint64_t &flags);
@@ -1633,6 +1648,8 @@ public:
    *  be evaluated earlier.
    */
   int reorder_filter_exprs();
+  int reorder_filters_exprs(common::ObIArray<ObExprSelPair> &predicate_selectivities,
+                            ObIArray<ObRawExpr *> &filters_exprs);
 
   int find_shuffle_join_filter(bool &find) const;
   int has_window_function_below(bool &has_win_func) const;
@@ -1686,6 +1703,20 @@ public:
                                ObIArray<ObExecParamRawExpr *> &right_above_params);
   // 生成 partition id 表达式
   int generate_pseudo_partition_id_expr(ObOpPseudoColumnRawExpr *&expr);
+  int pick_out_startup_filters();
+  int check_contain_false_startup_filter(bool &contain_false);
+
+  // Make the operator in state of output data.
+  // 1. If this operator is single-child and non-block, then open its child.
+  // 2. If this operator is single-child and block, then open and close its child.
+  // 3. If this operator has multiple children, open all children by default and
+  //    operators should override this function according to their unique execution logic.
+  // append_map = false means it's in the progress of LogSet searching for child
+  //   with max running thread/group count, and we will not modify max_count or max_map.
+  virtual int open_px_resource_analyze(OPEN_PX_RESOURCE_ANALYZE_DECLARE_ARG);
+  // Make the operator in state that all data has been outputted already.
+  virtual int close_px_resource_analyze(CLOSE_PX_RESOURCE_ANALYZE_DECLARE_ARG);
+  int find_max_px_resource_child(OPEN_PX_RESOURCE_ANALYZE_DECLARE_ARG, int64_t start_idx);
 
 public:
   ObSEArray<ObLogicalOperator *, 16, common::ModulePageAllocator, true> child_;
@@ -1846,6 +1877,7 @@ private:
   // alloc mat for sync in intput
   int need_alloc_material_for_push_down_wf(ObLogicalOperator &curr_op, bool &need_alloc);
   int check_need_parallel_valid(int64_t need_parallel) const;
+  virtual int get_card_without_filter(double &card);
 private:
   ObLogicalOperator *parent_;                           // parent operator
   bool is_plan_root_;                                // plan root operator
@@ -1903,6 +1935,8 @@ protected:
   int64_t inherit_sharding_index_;
   // wether has allocated a osg_gather.
   bool need_osg_merge_;
+  int64_t max_px_thread_branch_;
+  int64_t max_px_group_branch_;
 };
 
 template <typename Allocator>

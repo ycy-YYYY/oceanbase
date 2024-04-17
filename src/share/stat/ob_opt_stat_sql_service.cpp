@@ -1172,7 +1172,7 @@ int ObOptStatSqlService::fill_table_stat(common::sqlclient::ObMySQLResult &resul
       } else if (OB_LIKELY(obj_type.is_double())) {
         EXTRACT_DOUBLE_FIELD_TO_CLASS_MYSQL(result, avg_row_size, stat, int64_t);
       } else {
-        EXTRACT_INT_FIELD_TO_CLASS_MYSQL(result, avg_row_size, stat, int64_t);  
+        EXTRACT_INT_FIELD_TO_CLASS_MYSQL(result, avg_row_size, stat, int64_t);
       }
     }
     EXTRACT_INT_FIELD_TO_CLASS_MYSQL(result, macro_block_num, stat, int64_t);
@@ -1483,9 +1483,6 @@ int ObOptStatSqlService::get_compressed_llc_bitmap(ObIAllocator &allocator,
       comp_buf = const_cast<char*>(bitmap_buf);
       comp_size = bitmap_size;
     }
-    if (compressor != nullptr) {
-      compressor->reset_mem();
-    }
   }
   return ret;
 }
@@ -1527,8 +1524,6 @@ int ObOptStatSqlService::get_decompressed_llc_bitmap(ObIAllocator &allocator,
     LOG_WARN("decompress bitmap buffer failed.",
                KP(comp_buf), K(comp_size), KP(bitmap_buf),
                K(max_bitmap_size), K(bitmap_size), K(ret));
-  } else {
-    compressor->reset_mem();
   }
   return ret;
 }
@@ -1953,7 +1948,8 @@ int ObOptStatSqlService::fetch_table_rowcnt(const uint64_t tenant_id,
                            ObSchemaUtils::get_real_table_mappings_tid(table_id) : table_id;
   if (OB_FAIL(gen_tablet_list_str(all_tablet_ids, all_ls_ids, tablet_list_str, tablet_ls_list_str))) {
     LOG_WARN("failed to gen tablet list str", K(ret));
-  } else if (OB_FAIL(raw_sql.append_fmt("select /*+opt_param('enable_in_range_optimization','true')*/ tablet_id, max(row_count) from "\
+  } else if (OB_FAIL(raw_sql.append_fmt("select /*+opt_param('enable_in_range_optimization','true') opt_param('use_default_opt_stat','true')*/"\
+                                         "tablet_id, max(row_count) from "\
                                          "(select cast(tablet_id as unsigned) as tablet_id, cast(inserts - deletes as signed) as row_count "\
                                          "from %s where tenant_id = %lu and table_id = %lu and tablet_id in %s union all "\
                                          "select cast(tablet_id as unsigned) as tablet_id, cast(row_count as signed) as row_count from %s, "\

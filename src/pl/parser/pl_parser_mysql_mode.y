@@ -219,7 +219,7 @@ void obpl_mysql_wrap_get_user_var_into_subquery(ObParseCtx *parse_ctx, ParseNode
       CONSTRAINT_CATALOG CONSTRAINT_NAME CONSTRAINT_ORIGIN CONSTRAINT_SCHEMA CONTAINS COUNT CURSOR_NAME
       DATA DEFINER END_KEY EXTEND FOLLOWS FOUND FUNCTION HANDLER INTERFACE INVOKER JSON LANGUAGE
       MESSAGE_TEXT MYSQL_ERRNO NATIONAL NEXT NO OF OPEN PACKAGE PRAGMA PRECEDES RECORD RETURNS ROW ROWTYPE
-      SCHEMA_NAME SECURITY SUBCLASS_ORIGIN TABLE_NAME TYPE VALUE
+      SCHEMA_NAME SECURITY SUBCLASS_ORIGIN TABLE_NAME TYPE USER VALUE
 
 %right END_KEY
 %left ELSE IF ELSEIF
@@ -300,10 +300,12 @@ stmt_list:
     stmt_list ';' stmt
     {
       malloc_non_terminal_node($$, parse_ctx->mem_pool_, T_LINK_NODE, 2, $1, $3);
+      parse_ctx->stmt_tree_ = $$;
     }
   | stmt
     {
       $$ = $1;
+      parse_ctx->stmt_tree_ = $$;
     }
 /*  | stmt_list ';' error
     {
@@ -381,6 +383,7 @@ sql_keyword:
     '(' sql_keyword { $$ = NULL; }
   | SQL_KEYWORD { $$ = NULL; }
   | TABLE { $$ = NULL; }
+  | USER { $$ = NULL; }
   | INSERT { $$ = NULL; }
   | DELETE { $$ = NULL; }
   | UPDATE { $$ = NULL; }
@@ -442,8 +445,15 @@ sql_stmt:
         $$ = sql_stmt;
       }
       if(T_VARIABLE_SET == $$->type_) {
+        int64_t child_cnt = $$->num_child_;
         for(int64_t i = 0; i < $$->num_child_; ++i) {
-          if(OB_UNLIKELY(NULL == $$->children_[i] || NULL == $$->children_[i]->children_[1])) {
+          if (T_SET_NAMES == $$->children_[i]->type_ || T_SET_CHARSET == $$->children_[i]->type_) {
+            malloc_non_terminal_node($$, parse_ctx->mem_pool_, T_SQL_STMT, 1, sql_stmt);
+            if (child_cnt > 1) {
+              obpl_mysql_yyerror(&@1, parse_ctx, "Syntax Error\n");
+              YYERROR;
+            }
+          } else if(OB_UNLIKELY(NULL == $$->children_[i] || NULL == $$->children_[i]->children_[1])) {
             YY_UNEXPECTED_ERROR("value node in SET statement is NULL");
           } else {
             obpl_mysql_wrap_get_user_var_into_subquery(parse_ctx, $$->children_[i]->children_[1]);
@@ -548,14 +558,6 @@ call_sp_stmt:
     CALL sp_call_name opt_sp_cparam_list
     {
       malloc_non_terminal_node($$, parse_ctx->mem_pool_, T_SP_CALL_STMT, 2, $2, $3);
-    }
-  | CALL sp_proc_stmt
-    {
-      if (!parse_ctx->is_inner_parse_) {
-        obpl_mysql_yyerror(&@2, parse_ctx, "Syntax Error\n");
-        YYERROR; //生成一个语法错误
-      }
-      $$ = $2;
     }
   | CALL PROCEDURE sp_name '(' opt_sp_param_list ')' sp_create_chistics procedure_body
     {
@@ -728,6 +730,7 @@ unreserved_keyword:
   | NO
   | OF
   | OPEN
+  | USER
   | PACKAGE
   | PRAGMA
   | RECORD
@@ -1511,12 +1514,18 @@ sp_proc_stmt_if:
 sp_if:
     expr THEN sp_proc_stmts sp_elseifs
     {
+      if (NULL == $1) {
+        YYERROR;
+      }
       ParseNode *proc_stmts = NULL;
       merge_nodes(proc_stmts, parse_ctx->mem_pool_, T_SP_PROC_STMT_LIST, $3);
       malloc_non_terminal_node($$, parse_ctx->mem_pool_, T_SP_IF, 3, $1, proc_stmts, $4);
     }
   | expr THEN sp_proc_stmts %prec PARENS
     {
+      if (NULL == $1) {
+        YYERROR;
+      }
       ParseNode *proc_stmts = NULL;
       merge_nodes(proc_stmts, parse_ctx->mem_pool_, T_SP_PROC_STMT_LIST, $3);
       malloc_non_terminal_node($$, parse_ctx->mem_pool_, T_SP_IF, 3, $1, proc_stmts, NULL);
@@ -1789,7 +1798,7 @@ sp_data_type:
 
 opt_sp_decl_default:
     /*Empty*/ { $$ = NULL; }
-  | DEFAULT expr
+  | DEFAULT default_expr
     {
       malloc_non_terminal_node($$, parse_ctx->mem_pool_, T_SP_DECL_DEFAULT, 1, $2);
     }

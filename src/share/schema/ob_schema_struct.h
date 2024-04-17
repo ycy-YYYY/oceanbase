@@ -127,6 +127,8 @@ static const uint64_t OB_MIN_ID  = 0;//used for lower_bound
 #define GENERATED_COLUMN_UDF_EXPR (INT64_C(1) << 20)
 #define UNUSED_COLUMN_FLAG (INT64_C(1) << 21) // check if the column is unused.
 #define GENERATED_DOC_ID_COLUMN_FLAG (INT64_C(1) << 22)
+#define MULTIVALUE_INDEX_GENERATED_COLUMN_FLAG (INT64_C(1) << 23) // for multivalue index
+#define MULTIVALUE_INDEX_GENERATED_ARRAY_COLUMN_FLAG (INT64_C(1) << 24) // for multivalue index
 
 //the high 32-bit flag isn't stored in __all_column
 #define GENERATED_DEPS_CASCADE_FLAG (INT64_C(1) << 32)
@@ -143,7 +145,9 @@ static const uint64_t OB_MIN_ID  = 0;//used for lower_bound
 
 // table_flags stored in __all_table.table_flag
 #define CASCADE_RLS_OBJECT_FLAG (INT64_C(1) << 0)
-
+#define EXTERNAL_TABLE_USER_SPECIFIED_PARTITION_FLAG (INT64_C(1) << 1)
+#define EXTERNAL_TABLE_AUTO_REFRESH_FLAG (INT64_C(1) << 2)
+#define EXTERNAL_TABLE_CREATE_ON_REFRESH_FLAG (INT64_C(1) << 3)
 // schema array size
 static const int64_t SCHEMA_SMALL_MALLOC_BLOCK_SIZE = 64;
 static const int64_t SCHEMA_MALLOC_BLOCK_SIZE = 128;
@@ -317,11 +321,15 @@ enum ObIndexType
   INDEX_TYPE_FTS_DOC_ROWKEY_GLOBAL_LOCAL_STORAGE = 20,
   INDEX_TYPE_FTS_INDEX_GLOBAL_LOCAL_STORAGE = 21,
   INDEX_TYPE_FTS_DOC_WORD_GLOBAL_LOCAL_STORAGE = 22,
+
+  // new index types for multivalue index
+  INDEX_TYPE_NORMAL_MULTIVALUE_LOCAL = 23,
+  INDEX_TYPE_UNIQUE_MULTIVALUE_LOCAL = 24,
   /*
   * Attention!!! when add new index type,
   * need update func ObSimpleTableSchemaV2::should_not_validate_data_index_ckm()
   */
-  INDEX_TYPE_MAX = 23,
+  INDEX_TYPE_MAX = 25,
 };
 
 // using type for index
@@ -1422,9 +1430,8 @@ public:
   ObSysVarSchema() : ObSchema() { reset(); }
   ~ObSysVarSchema() {}
   explicit ObSysVarSchema(common::ObIAllocator *allocator);
-  explicit ObSysVarSchema(const ObSysVarSchema &src_schema);
-  ObSysVarSchema &operator=(const ObSysVarSchema &src_schema);
-  int assign(const ObSysVarSchema &other);
+  DISABLE_COPY_ASSIGN(ObSysVarSchema);
+  int assign(const ObSysVarSchema &src_schema);
   virtual bool is_valid() const { return ObSchema::is_valid() && tenant_id_ != common::OB_INVALID_ID && !name_.empty(); }
   void reset();
   int64_t get_convert_size() const;
@@ -1494,9 +1501,8 @@ public:
   ObSysVariableSchema();
   explicit ObSysVariableSchema(common::ObIAllocator *allocator);
   virtual ~ObSysVariableSchema();
-  ObSysVariableSchema(const ObSysVariableSchema &src_schema);
-  ObSysVariableSchema &operator=(const ObSysVariableSchema &src_schema);
-  int assign(const ObSysVariableSchema &other);
+  DISABLE_COPY_ASSIGN(ObSysVariableSchema);
+  int assign(const ObSysVariableSchema &src_schema);
   //set methods
   inline void set_tenant_id(const uint64_t tenant_id)  { tenant_id_ = tenant_id; }
   inline void set_schema_version(const int64_t schema_version) { schema_version_ = schema_version; }
@@ -2115,9 +2121,13 @@ public:
   // convert character set.
   int convert_character_for_range_columns_part(const ObCollationType &to_collation);
   int convert_character_for_list_columns_part(const ObCollationType &to_collation);
+  int set_external_location(common::ObString &location)
+  { return deep_copy_str(location, external_location_); }
+  const common::ObString &get_external_location() const
+  { return external_location_; }
   VIRTUAL_TO_STRING_KV(K_(tenant_id), K_(table_id), K_(part_id), K_(name), K_(low_bound_val),
                        K_(high_bound_val), K_(list_row_values), K_(part_idx),
-                       K_(is_empty_partition_name), K_(tablet_id));
+                       K_(is_empty_partition_name), K_(tablet_id), K_(external_location));
 protected:
   uint64_t tenant_id_;
   uint64_t table_id_;
@@ -2145,6 +2155,7 @@ protected:
   PartitionType partition_type_;
   common::ObRowkey low_bound_val_;
   ObTabletID tablet_id_;
+  common::ObString external_location_;
 };
 
 class ObSubPartition;
@@ -4118,8 +4129,76 @@ enum ObUserType
   OB_TYPE_MAX,
 };
 
+struct ObProxyInfo
+{
+  OB_UNIS_VERSION(1);
+private:
+  static const int64_t DEFAULT_ARRAY_CAPACITY = 8;
+public:
+  ObProxyInfo(common::ObIAllocator *allocator) : allocator_(allocator), user_id_(OB_INVALID_ID), proxy_flags_(0),
+                                credential_type_(0), role_ids_(NULL), role_id_cnt_(0), role_id_capacity_(0) {}
+  inline int64_t get_convert_size() const
+  {
+    int64_t convert_size = sizeof(*this);
+    convert_size += role_id_cnt_ * sizeof(uint64_t);
+    return convert_size;
+  }
+  void reset();
+  int assign(const ObProxyInfo &other);
+  uint64_t get_role_id_by_idx(const int64_t idx) const;
+
+  TO_STRING_KV(K_(user_id), K_(proxy_flags), K(ObArrayWrap<uint64_t>(role_ids_, role_id_cnt_)), K_(role_id_cnt));
+
+  common::ObIAllocator *allocator_;
+  uint64_t user_id_;
+  uint64_t proxy_flags_;
+  uint64_t credential_type_;
+  uint64_t *role_ids_;
+  uint64_t role_id_cnt_;
+  uint64_t role_id_capacity_;
+};
+
 #define ADMIN_OPTION_SHIFT 0
 #define DISABLE_FLAG_SHIFT 1
+
+enum ObProxyActivatedFlag
+{
+  PROXY_NERVER_BEEN_ACTIVATED = 0,
+  PROXY_BEEN_ACTIVATED_BEFORE = 1,
+  PROXY_ACTIVATED_MAX,
+};
+
+//In user schema def, flag is a int column.
+//int is int64_t, not uint64_t. So only 63 bit can be used.
+struct ObUserFlags
+{
+  OB_UNIS_VERSION_V(1);
+private:
+  static const int32_t F_PROXY_INFO_OFFSET = 0;
+  static const int32_t F_PROXY_INFO_BITS = 1;
+  static const int32_t F_RESERVED = 63;
+  static const uint32_t F_PROXY_INFO_MASK = (((1L << F_PROXY_INFO_BITS) - 1) << F_PROXY_INFO_OFFSET);
+public:
+  ObUserFlags() { reset(); }
+  virtual ~ObUserFlags() { reset(); }
+  void reset() { flags_ = 0; }
+  bool operator ==(const ObUserFlags &other) const
+  {
+    return flags_ == other.flags_;
+  }
+  int assign(const ObUserFlags &other);
+  ObUserFlags &operator=(const ObUserFlags &other);
+  bool is_valid() const;
+
+  TO_STRING_KV("proxy_activated_flag", proxy_activated_flag_);
+  union {
+    int64_t flags_;
+    struct {
+      uint64_t proxy_activated_flag_ :F_PROXY_INFO_BITS;
+      uint64_t reserved_ :F_RESERVED;
+    };
+  };
+};
 
 class ObUserInfo : public ObSchema, public ObPriv
 {
@@ -4133,12 +4212,13 @@ public:
      type_(OB_USER), grantee_id_array_(), role_id_array_(), profile_id_(common::OB_INVALID_ID), password_last_changed_timestamp_(common::OB_INVALID_TIMESTAMP),
      role_id_option_array_(),
      max_connections_(0),
-     max_user_connections_(0)
+     max_user_connections_(0),
+     proxied_user_info_(NULL), proxied_user_info_capacity_(0), proxied_user_info_cnt_(0),
+     proxy_user_info_(NULL), proxy_user_info_capacity_(0), proxy_user_info_cnt_(0), user_flags_()
   { }
   explicit ObUserInfo(common::ObIAllocator *allocator);
   virtual ~ObUserInfo();
-  ObUserInfo(const ObUserInfo &other);
-  ObUserInfo& operator=(const ObUserInfo &other);
+  int assign(const ObUserInfo &other);
   static bool cmp(const ObUserInfo *lhs, const ObUserInfo *rhs)
   { return (NULL != lhs && NULL != rhs) ? lhs->get_tenant_user_id() < rhs->get_tenant_user_id() : false; }
   static bool equal(const ObUserInfo *lhs, const ObUserInfo *rhs)
@@ -4215,11 +4295,25 @@ public:
                K_(info), K_(locked),
                K_(ssl_type), K_(ssl_cipher), K_(x509_issuer), K_(x509_subject),
                K_(type), K_(grantee_id_array), K_(role_id_array),
-               K_(profile_id)
+               K_(profile_id), K_(proxied_user_info_cnt), K_(proxy_user_info_cnt),
+               "proxied info", ObArrayWrap<ObProxyInfo*>(proxied_user_info_, proxied_user_info_cnt_),
+               "proxy info", ObArrayWrap<ObProxyInfo*>(proxy_user_info_, proxy_user_info_cnt_),
+               K_(user_flags)
               );
   bool role_exists(const uint64_t role_id, const uint64_t option) const;
   int get_seq_by_role_id(uint64_t role_id, uint64_t &seq) const;
 private:
+  int assign_proxy_info_array_(ObProxyInfo **src_arr,
+                              const uint64_t src_cnt,
+                              const uint64_t src_capacity,
+                              ObProxyInfo **&tar_arr,
+                              uint64_t &tar_cnt,
+                              uint64_t &tar_capacity);
+
+  int deserialize_proxy_info_array_(ObProxyInfo **&arr, uint64_t &cnt, uint64_t &capacity,
+                                            const char *buf, const int64_t data_len, int64_t &pos);
+private:
+  static const int64_t DEFAULT_ARRAY_CAPACITY = 8;
   common::ObString user_name_;
   common::ObString host_name_;
   common::ObString passwd_;
@@ -4238,6 +4332,14 @@ private:
   common::ObSEArray<uint64_t, 8> role_id_option_array_; // Record which roles the user/role has
   uint64_t max_connections_;
   uint64_t max_user_connections_;
+  ObProxyInfo** proxied_user_info_; //record users who can proxy the user
+  uint64_t proxied_user_info_capacity_;
+  uint64_t proxied_user_info_cnt_;
+  ObProxyInfo** proxy_user_info_; //recode users whom the user can proxy
+  uint64_t proxy_user_info_capacity_;
+  uint64_t proxy_user_info_cnt_;
+  ObUserFlags user_flags_;
+  DISABLE_COPY_ASSIGN(ObUserInfo);
 };
 
 struct ObDBPrivSortKey
@@ -6797,6 +6899,11 @@ public:
   // inline void set_cache_size(int64_t val) { option_.set_cache_size(val); }
   inline void set_cycle_flag(bool cycle) { option_.set_cycle_flag(cycle); }
   inline void set_order_flag(bool order) { option_.set_order_flag(order); }
+  inline void set_flag(int64_t flag) { option_.set_flag(flag); }
+  inline void set_cache_order_mode(ObSequenceCacheOrderMode mode)
+  {
+    option_.set_cache_order_mode(mode);
+  }
 
   // Temporary compatibility code, in order to support max_value etc. as Number type
   // int set_max_value(const common::ObString &str);
@@ -6827,8 +6934,13 @@ public:
   //inline int64_t get_increment_by() const { return option_.get_increment_by(); }
   //inline int64_t get_start_with() const { return option_.get_start_with(); }
   //inline int64_t get_cache_size() const { return option_.get_cache_size(); }
+  inline int64_t get_flag() const { return option_.get_flag(); }
   inline bool get_cycle_flag() const { return option_.get_cycle_flag(); }
   inline bool get_order_flag() const { return option_.get_order_flag(); }
+  inline ObSequenceCacheOrderMode get_cache_order_mode() const
+  {
+    return option_.get_cache_order_mode();
+  }
   inline const common::ObString &get_sequence_name() const { return name_; }
   inline const char *get_sequence_name_str() const { return extract_str(name_); }
   inline share::ObSequenceOption &get_sequence_option() { return option_; }

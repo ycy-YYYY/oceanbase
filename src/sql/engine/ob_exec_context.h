@@ -28,6 +28,7 @@
 #include "sql/das/ob_das_context.h"
 #include "sql/engine/cmd/ob_table_direct_insert_ctx.h"
 #include "pl/ob_pl_package_guard.h"
+#include "lib/udt/ob_udt_type.h"
 
 #define GET_PHY_PLAN_CTX(ctx) ((ctx).get_physical_plan_ctx())
 #define GET_MY_SESSION(ctx) ((ctx).get_my_session())
@@ -208,9 +209,6 @@ public:
   inline ObSQLSessionInfo *get_my_session() const;
   //get the parent execute context in nested sql
   ObExecContext *get_parent_ctx() { return parent_ctx_; }
-  //get the root execute context of foreign key in nested sql
-  int get_fk_root_ctx(ObExecContext* &root_ctx);
-  bool is_fk_root_ctx();
   int64_t get_nested_level() const { return nested_level_; }
   /**
    * @brief set sql proxy
@@ -343,7 +341,9 @@ public:
   inline pl::ObPLCtx *get_pl_ctx() { return pl_ctx_; }
   inline void set_pl_ctx(pl::ObPLCtx *pl_ctx) { pl_ctx_ = pl_ctx; }
   pl::ObPLPackageGuard* get_package_guard();
-
+  int get_package_guard(pl::ObPLPackageGuard *&package_guard);
+  inline pl::ObPLPackageGuard* get_original_package_guard() { return package_guard_; }
+  inline void set_package_guard(pl::ObPLPackageGuard* v) { package_guard_ = v; }
   int init_pl_ctx();
 
   ObPartIdRowMapManager& get_part_row_manager() { return part_row_map_manager_; }
@@ -467,6 +467,11 @@ public:
   void set_errcode(const int errcode) { ATOMIC_STORE(&errcode_, errcode); }
   int get_errcode() const { return ATOMIC_LOAD(&errcode_); }
   hash::ObHashMap<uint64_t, void*> &get_dblink_snapshot_map() { return dblink_snapshot_map_; }
+  int get_sqludt_meta_by_subschema_id(uint16_t subschema_id, ObSqlUDTMeta &udt_meta);
+  int get_subschema_id_by_udt_id(uint64_t udt_type_id,
+                                 uint16_t &subschema_id,
+                                 share::schema::ObSchemaGetterGuard *schema_guard = NULL);
+
   ObExecFeedbackInfo &get_feedback_info() { return fb_info_; };
   void set_cur_rownum(int64_t cur_rownum) { cur_row_num_ = cur_rownum; }
   int64_t get_cur_rownum() { return cur_row_num_; }
@@ -603,7 +608,7 @@ protected:
   // expression evaluating allocator
   common::ObArenaAllocator eval_res_allocator_;
   common::ObArenaAllocator eval_tmp_allocator_;
-  ObSEArray<ObSqlTempTableCtx, 2> temp_ctx_;
+  ObTMArray<ObSqlTempTableCtx> temp_ctx_;
 
   // 用于 NLJ 场景下对右侧分区表 TSC 扫描做动态 pruning
   ObGIPruningInfo gi_pruning_info_;

@@ -30,10 +30,10 @@
 using namespace oceanbase::common;
 using namespace oceanbase::table;
 
-// const char* host = "100.88.11.91";
+// const char* host = "127.0.0.1";
 // int32_t sql_port = 60809;
 // int32_t rpc_port = 60808;
-const char* host = "11.158.97.240";
+const char* host = "127.0.0.1";
 int32_t sql_port = 41101;
 int32_t rpc_port = 41100;
 const char* tenant = "sys";
@@ -714,7 +714,7 @@ TEST_F(TestBatchExecute, column_type_check)
     ASSERT_EQ(OB_SUCCESS, entity->set_property(CTINYINT, value));
     ObTableOperation table_operation = ObTableOperation::insert(*entity);
     ASSERT_EQ(OB_SUCCESS, the_table->execute(table_operation, r));
-    ASSERT_EQ(OB_ERR_COLLATION_MISMATCH, r.get_errno());
+    ASSERT_EQ(OB_KV_COLLATION_MISMATCH, r.get_errno());
   }
   {
     // case: insert + rowkey + int
@@ -728,7 +728,7 @@ TEST_F(TestBatchExecute, column_type_check)
     ASSERT_EQ(OB_SUCCESS, entity->set_property(CTINYINT, value));
     ObTableOperation table_operation = ObTableOperation::insert(*entity);
     ASSERT_EQ(OB_SUCCESS, the_table->execute(table_operation, r));
-    ASSERT_EQ(OB_OBJ_TYPE_ERROR, r.get_errno());
+    ASSERT_EQ(OB_KV_COLUMN_TYPE_NOT_MATCH, r.get_errno());
   }
   {
     // case: insert + rowkey + too long
@@ -845,6 +845,7 @@ TEST_F(TestBatchExecute, column_type_check)
     ASSERT_EQ(OB_SUCCESS, entity->set_property(ObString::make_string("cblob"), value));
 
     int64_t now = ObTimeUtility::current_time();
+    ObTimeConverter::round_datetime(0, now);
     value.set_timestamp(now);
     ASSERT_EQ(OB_SUCCESS, entity->set_property(ObString::make_string("ctimestamp"), value));
     value.set_datetime(now);
@@ -877,7 +878,7 @@ TEST_F(TestBatchExecute, column_type_check)
     ASSERT_EQ(OB_SUCCESS, entity->add_rowkey_value(pk2));
     ObTableOperation table_operation = ObTableOperation::retrieve(*entity);
     ASSERT_EQ(OB_SUCCESS, the_table->execute(table_operation, r));
-    ASSERT_EQ(OB_ERR_COLLATION_MISMATCH, r.get_errno());
+    ASSERT_EQ(OB_KV_COLLATION_MISMATCH, r.get_errno());
   }
   {
     // case: replace + rowkey + collation
@@ -891,7 +892,7 @@ TEST_F(TestBatchExecute, column_type_check)
     ASSERT_EQ(OB_SUCCESS, entity->set_property(CTINYINT, value));
     ObTableOperation table_operation = ObTableOperation::replace(*entity);
     ASSERT_EQ(OB_SUCCESS, the_table->execute(table_operation, r));
-    ASSERT_EQ(OB_ERR_COLLATION_MISMATCH, r.get_errno());
+    ASSERT_EQ(OB_KV_COLLATION_MISMATCH, r.get_errno());
   }
 
   {
@@ -921,7 +922,7 @@ TEST_F(TestBatchExecute, column_type_check)
     ASSERT_EQ(OB_SUCCESS, entity->set_property(CTINYINT, value));
     ObTableOperation table_operation = ObTableOperation::insert_or_update(*entity);
     ASSERT_EQ(OB_SUCCESS, the_table->execute(table_operation, r));
-    ASSERT_EQ(OB_ERR_COLLATION_MISMATCH, r.get_errno());
+    ASSERT_EQ(OB_KV_COLLATION_MISMATCH, r.get_errno());
   }
 
   {
@@ -951,7 +952,7 @@ TEST_F(TestBatchExecute, column_type_check)
     ASSERT_EQ(OB_SUCCESS, entity->set_property(CTINYINT, value));
     ObTableOperation table_operation = ObTableOperation::del(*entity);
     ASSERT_EQ(OB_SUCCESS, the_table->execute(table_operation, r));
-    ASSERT_EQ(OB_ERR_COLLATION_MISMATCH, r.get_errno());
+    ASSERT_EQ(OB_KV_COLLATION_MISMATCH, r.get_errno());
   }
   {
     // case: update + rowkey + collation
@@ -965,7 +966,7 @@ TEST_F(TestBatchExecute, column_type_check)
     ASSERT_EQ(OB_SUCCESS, entity->set_property(CTINYINT, value));
     ObTableOperation table_operation = ObTableOperation::update(*entity);
     ASSERT_EQ(OB_SUCCESS, the_table->execute(table_operation, r));
-    ASSERT_EQ(OB_ERR_COLLATION_MISMATCH, r.get_errno());
+    ASSERT_EQ(OB_KV_COLLATION_MISMATCH, r.get_errno());
   }
 
   {
@@ -5096,7 +5097,7 @@ TEST_F(TestBatchExecute, check_scan_range)
 
     ASSERT_EQ(OB_SUCCESS, query.add_scan_range(range));
     ASSERT_EQ(OB_SUCCESS, query.set_scan_index(ObString::make_string("primary")));
-    ASSERT_EQ(OB_ERR_UNEXPECTED, the_table->execute_query(query, iter)); // wrong rowkey size
+    ASSERT_EQ(OB_KV_SCAN_RANGE_MISSING, the_table->execute_query(query, iter)); // wrong rowkey size
   }
 
   // case 2: scan by primary key, but key objs type is invalid
@@ -5119,7 +5120,7 @@ TEST_F(TestBatchExecute, check_scan_range)
 
     ASSERT_EQ(OB_SUCCESS, query.add_scan_range(range));
     ASSERT_EQ(OB_SUCCESS, query.set_scan_index(ObString::make_string("primary")));
-    ASSERT_EQ(OB_OBJ_TYPE_ERROR, the_table->execute_query(query, iter)); // wrong rowkey type
+    ASSERT_EQ(OB_KV_COLUMN_TYPE_NOT_MATCH, the_table->execute_query(query, iter)); // wrong rowkey type
   }
 
   // case 3: scan by primary key, but collation type is invalid
@@ -5143,7 +5144,7 @@ TEST_F(TestBatchExecute, check_scan_range)
 
     ASSERT_EQ(OB_SUCCESS, query.add_scan_range(range));
     ASSERT_EQ(OB_SUCCESS, query.set_scan_index(ObString::make_string("primary")));
-    ASSERT_EQ(OB_ERR_COLLATION_MISMATCH, the_table->execute_query(query, iter)); // wrong collation type
+    ASSERT_EQ(OB_KV_COLLATION_MISMATCH, the_table->execute_query(query, iter)); // wrong collation type
   }
 
   // case 4: scan by primary key, but accuracy is invalid
@@ -6209,6 +6210,44 @@ TEST_F(TestBatchExecute, htable_scan_with_filter)
           ASSERT_EQ(OB_SUCCESS, result_entity->get_property(T, ts));
           ASSERT_EQ(OB_SUCCESS, result_entity->get_property(V, val));
           //fprintf(stderr, "(%s,%s,%s,%s)\n", S(rk), S(cq), S(ts), S(val));
+          ASSERT_EQ(key1, rk);
+          ASSERT_EQ(key2, cq);
+          ASSERT_EQ(key3, ts);
+        } // end for
+      }
+    }
+    ASSERT_EQ(OB_ITER_END, iter->get_next_entity(result_entity));
+  }
+
+  // case : PageFilter
+  fprintf(stderr, "case: PageFilter\n");
+  // check
+  {
+    // page size is 3
+    htable_filter.set_filter(ObString::make_string("PageFilter(3)"));
+    ObTableEntityIterator *iter = nullptr;
+    ASSERT_EQ(OB_SUCCESS, the_table->execute_query(query, iter));
+
+    const ObITableEntity *result_entity = NULL;
+    int cqids_sorted[4] = {1, 3, 4, 7};
+    int64_t timestamps[2] = {7, 6};
+    for (int64_t i = 0; i < 3; ++i) {
+      // only 3 rowkeys (equals to page size)
+      sprintf(rows[i], "row%ld", 50+i);
+      key1.set_varbinary(ObString::make_string(rows[i]));
+      for (int64_t j = 0; j < 4; ++j) {
+        // 4 qualifier
+        sprintf(qualifier2[j], "cq%d", cqids_sorted[j]);
+        key2.set_varbinary(ObString::make_string(qualifier2[j]));
+        for (int64_t k = 0; k < 2; ++k)
+        {
+          key3.set_int(timestamps[k]);
+          ASSERT_EQ(OB_SUCCESS, iter->get_next_entity(result_entity));
+          ObObj rk, cq, ts, val;
+          ASSERT_EQ(OB_SUCCESS, result_entity->get_property(K, rk));
+          ASSERT_EQ(OB_SUCCESS, result_entity->get_property(Q, cq));
+          ASSERT_EQ(OB_SUCCESS, result_entity->get_property(T, ts));
+          ASSERT_EQ(OB_SUCCESS, result_entity->get_property(V, val));
           ASSERT_EQ(key1, rk);
           ASSERT_EQ(key2, cq);
           ASSERT_EQ(key3, ts);
@@ -9903,7 +9942,17 @@ TEST_F(TestBatchExecute, table_query_with_filter)
     ASSERT_EQ(OB_SUCCESS, query.set_scan_index(ObString::make_string("primary")));
     ASSERT_EQ(OB_SUCCESS, query.set_filter(ObString::make_string("TableCompareFilter(<, 'C2:50')")));
     int ret = the_table->execute_query(query, iter);
-    ASSERT_NE(OB_SUCCESS, ret);
+    ASSERT_EQ(OB_SUCCESS, ret);
+    int64_t result_cnt = 0;
+    while (OB_SUCC(iter->get_next_entity(result_entity))) {
+      result_cnt++;
+      ObObj v1, v3;
+      ASSERT_EQ(OB_SUCCESS, result_entity->get_property(C1, v1));
+      ASSERT_EQ(OB_SUCCESS, result_entity->get_property(C3, v3));
+      ASSERT_LE(v1.get_int(), 50);
+      // fprintf(stderr, "(%ld,%ld,%s)\n", v1.get_int(), v2.get_int(), S(v3));
+    }
+    ASSERT_EQ(10, result_cnt);
     // fprintf(stderr, "query ret=%d\n", ret);
   } // end case 6
   {

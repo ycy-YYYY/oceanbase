@@ -22,6 +22,7 @@
 #include "share/ob_rpc_share.h"
 #include "observer/ob_server_struct.h"
 #include "observer/ob_rpc_intrusion_detect.h"
+#include "observer/net/ob_rpc_reverse_keepalive.h"
 #include "storage/ob_locality_manager.h"
 #include "lib/ssl/ob_ssl_config.h"
 extern "C" {
@@ -158,13 +159,11 @@ int ObSrvNetworkFrame::init()
     LOG_ERROR("high prio rpc net register fail", K(ret));
   } else if (OB_FAIL(ingress_service_.init(GCONF.cluster_id))) {
     LOG_ERROR("endpoint ingress service init fail", K(ret));
-  }
-#ifdef OB_USE_BABASSL
-  else if (OB_FAIL(net_.add_rpc_unix_listen(rpc_unix_path, rpc_handler_))) {
+  } else if (OB_FAIL(rpc_reverse_keepalive_instance.init(GCTX.srv_rpc_proxy_))) {
+    LOG_ERROR("rpc reverse keepalive instance init fail", K(ret));
+  } else if (OB_FAIL(net_.add_rpc_unix_listen(rpc_unix_path, rpc_handler_))) {
     LOG_ERROR("listen rpc unix path fail");
-  }
-#endif
-  else {
+  } else {
     if (OB_FAIL(obrpc::global_poc_server.start(rpc_port, io_cnt, &deliver_))) {
       LOG_ERROR("poc rpc server start fail", K(ret));
     } else {
@@ -183,6 +182,7 @@ void ObSrvNetworkFrame::destroy()
   net_.destroy();
   ObNetKeepAlive::get_instance().destroy();
   ingress_service_.destroy();
+  rpc_reverse_keepalive_instance.destroy();
   if (NULL != obmysql::global_sql_nio_server) {
     obmysql::global_sql_nio_server->destroy();
   }

@@ -635,13 +635,18 @@ int ObStaticEngineCG::check_vectorize_supported(bool &support,
         // Expr rownum() shows up in both operator 0 and 2, which leads circular
         // dependency and breaks rownum's defination.
         //
-        bool has_rownum_expr = false;
-        for (int64_t i = 0; !has_rownum_expr && OB_SUCC(ret) && i < op->get_num_of_child(); i++) {
-          OZ(op->get_child(i)->find_rownum_expr(has_rownum_expr));
+        ObLogicalOperator *rownum_op = NULL;
+         for (int64_t i = 0; rownum_op == NULL && OB_SUCC(ret) && i < op->get_num_of_child(); i++) {
+          ObLogicalOperator *child = op->get_child(i);
+          if (OB_ISNULL(child)) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("op child is null", K(ret));
+          } else if (OB_FAIL(child->find_rownum_expr(op->get_op_id(), rownum_op))) {
+            LOG_WARN("find rownum expr error", K(ret));
+          }
         }
-        if (has_rownum_expr) {
-          LOG_DEBUG("rownum expr is in count operator's subplan tree. Stop vectorization execution",
-                    K(has_rownum_expr));
+        if (NULL != rownum_op) {
+          LOG_DEBUG("rownum expr is in count operator's subplan tree. Stop vectorization exec");
           disable_vectorize = true;
         }
       } else if (log_op_def::LOG_JOIN == op->get_type() &&
@@ -837,6 +842,22 @@ int ObStaticEngineCG::generate_spec_basic(ObLogicalOperator &op,
   }
   if (OB_SUCC(ret) && need_check_output_datum) {
     OZ(add_output_datum_check_flag(spec));
+  }
+  if (OB_SUCC(ret)) {
+    CK (OB_NOT_NULL(op.get_plan())
+        && OB_NOT_NULL(op.get_plan()->get_stmt())
+        && OB_NOT_NULL(op.get_plan()->get_stmt()->get_query_ctx()));
+    CK (OB_NOT_NULL(phy_plan_));
+    if (OB_SUCC(ret)) {
+      ObObj val;
+      ObLogPlan *log_plan = op.get_plan();
+      const ObOptParamHint *opt_params = &log_plan->get_stmt()->get_query_ctx()->get_global_hint().opt_params_;
+      if (OB_FAIL(opt_params->get_opt_param(ObOptParamHint::WORKAREA_SIZE_POLICY, val))) {
+        LOG_WARN("fail to check rowsets enabled", K(ret));
+      } else if (val.is_varchar() && 0 == val.get_varchar().case_compare("MANULE")) {
+        phy_plan_->disable_auto_memory_mgr();
+      }
+    }
   }
   return ret;
 }
@@ -1155,6 +1176,9 @@ int ObStaticEngineCG::generate_spec(
         } else if (is_oracle_mode() && OB_UNLIKELY(ObJsonType == raw_expr->get_data_type())) {
           ret = OB_ERR_INVALID_CMP_OP;
           LOG_WARN("select distinct json not allowed", K(ret));
+        } else if (is_oracle_mode() && OB_UNLIKELY(ObGeometryType == raw_expr->get_data_type())) {
+          ret = OB_ERR_COMPARE_VARRAY_LOB_ATTR;
+          LOG_WARN("select distinct geometry not allowed", K(ret));
         } else if (raw_expr->is_const_expr()) {
             // distinct const value, 这里需要注意：distinct 1被跳过了，
             // 但ObMergeDistinct中，如果没有distinct列，则默认所有值都相等，这个语义正好是符合预期的。
@@ -2037,6 +2061,8 @@ int ObStaticEngineCG::generate_spec(ObLogSort &op, ObSortSpec &spec, const bool 
         LOG_WARN("failed to sort funcs", K(ret));
       } else if (OB_FAIL(append_array_no_dup(spec.all_exprs_, spec.get_child()->output_))) {
         LOG_WARN("failed to append array no dup", K(ret));
+      } else if (opt_ctx_->is_online_ddl() && OB_FAIL(fill_compress_type(op, spec.compress_type_))) {
+        LOG_WARN("fail to gt compress_type", K(ret));
       } else {
         spec.prefix_pos_ = op.get_prefix_pos();
         spec.is_local_merge_sort_ = op.is_local_merge_sort();
@@ -2046,46 +2072,7 @@ int ObStaticEngineCG::generate_spec(ObLogSort &op, ObSortSpec &spec, const bool 
         spec.enable_encode_sortkey_opt_ = op.enable_encode_sortkey_opt();
         spec.part_cnt_ = op.get_part_cnt();
         LOG_TRACE("trace order by", K(spec.all_exprs_.count()), K(spec.all_exprs_));
-        int64_t compact_level = 0;
-        OZ(op.get_plan()->get_optimizer_context().get_global_hint().opt_params_.get_integer_opt_param(ObOptParamHint::COMPACT_SORT_LEVEL, compact_level));
-        if (OB_SUCC(ret)) {
-          int64_t tenant_id = op.get_plan()->get_optimizer_context().get_session_info()->get_effective_tenant_id();
-          spec.sort_compact_level_ = static_cast<SortCompactLevel>(compact_level);
-          omt::ObTenantConfigGuard tenant_config(TENANT_CONF(tenant_id));
-          if (OB_UNLIKELY(!tenant_config.is_valid())) {
-            ret = OB_ERR_UNEXPECTED;
-            LOG_WARN("fail get tenant_config", K(ret), K(tenant_id));
-          } else if (tenant_config->enable_store_compression || compact_level == SORT_COMPRESSION_LEVEL ||
-                     compact_level == SORT_COMPRESSION_ENCODE_LEVEL ||
-                     compact_level == SORT_COMPRESSION_COMPACT_LEVEL) {
-            if (opt_ctx_->is_online_ddl()) {
-              // for normal sort we use default compress type. for online ddl, we use the compress type in source table
-              ObLogicalOperator *child_op = op.get_child(0);
-              while(OB_NOT_NULL(child_op) && child_op->get_type() != log_op_def::LOG_TABLE_SCAN ) {
-                child_op = child_op->get_child(0);
-                if (OB_NOT_NULL(child_op) && child_op->get_type() == log_op_def::LOG_TABLE_SCAN ) {
-                  share::schema::ObSchemaGetterGuard *schema_guard = nullptr;
-                  const share::schema::ObTableSchema *table_schema = nullptr;
-                  uint64_t table_id = static_cast<ObLogTableScan*>(child_op)->get_ref_table_id();
-                  if (OB_ISNULL(schema_guard = opt_ctx_->get_schema_guard())) {
-                    ret = OB_ERR_UNEXPECTED;
-                    LOG_WARN("fail to get schema guard", K(ret));
-                  } else if (OB_FAIL(schema_guard->get_table_schema(tenant_id, table_id, table_schema))) {
-                    LOG_WARN("fail to get table schema", K(ret));
-                  } else if (OB_ISNULL(table_schema)) {
-                    ret = OB_TABLE_NOT_EXIST;
-                    LOG_WARN("can't find table schema", K(ret), K(table_id));
-                  } else {
-                    spec.compress_type_ = table_schema->get_compressor_type();
-                  }
-                }
-              }
-              LOG_TRACE("compact type is", K(spec.compress_type_));
-            }
-          }
-        }
-        LOG_TRACE("trace order by", K(spec.all_exprs_.count()), K(spec.all_exprs_),
-                  K(compact_level));
+
       }
       if (OB_SUCC(ret)) {
         if (spec.sort_collations_.count() != spec.sort_cmp_funs_.count()
@@ -2097,6 +2084,42 @@ int ObStaticEngineCG::generate_spec(ObLogSort &op, ObSortSpec &spec, const bool 
             K(spec.part_cnt_), K(spec.sort_collations_.count()), K(spec.sort_cmp_funs_.count()));
         }
       }
+    }
+  }
+  return ret;
+}
+
+int ObStaticEngineCG::fill_compress_type(ObLogSort &op, ObCompressorType &compr_type)
+{
+  int ret = OB_SUCCESS;
+  int64_t tenant_id = op.get_plan()->get_optimizer_context().get_session_info()->get_effective_tenant_id();
+  // for normal sort we use default compress type. for online ddl, we use the compress type in source table
+  ObLogicalOperator *child_op = op.get_child(0);
+  ObCompressorType tmp_compr_type = NONE_COMPRESSOR;
+  while(OB_SUCC(ret) && OB_NOT_NULL(child_op) && child_op->get_type() != log_op_def::LOG_TABLE_SCAN ) {
+    child_op = child_op->get_child(0);
+    if (OB_NOT_NULL(child_op) && child_op->get_type() == log_op_def::LOG_TABLE_SCAN ) {
+      share::schema::ObSchemaGetterGuard *schema_guard = nullptr;
+      const share::schema::ObTableSchema *table_schema = nullptr;
+      uint64_t table_id = static_cast<ObLogTableScan*>(child_op)->get_ref_table_id();
+      if (OB_ISNULL(schema_guard = opt_ctx_->get_schema_guard())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("fail to get schema guard", K(ret));
+      } else if (OB_FAIL(schema_guard->get_table_schema(tenant_id, table_id, table_schema))) {
+        LOG_WARN("fail to get table schema", K(ret));
+      } else if (OB_ISNULL(table_schema)) {
+        ret = OB_TABLE_NOT_EXIST;
+        LOG_WARN("can't find table schema", K(ret), K(table_id));
+      } else {
+        tmp_compr_type = table_schema->get_compressor_type();
+      }
+    }
+  }
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(ObDDLUtil::get_temp_store_compress_type(tmp_compr_type,
+                                              op.get_parallel(),
+                                              compr_type))) {
+      LOG_WARN("fail to get compress type", K(ret));
     }
   }
   return ret;
@@ -2265,6 +2288,8 @@ int ObStaticEngineCG::generate_spec(ObLogSort &op, ObSortVecSpec &spec, const bo
                                                     spec.get_child()->output_, spec.sk_exprs_,
                                                     spec.addon_exprs_))) {
         LOG_WARN("failed to append array no dup", K(ret));
+      } else if (opt_ctx_->is_online_ddl() && OB_FAIL(fill_compress_type(op, spec.compress_type_))) {
+        LOG_WARN("fail to gt compress_type", K(ret));
       } else {
         spec.prefix_pos_ = op.get_prefix_pos();
         spec.is_local_merge_sort_ = op.is_local_merge_sort();
@@ -2718,6 +2743,8 @@ int ObStaticEngineCG::generate_delete_with_das(ObLogDelete &op, ObTableDeleteSpe
       DASTableIdList parent_tables(phy_plan_->get_allocator());
       if(OB_FAIL(check_fk_nested_dup_del(del_table_id, root_table_id, parent_tables, is_dup))) {
         LOG_WARN("failed to perform nested duplicate table check", K(ret), K(del_table_id), K(root_table_id));
+      } else if (is_dup) {
+        LOG_TRACE("[FOREIGN KEY] find duplicate deleted table induced by foreign key casacde", K(del_table_id), K(root_table_id));
       }
     }
     if (OB_SUCC(ret) && is_dup) {
@@ -3195,6 +3222,18 @@ int ObStaticEngineCG::generate_spec(ObLogJoinFilter &op, ObJoinFilterSpec &spec,
   spec.set_shared_filter_type(op.get_filter_type());
   spec.is_shuffle_ = op.is_use_filter_shuffle();
   bool enable_rich_format = spec.use_rich_format_;
+
+  uint64_t min_ver = GET_MIN_CLUSTER_VERSION();
+  if (min_ver >= CLUSTER_VERSION_4_3_0_1 || min_ver >= MOCK_CLUSTER_VERSION_4_2_3_0
+      || (min_ver > MOCK_CLUSTER_VERSION_4_2_1_4 && min_ver < CLUSTER_VERSION_4_2_2_0)) {
+    spec.bloom_filter_ratio_ = GCONF._bloom_filter_ratio;
+    spec.send_bloom_filter_size_ = GCONF._send_bloom_filter_size;
+  } else {
+    // for compatibility, if the cluseter is upgrading, set them as default value 0
+    spec.bloom_filter_ratio_ = 0;
+    spec.send_bloom_filter_size_ = 0;
+  }
+
   if (OB_FAIL(spec.join_keys_.init(op.get_join_exprs().count()))) {
     LOG_WARN("failed to init join keys", K(ret));
   } else if (OB_NOT_NULL(op.get_tablet_id_expr()) &&
@@ -3353,12 +3392,10 @@ int ObStaticEngineCG::generate_spec(ObLogJoinFilter &op, ObJoinFilterSpec &spec,
       }
 
       bool enable_extract_query_range = true;
-#ifdef ERRSIM
       int tmp_ret = OB_E(EventTable::EN_PX_DISABLE_RUNTIME_FILTER_EXTRACT_QUERY_RANGE) OB_SUCCESS;
       if (OB_SUCCESS != tmp_ret) {
         enable_extract_query_range = false;
       }
-#endif
       if (OB_FAIL(ret)) {
       } else if (enable_extract_query_range
                  && OB_FAIL(spec.px_query_range_info_.init(
@@ -3366,6 +3403,8 @@ int ObStaticEngineCG::generate_spec(ObLogJoinFilter &op, ObJoinFilterSpec &spec,
                         op.get_rf_prefix_col_idxs(), prefix_col_obj_metas))) {
         LOG_WARN("failed to init px_query_range_info_ in join filter spec");
       }
+      LOG_TRACE("cg runtime filter extract query range", K(enable_extract_query_range),
+                K(op.get_op_id()), K(op.get_rf_prefix_col_idxs()));
     }
   }
   return ret;
@@ -4705,7 +4744,7 @@ int ObStaticEngineCG::generate_normal_tsc(ObLogTableScan &op, ObTableScanSpec &s
     spec.output_row_count_ = static_cast<int64_t>(op.get_output_row_count());
     spec.query_range_row_count_ = static_cast<int64_t>(op.get_logical_query_range_row_count());
     spec.index_back_row_count_ = static_cast<int64_t>(op.get_index_back_row_count());
-    spec.estimate_method_ = op.get_estimate_method();
+    spec.estimate_method_ = INVALID_METHOD;
     spec.table_name_ = tbl_name;
     spec.index_name_ = index_name;
     // das path not under gi control (TODO: separate gi_above flag from das tsc spec)
@@ -4780,7 +4819,7 @@ int ObStaticEngineCG::generate_normal_tsc(ObLogTableScan &op, ObTableScanSpec &s
         ret = OB_ERR_COLUMN_NOT_FOUND;
         LOG_WARN("fail to get column schema", K(ret));
       } else if (column_schema->get_meta_type().is_fixed_len_char_type() &&
-        column_schema->is_virtual_generated_column()) {
+        (column_schema->is_virtual_generated_column() || !column_schema->get_orig_default_value().is_null())) {
         // add flag in ddl_output_cids_ in this special scene.
         uint64_t VIRTUAL_GEN_FIX_LEN_TAG = 1ULL << 63;
         spec.ddl_output_cids_.at(i) = spec.ddl_output_cids_.at(i) | VIRTUAL_GEN_FIX_LEN_TAG;
@@ -6812,7 +6851,23 @@ int ObStaticEngineCG::generate_spec(ObLogLinkScan &op, ObLinkScanSpec &spec, con
 {
   UNUSED(in_root_job);
   int ret = OB_SUCCESS;
-  if (OB_FAIL(op.gen_link_stmt_param_infos())) {
+  const ObLogPlan *log_plan = NULL;
+  ObExecContext *exec_ctx = NULL;
+  ObPhysicalPlanCtx *plan_ctx = NULL;
+  ObSQLSessionInfo *my_session = NULL;
+  common::ObArenaAllocator allocator;
+  common::sqlclient::dblink_param_ctx dblink_param_ctx;
+  if (OB_ISNULL(log_plan = op.get_plan()) ||
+      OB_ISNULL(my_session = log_plan->get_optimizer_context().get_session_info())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexcepted null ptr", KP(log_plan), KP(my_session), K(ret));
+  } else if (OB_ISNULL(exec_ctx = log_plan->get_optimizer_context().get_exec_ctx())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexcepted null ptr", K(ret));
+  } else if (OB_ISNULL(plan_ctx = exec_ctx->get_physical_plan_ctx())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("plan context is null");
+  } else if (OB_FAIL(op.gen_link_stmt_param_infos())) {
     LOG_WARN("failed to generate link stmt", K(ret));
   } else if (OB_FAIL(spec.set_param_infos(op.get_param_infos()))) {
     LOG_WARN("failed to set param infos", K(ret));
@@ -6820,16 +6875,34 @@ int ObStaticEngineCG::generate_spec(ObLogLinkScan &op, ObLinkScanSpec &spec, con
     LOG_WARN("failed to set stmt fmt", K(ret));
   } else if (OB_FAIL(spec.select_exprs_.init(op.get_select_exprs().count()))) {
     LOG_WARN("init fixed array failed", K(ret), K(op.get_select_exprs().count()));
-  } else if (OB_ISNULL(op.get_plan())) {
+  } else if (OB_ISNULL(log_plan->get_stmt())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected null ptr", K(ret));
-  } else if (OB_ISNULL(op.get_plan()->get_stmt())) {
-    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_ISNULL(phy_plan_)) {
     LOG_WARN("unexpected null ptr", K(ret));
+  } else if (lib::is_oracle_mode() &&
+             0 != op.get_dblink_id() &&
+             OB_INVALID_ID != op.get_dblink_id() &&
+             OB_FAIL(plan_ctx->keep_dblink_id(op.get_dblink_id()))) {
+    LOG_WARN("failed to keep dblink id in phy_plan", K(ret), K(op.get_dblink_id()), K(phy_plan_));
+  } else if (lib::is_oracle_mode() &&
+             OB_FAIL(ObDblinkService::get_local_session_vars(my_session, allocator, dblink_param_ctx))) {
+    LOG_WARN("failed to get local session vars", K(ret));
   } else {
     spec.has_for_update_ = op.get_plan()->get_stmt()->has_for_update();
     spec.is_reverse_link_ = op.get_reverse_link();
     spec.dblink_id_ = op.get_dblink_id();
+    phy_plan_->set_has_link_sfd(spec.has_for_update_);
+    plan_ctx->set_tx_id(log_plan->get_optimizer_context().get_global_hint().dblink_hints_.tx_id_);
+    plan_ctx->set_tm_sessid(log_plan->get_optimizer_context().get_global_hint().dblink_hints_.tm_sessid_);
+    plan_ctx->set_hint_xa_trans_stop_check_lock(log_plan->get_optimizer_context().get_global_hint().dblink_hints_.hint_xa_trans_stop_check_lock_);
+    plan_ctx->set_main_xa_trans_branch(!spec.is_reverse_link_ &&
+                                       0 == plan_ctx->get_tx_id() && // ensure this sql is not sent by reverse link
+                                       0 == plan_ctx->get_tm_sessid() && // ensure this sql is not sent by reverse link
+                                       ((my_session->is_in_transaction() && OB_NOT_NULL(my_session->get_tx_desc())) ||
+                                        ObDblinkService::SET_ISOLATION_LEVEL_SERIALIZABLE == dblink_param_ctx.set_transaction_isolation_cstr_ ||
+                                        phy_plan_->has_link_sfd()));
+    LOG_TRACE("link set plan_ctx properties", KP(plan_ctx), K(plan_ctx->get_hint_xa_trans_stop_check_lock()), K(!spec.is_reverse_link_), K(plan_ctx->get_main_xa_trans_branch()), K(plan_ctx->get_tx_id()), K(plan_ctx->get_tm_sessid()), K(my_session->is_in_transaction()), KP(my_session->get_tx_desc()), K(phy_plan_->has_link_sfd()), K(dblink_param_ctx.set_transaction_isolation_cstr_));
     for (int64_t i = 0; OB_SUCC(ret) && i < op.get_select_exprs().count(); ++i) {
       ObExpr *rt_expr = nullptr;
       const ObRawExpr* select_expr = op.get_select_exprs().at(i);
@@ -6843,6 +6916,7 @@ int ObStaticEngineCG::generate_spec(ObLogLinkScan &op, ObLinkScanSpec &spec, con
       }
     }
   }
+  allocator.reset();
   return ret;
 }
 
@@ -6850,17 +6924,43 @@ int ObStaticEngineCG::generate_spec(ObLogLinkDml &op, ObLinkDmlSpec &spec, const
 {
   UNUSED(in_root_job);
   int ret = OB_SUCCESS;
-  if (OB_FAIL(op.gen_link_stmt_param_infos())) {
+  const ObLogPlan *log_plan = NULL;
+  ObExecContext *exec_ctx = NULL;
+  ObPhysicalPlanCtx *plan_ctx = NULL;
+  if (OB_ISNULL(log_plan = op.get_plan())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexcepted null ptr", K(ret));
+  } else if (OB_ISNULL(exec_ctx = log_plan->get_optimizer_context().get_exec_ctx())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexcepted null ptr", K(ret));
+  } else if (OB_ISNULL(plan_ctx = exec_ctx->get_physical_plan_ctx())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("plan context is null");
+  } else if (OB_FAIL(op.gen_link_stmt_param_infos())) {
     LOG_WARN("failed to generate link stmt", K(ret));
   } else if (OB_FAIL(spec.set_param_infos(op.get_param_infos()))) {
     LOG_WARN("failed to set param infos", K(ret));
   } else if (OB_FAIL(spec.set_stmt_fmt(op.get_stmt_fmt_buf(), op.get_stmt_fmt_len()))) {
     LOG_WARN("failed to set stmt fmt", K(ret));
+  } else if (lib::is_oracle_mode() &&
+             0 != op.get_dblink_id() &&
+             OB_INVALID_ID != op.get_dblink_id() &&
+             OB_FAIL(plan_ctx->keep_dblink_id(op.get_dblink_id()))) {
+    LOG_WARN("failed to keep dblink id in phy_plan", K(ret), K(op.get_dblink_id()), K(phy_plan_));
   } else {
-    spec.is_reverse_link_ = op.get_reverse_link();
-    spec.dblink_id_ = op.get_dblink_id();
-    spec.plan_->set_returning(false);
-    spec.plan_->need_drive_dml_query_ = true;
+    for (int64_t i = 0; lib::is_oracle_mode() && OB_SUCC(ret) && i < op.get_related_dblink_ids().count(); ++i) {
+      if (OB_FAIL(plan_ctx->keep_dblink_id(op.get_related_dblink_ids().at(i)))) {
+        LOG_WARN("failed to keep dblink id in phy_plan", K(ret), K(op.get_related_dblink_ids().at(i)), K(i), K(phy_plan_));
+      }
+    }
+    if (OB_SUCC(ret)) {
+      spec.is_reverse_link_ = op.get_reverse_link();
+      spec.dblink_id_ = op.get_dblink_id();
+      spec.plan_->set_returning(false);
+      spec.plan_->need_drive_dml_query_ = true;
+      plan_ctx->set_main_xa_trans_branch(true);
+      LOG_TRACE("link set plan_ctx properties", KP(plan_ctx), K(ret));
+    }
   }
   return ret;
 }
@@ -7718,8 +7818,6 @@ int ObStaticEngineCG::set_other_properties(const ObLogPlan &log_plan, ObPhysical
     } else {
       phy_plan.set_need_param(param_opt==ObParamOption::FORCE);
     }
-    phy_plan.tx_id_ = log_plan.get_optimizer_context().get_global_hint().tx_id_;
-    phy_plan.tm_sessid_ = log_plan.get_optimizer_context().get_global_hint().tm_sessid_;
   }
 
   if (OB_SUCC(ret)) {
@@ -7945,6 +8043,18 @@ int ObStaticEngineCG::set_other_properties(const ObLogPlan &log_plan, ObPhysical
     }
   }
 #endif
+  // assgin subschema ctx
+  if (OB_SUCC(ret)
+      && (plan_ctx->get_subschema_ctx().is_inited()
+          && plan_ctx->get_subschema_ctx().get_subschema_count() > 0)) {
+    if (phy_plan.get_subschema_ctx_for_update().get_subschema_count() > 0) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("subschema ctx overwrite", K(ret));
+    } else if (OB_FAIL(phy_plan.get_subschema_ctx_for_update().assgin(plan_ctx->get_subschema_ctx()))) {
+      LOG_WARN("fail to assgin subschema ctx", K(ret));
+    }
+  }
+
   if (OB_SUCC(ret)) {
     if (OB_ISNULL(log_plan.get_stmt())) {
       ret = OB_ERR_UNEXPECTED;
@@ -7961,6 +8071,8 @@ int ObStaticEngineCG::set_other_properties(const ObLogPlan &log_plan, ObPhysical
     } else {/*do nothing*/}
     if (OB_SUCC(ret)) {
       phy_plan_->set_contain_pl_udf_or_trigger(log_plan.get_stmt()->get_query_ctx()->has_pl_udf_);
+      phy_plan_->set_udf_has_dml_stmt(log_plan.get_stmt()->get_query_ctx()->udf_has_dml_stmt_);
+      phy_plan_->set_has_link_udf(log_plan.get_stmt()->get_query_ctx()->has_dblink_udf_);
     }
   }
   if (OB_SUCC(ret)) {
@@ -8121,11 +8233,6 @@ int ObStaticEngineCG::get_phy_op_type(ObLogicalOperator &log_op,
           type = PHY_PX_DIST_TRANSMIT;
         } else if (op.get_plan()->get_optimizer_context().is_online_ddl() && ObPQDistributeMethod::PARTITION_RANGE == op.get_dist_method()) {
           type = PHY_PX_REPART_TRANSMIT;
-        } else if (OB_REPARTITION_NO_REPARTITION != op.get_repartition_type()
-                && !op.is_slave_mapping()) {
-          type = PHY_PX_REPART_TRANSMIT;
-        } else if (ObPQDistributeMethod::LOCAL != op.get_dist_method()) {
-          type = PHY_PX_DIST_TRANSMIT;
         } else {
           // NOTE: 优化器需要和执行器保持一致，既没有分区、又没有HASH、或其它重分区方式时，就使用All To One
           type = PHY_PX_REDUCE_TRANSMIT;
@@ -8673,7 +8780,7 @@ int ObStaticEngineCG::check_fk_nested_dup_del(const uint64_t table_id,
       const uint64_t child_table_id = fk_info.child_table_id_;
       const uint64_t parent_table_id = fk_info.parent_table_id_;
       ObReferenceAction del_act = fk_info.delete_action_;
-      if (child_table_id != common::OB_INVALID_ID && del_act == ACTION_CASCADE) {
+      if (root_table_id == parent_table_id && child_table_id != common::OB_INVALID_ID && del_act == ACTION_CASCADE) {
         if (child_table_id == table_id) {
           is_dup = true;
         } else if (has_cycle_reference(parent_tables, child_table_id)) {

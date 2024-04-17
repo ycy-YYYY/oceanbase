@@ -176,6 +176,7 @@ int ObPLCompiler::compile(
   int ret = OB_SUCCESS;
   FLTSpanGuard(pl_compile);
   bool use_jitted_expr = false;
+  int64_t compile_start = ObTimeUtility::current_time();
 
   //Step 1：构造匿名块的ObPLFunctionAST
   HEAP_VAR(ObPLFunctionAST, func_ast, allocator_) {
@@ -281,6 +282,8 @@ int ObPLCompiler::compile(
       } // end of HEAP_VAR
     }
   }
+  int64_t compile_end = ObTimeUtility::current_time();
+  OX (func.get_stat_for_update().compile_time_ = compile_end - compile_start);
   return ret;
 }
 
@@ -529,6 +532,7 @@ int ObPLCompiler::compile(const uint64_t id, ObPLFunction &func)
     }
     int64_t final_end = ObTimeUtility::current_time();
     LOG_INFO(">>>>>>>>Final Time: ", K(id), K(final_end - cg_end));
+    OX (func.get_stat_for_update().compile_time_ = final_end - init_start);
   }
   return ret;
 }
@@ -544,7 +548,7 @@ int ObPLCompiler::update_schema_object_dep_info(ObIArray<ObSchemaObjVersion> &dp
   ObMySQLProxy *sql_proxy = nullptr;
   ObMySQLTransaction trans;
   bool skip = false;
-  if (GCTX.is_standby_cluster()) {
+  if (!MTL_TENANT_ROLE_CACHE_IS_PRIMARY()) {
     skip = true;
   } else if (ObTriggerInfo::is_trigger_package_id(dep_obj_id)) {
     if (lib::is_oracle_mode()) {
@@ -761,6 +765,7 @@ int ObPLCompiler::compile_package(const ObPackageInfo &package_info,
   bool saved_trigger_flag = session_info_.is_for_trigger_package();
   ObString source;
   bool use_jitted_expr = false;
+  int64_t compile_start = ObTimeUtility::current_time();
 
   ObPLCompilerEnvGuard guard(package_info, session_info_, schema_guard_, ret);
   session_info_.set_for_trigger_package(package_info.is_for_trigger());
@@ -791,32 +796,35 @@ int ObPLCompiler::compile_package(const ObPackageInfo &package_info,
   OZ (analyze_package(source, parent_ns,
                       package_ast, package_info.is_for_trigger()));
 
-  ObBucketHashWLockGuard compile_guard(GCTX.pl_engine_->get_jit_lock(), package.get_id());
-  // check session status after get lock
-  if (OB_SUCC(ret) && OB_FAIL(ObPL::check_session_alive(session_info_))) {
-    LOG_WARN("query or session is killed after get PL jit lock", K(ret));
-  }
-
-  if (OB_SUCC(ret)) {
-#ifdef USE_MCJIT
-    HEAP_VAR(ObPLCodeGenerator, cg ,allocator_, session_info_) {
-#else
-    HEAP_VAR(ObPLCodeGenerator, cg, package.get_allocator(),
-               session_info_,
-               schema_guard_,
-               package_ast,
-               package.get_expressions(),
-               package.get_helper(),
-               package.get_di_helper(),
-               lib::is_oracle_mode()) {
-#endif
-      lib::ObMallocHookAttrGuard malloc_guard(lib::ObMemAttr(MTL_ID(), GET_PL_MOD_STRING(pl::OB_PL_CODE_GEN)));
-      OZ (cg.init());
-      OZ (cg.generate(package));
+  {
+    ObBucketHashWLockGuard compile_guard(GCTX.pl_engine_->get_jit_lock(), package.get_id());
+    // check session status after get lock
+    if (OB_SUCC(ret) && OB_FAIL(ObPL::check_session_alive(session_info_))) {
+      LOG_WARN("query or session is killed after get PL jit lock", K(ret));
     }
+
+    if (OB_SUCC(ret)) {
+#ifdef USE_MCJIT
+      HEAP_VAR(ObPLCodeGenerator, cg ,allocator_, session_info_) {
+#else
+      HEAP_VAR(ObPLCodeGenerator, cg, package.get_allocator(),
+                session_info_,
+                schema_guard_,
+                package_ast,
+                package.get_expressions(),
+                package.get_helper(),
+                package.get_di_helper(),
+                lib::is_oracle_mode()) {
+#endif
+        lib::ObMallocHookAttrGuard malloc_guard(lib::ObMemAttr(MTL_ID(), GET_PL_MOD_STRING(pl::OB_PL_CODE_GEN)));
+        OZ (cg.init());
+        OZ (cg.generate(package));
+      }
+    }
+
+    OZ (generate_package(package_info.get_exec_env(), package_ast, package));
   }
 
-  OZ (generate_package(package_info.get_exec_env(), package_ast, package));
   OX (package.set_can_cached(package_ast.get_can_cached()));
   OX (package_ast.get_serially_reusable() ? package.set_serially_reusable() : void(NULL));
   session_info_.set_for_trigger_package(saved_trigger_flag);
@@ -838,6 +846,9 @@ int ObPLCompiler::compile_package(const ObPackageInfo &package_info,
       }
     }
   }
+  int64_t compile_end = ObTimeUtility::current_time();
+  OX (package.get_stat_for_update().compile_time_ = compile_end - compile_start);
+  OX (package.get_stat_for_update().type_ = ObPLCacheObjectType::PACKAGE_ROUTINE_TYPE);
   return ret;
 }
 

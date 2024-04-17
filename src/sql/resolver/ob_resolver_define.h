@@ -249,6 +249,7 @@ inline int databuff_print_key_obj(char *buf, const int64_t buf_len, int64_t &pos
 namespace pl
 {
 class ObPLBlockNS;
+class ObPLPackageGuard;
 }
 
 namespace sql
@@ -264,6 +265,7 @@ const int64_t FAST_ARRAY_COUNT = OB_DEFAULT_SE_ARRAY_COUNT;
 typedef common::ObFastArray<int64_t, FAST_ARRAY_COUNT> IntFastArray;
 typedef common::ObFastArray<uint64_t, FAST_ARRAY_COUNT> UIntFastArray;
 typedef common::ObFastArray<ObRawExpr *, FAST_ARRAY_COUNT> RawExprFastArray;
+typedef common::ObTuple<ObRawExpr*, ObConstRawExpr*, int64_t> ExternalParamInfo;
 
 struct ExternalParams{
   ExternalParams() : by_name_(false), params_( ){}
@@ -277,18 +279,18 @@ public:
     by_name_ = other.by_name_;
     return params_.assign(other.params_);
   }
-  std::pair<ObRawExpr*, ObConstRawExpr*> &at(int64_t i)
+  ExternalParamInfo &at(int64_t i)
   {
     return params_.at(i);
   }
-  int push_back(const std::pair<ObRawExpr*, ObConstRawExpr*> &param)
+  int push_back(const ExternalParamInfo &param)
   {
     return params_.push_back(param);
   }
 
 public:
   bool by_name_;
-  common::ObSEArray<std::pair<ObRawExpr*, ObConstRawExpr*>, 8> params_;
+  common::ObSEArray<ExternalParamInfo, 8> params_;
 };
 
 struct ObResolverParams
@@ -349,7 +351,8 @@ struct ObResolverParams
        need_check_col_dup_(true),
        is_specified_col_name_(false),
        is_in_sys_view_(false),
-       is_expanding_view_(false)
+       is_expanding_view_(false),
+       package_guard_(NULL)
   {}
   bool is_force_trace_log() { return force_trace_log_; }
 
@@ -418,6 +421,7 @@ public:
   bool is_specified_col_name_;//mark if specify the column name in create view or create table as..
   bool is_in_sys_view_;
   bool is_expanding_view_;
+  pl::ObPLPackageGuard *package_guard_;
 };
 } // end namespace sql
 } // end namespace oceanbase

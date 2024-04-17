@@ -18,6 +18,7 @@
 #include "lib/alloc/ob_malloc_sample_struct.h"
 #include "lib/allocator/ob_tc_malloc.h"
 #include "lib/allocator/ob_mem_leak_checker.h"
+#include "lib/signal/ob_signal_handlers.h"
 #include "share/scheduler/ob_tenant_dag_scheduler.h"
 #include "rpc/obrpc/ob_rpc_handler.h"
 #include "share/ob_cluster_version.h"
@@ -28,6 +29,7 @@
 #include "observer/ob_server.h"
 #include "observer/ob_server_utils.h"
 #include "observer/ob_service.h"
+#include "share/allocator/ob_shared_memory_allocator_mgr.h"
 #include "storage/tx_storage/ob_tenant_freezer.h"
 #include "storage/compaction/ob_tenant_tablet_scheduler.h"
 #include "storage/slog/ob_storage_logger_manager.h"
@@ -149,6 +151,7 @@ int ObServerReloadConfig::operator()()
 #endif
     ObMallocSampleLimiter::set_interval(GCONF._max_malloc_sample_interval,
                                      GCONF._min_malloc_sample_interval);
+    enable_memleak_light_backtrace(GCONF._enable_memleak_light_backtrace);
     if (!is_arbitration_mode) {
       ObIOConfig io_config;
       int64_t cpu_cnt = GCONF.cpu_count;
@@ -169,6 +172,7 @@ int ObServerReloadConfig::operator()()
       (void)reload_diagnose_info_config(GCONF.enable_perf_event);
       (void)reload_trace_log_config(GCONF.enable_record_trace_log);
 
+      reload_tenant_freezer_config_();
       reload_tenant_scheduler_config_();
     }
   }
@@ -180,21 +184,15 @@ int ObServerReloadConfig::operator()()
         reserve);
   }
 
-
-
   int64_t cache_size = GCONF.memory_chunk_cache_size;
-  if (0 == cache_size) {
+  bool use_large_chunk_cache = 1 != cache_size;
+  if (0 == cache_size || 1 == cache_size) {
     cache_size = GMEMCONF.get_server_memory_limit();
     if (cache_size >= (32L<<30)) {
       cache_size -= (4L<<30);
     }
   }
-  int64_t large_cache_size = GCONF._memory_large_chunk_cache_size;
-  if (0 == large_cache_size) {
-    large_cache_size = lib::AChunkMgr::DEFAULT_LARGE_CHUNK_CACHE_SIZE;
-  }
-  lib::AChunkMgr::instance().set_max_chunk_cache_size(cache_size);
-  lib::AChunkMgr::instance().set_max_large_chunk_cache_size(large_cache_size);
+  lib::AChunkMgr::instance().set_max_chunk_cache_size(cache_size, use_large_chunk_cache);
 
   if (!is_arbitration_mode) {
     // Refresh cluster_id, cluster_name_hash for non arbitration mode
@@ -317,6 +315,10 @@ int ObServerReloadConfig::operator()()
   {
     ObMallocAllocator::get_instance()->force_malloc_for_absent_tenant_ = GCONF._force_malloc_for_absent_tenant;
   }
+
+  {
+    ObSigFaststack::get_instance().set_min_interval(GCONF._faststack_min_interval.get_value());
+  }
   return ret;
 }
 
@@ -333,6 +335,28 @@ void ObServerReloadConfig::reload_tenant_scheduler_config_()
       (void)MTL(compaction::ObTenantTabletScheduler *)->reload_tenant_config();
       return OB_SUCCESS;
     };
+    omt->operate_in_each_tenant(f);
+  }
+}
+
+int ObServerReloadConfig::ObReloadTenantFreezerConfOp::operator()()
+{
+  int ret = OB_SUCCESS;
+  // NOTICE: tenant freezer should update before ObSharedMemAllocMgr.
+  MTL(ObTenantFreezer *)->reload_config();
+  MTL(ObSharedMemAllocMgr*)->update_throttle_config();
+  return ret;
+}
+
+void ObServerReloadConfig::reload_tenant_freezer_config_()
+{
+  int ret = OB_SUCCESS;
+  omt::ObMultiTenant *omt = GCTX.omt_;
+  if (OB_ISNULL(omt)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("omt should not be null", K(ret));
+  } else {
+    ObReloadTenantFreezerConfOp f;
     omt->operate_in_each_tenant(f);
   }
 }

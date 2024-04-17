@@ -121,7 +121,10 @@ int ObImportTableJobScheduler::check_compatible_() const
 int ObImportTableJobScheduler::process_(share::ObImportTableJob &job)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(wait_src_tenant_schema_refreshed_(job.get_src_tenant_id()))) {
+  bool is_dropped = false;
+  if (OB_FAIL(schema_service_->check_if_tenant_has_been_dropped(job.get_src_tenant_id(), is_dropped))) {
+    LOG_WARN("failed to check if tenant has been dropped", K(ret), "tenant_id", job.get_src_tenant_id());
+  } else if (!is_dropped && OB_FAIL(wait_src_tenant_schema_refreshed_(job.get_src_tenant_id()))) {
     if (OB_SCHEMA_EAGAIN != ret) {
       LOG_WARN("failed to wait src tenant schema refreshed", K(ret), K(job));
     }
@@ -865,6 +868,7 @@ int ObImportTableTaskScheduler::wait_import_ddl_task_finish_(bool &is_finish)
       LOG_WARN("failed to set result", K(ret), K(error_message));
     } else {
       import_task_->set_result(result);
+      import_task_->set_completion_ts(ObTimeUtility::current_time());
       is_finish = true;
       LOG_INFO("[IMPORT_TABLE]import table failed", KPC_(import_task), K(error_message));
     }

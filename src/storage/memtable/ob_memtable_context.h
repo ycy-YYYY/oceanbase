@@ -386,6 +386,9 @@ public:
   //method called when leader revoke
   virtual int commit_to_replay();
   virtual int fill_redo_log(ObTxFillRedoCtx &ctx);
+  bool is_logging_blocked(bool &has_pending_log) const {
+    return trans_mgr_.is_logging_blocked(has_pending_log);
+  }
   void check_all_redo_flushed();
   int get_log_guard(const transaction::ObTxSEQ &write_seq,
                     ObCallbackListLogGuard &log_guard,
@@ -414,8 +417,9 @@ public:
   int remove_callback_for_uncommited_txn(const memtable::ObMemtableSet *memtable_set);
   int rollback(const transaction::ObTxSEQ seq_no, const transaction::ObTxSEQ from_seq_no,
                const share::SCN replay_scn);
-  void set_parallel_logging(const share::SCN serial_final_scn) {
-    trans_mgr_.set_parallel_logging(serial_final_scn);
+  void set_parallel_logging(const share::SCN serial_final_scn,
+                            const transaction::ObTxSEQ serial_final_seq_no) {
+    trans_mgr_.set_parallel_logging(serial_final_scn, serial_final_seq_no);
   }
   void set_skip_checksum_calc() {
     trans_mgr_.set_skip_checksum_calc();
@@ -468,7 +472,7 @@ public:
                        const ObTableLockMode mode,
                        const ObTableLockOpType op_type,
                        bool &is_exist,
-                       ObTableLockMode &lock_mode_in_same_trans) const;
+                       uint64_t lock_mode_cnt_in_same_trans[]) const;
   int check_modify_schema_elapsed(const common::ObTabletID &tablet_id,
                                   const int64_t schema_version);
   int check_modify_time_elapsed(const common::ObTabletID &tablet_id,

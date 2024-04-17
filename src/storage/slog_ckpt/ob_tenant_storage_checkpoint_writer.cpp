@@ -47,15 +47,16 @@ ObTenantStorageCheckpointWriter::ObTenantStorageCheckpointWriter()
 int ObTenantStorageCheckpointWriter::init(const ObTenantStorageMetaType meta_type)
 {
   int ret = OB_SUCCESS;
+  ObMemAttr mem_attr(MTL_ID(), ObModIds::OB_CHECKPOINT);
   if (OB_UNLIKELY(is_inited_)) {
     ret = OB_INIT_TWICE;
     LOG_WARN("ObTenantStorageCheckpointWriter init twice", K(ret));
   } else if (OB_UNLIKELY(ObTenantStorageMetaType::INVALID_TYPE == meta_type)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid arg", K(ret), K(meta_type));
-  } else if (OB_FAIL(ls_item_writer_.init(false /*whether need addr*/))) {
+  } else if (OB_FAIL(ls_item_writer_.init(false /*whether need addr*/, mem_attr))) {
     LOG_WARN("fail to init ls item writer", K(ret));
-  } else if (OB_FAIL(tablet_item_writer_.init(false /*whether need addr*/))) {
+  } else if (OB_FAIL(tablet_item_writer_.init(false /*whether need addr*/, mem_attr))) {
     LOG_WARN("fail to init tablet item writer", K(ret));
   } else {
     meta_type_ = meta_type;
@@ -155,9 +156,10 @@ int ObTenantStorageCheckpointWriter::record_ls_meta(MacroBlockId &ls_entry_block
 
   ls_item_writer_.reset();
   tablet_item_writer_.reset();
+  ObMemAttr mem_attr(MTL_ID(), ObModIds::OB_CHECKPOINT);
   if (OB_FAIL(MTL(ObLSService *)->get_ls_iter(ls_iter, ObLSGetMod::STORAGE_MOD))) {
     LOG_WARN("failed to get log stream iter", K(ret));
-  } else if (OB_FAIL(ls_item_writer_.init(false /*whether need addr*/))) {
+  } else if (OB_FAIL(ls_item_writer_.init(false /*whether need addr*/, mem_attr))) {
     LOG_WARN("failed to init log stream item writer", K(ret));
   } else {
     share::SCN unused_scn;
@@ -295,7 +297,8 @@ int ObTenantStorageCheckpointWriter::record_tablet_meta(ObLS &ls, MacroBlockId &
   char slog_buf[sizeof(ObUpdateTabletLog)];
 
   tablet_item_writer_.reuse_for_next_round();
-  if (OB_FAIL(tablet_item_writer_.init(false /*whether need addr*/))) {
+  ObMemAttr mem_attr(MTL_ID(), ObModIds::OB_CHECKPOINT);
+  if (OB_FAIL(tablet_item_writer_.init(false /*whether need addr*/, mem_attr))) {
     LOG_WARN("failed to init tablet item writer", K(ret));
   } else if (OB_FAIL(ls.get_tablet_svr()->build_tablet_iter(tablet_iter))) {
     LOG_WARN("fail to build ls tablet iter", K(ret), K(ls));
@@ -460,9 +463,8 @@ int ObTenantStorageCheckpointWriter::copy_tablet(const ObTabletMapKey &tablet_ke
     addr_info.old_addr_ = old_addr;
     addr_info.new_addr_ = slog.disk_addr_;
     addr_info.need_rollback_ = true;
-    if (OB_FAIL(ObTenantMetaMemMgr::get_tablet_pool_type(tablet_handle.get_buf_len(), addr_info.tablet_pool_type_))) {
-      LOG_WARN("fail to get tablet pool type", K(ret), K(addr_info));
-    } else if (OB_FAIL(tablet_item_addr_info_arr_.push_back(addr_info))) {
+    addr_info.tablet_pool_type_ = ObTabletPoolType::TP_MAX; // only used by checkpoint, so we set it to TP_MAX here
+    if (OB_FAIL(tablet_item_addr_info_arr_.push_back(addr_info))) {
       LOG_WARN("fail to push back addr info", K(ret), K(addr_info));
     }
   }
@@ -586,7 +588,7 @@ int ObTenantStorageCheckpointWriter::batch_compare_and_swap_tablet(const bool is
 
 bool ObTenantStorageCheckpointWriter::ignore_ret(int ret)
 {
-  return OB_ALLOCATE_MEMORY_FAILED == ret || OB_DISK_HUNG == ret || OB_TIMEOUT == ret;
+  return OB_ALLOCATE_MEMORY_FAILED == ret || OB_DISK_HUNG == ret || OB_TIMEOUT == ret || OB_BUF_NOT_ENOUGH == ret;
 }
 
 int ObTenantStorageCheckpointWriter::rollback()
@@ -639,6 +641,7 @@ int ObTenantStorageCheckpointWriter::get_tablet_with_addr(
   int64_t buf_len;
   char *buf = nullptr;
   read_info.addr_ = addr_info.new_addr_;
+  ObTabletPoolType tablet_pool_type = addr_info.tablet_pool_type_;
   // only need load first-level meta
   if (addr_info.new_addr_.is_raw_block()) {
     if (addr_info.new_addr_.size() > ObTabletCommon::MAX_TABLET_FIRST_LEVEL_META_SIZE) {
@@ -651,7 +654,7 @@ int ObTenantStorageCheckpointWriter::get_tablet_with_addr(
     ObSharedBlockReadHandle block_handle(allocator);
     int64_t pos = 0;
     if (OB_FAIL(MTL(ObTenantMetaMemMgr*)->acquire_tablet_from_pool(
-        addr_info.tablet_pool_type_,
+        tablet_pool_type,
         WashTabletPriority::WTP_LOW,
         addr_info.tablet_key_,
         tablet_handle))) {
@@ -669,6 +672,17 @@ int ObTenantStorageCheckpointWriter::get_tablet_with_addr(
     } else if (OB_FAIL(tablet_handle.get_obj()->deserialize(buf, buf_len, pos))) {
       LOG_WARN("fail to deserialize tiny tablet", K(ret), K(block_handle), K(addr_info), K(pos));
     }
+
+    if (OB_FAIL(ret)) {
+      if ((OB_BUF_NOT_ENOUGH == ret) && (ObTabletPoolType::TP_NORMAL == tablet_pool_type)) {
+        tablet_pool_type = ObTabletPoolType::TP_LARGE;
+      } else if ((OB_BUF_NOT_ENOUGH == ret) && (ObTabletPoolType::TP_NORMAL != tablet_pool_type)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        // do nothing
+      }
+    }
+
   } while (ignore_ret(ret));
 
   return ret;

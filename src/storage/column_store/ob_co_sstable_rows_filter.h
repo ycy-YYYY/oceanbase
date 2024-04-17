@@ -13,6 +13,7 @@
 #define OB_STORAGE_COLUMN_STORE_OB_CO_SSTABLE_ROWS_FILTER_H_
 #include "lib/container/ob_se_array.h"
 #include "sql/engine/basic/ob_pushdown_filter.h"
+#include "storage/access/ob_sample_filter.h"
 #include "storage/access/ob_table_access_param.h"
 #include "ob_i_cg_iterator.h"
 #include "ob_cg_iter_param_pool.h"
@@ -50,6 +51,7 @@ public:
   static int switch_context_for_cg_iter(
       const bool is_projector,
       const bool project_single_row,
+      const bool without_filter,
       ObCOSSTableV2 *co_sstable,
       ObTableAccessContext &context,
       common::ObIArray<ObTableIterParam*> &cg_params,
@@ -74,7 +76,7 @@ private:
   int construct_cg_iter_params(
       const sql::ObPushdownFilterExecutor *filter,
       common::ObIArray<ObTableIterParam*> &iter_params);
-  int rewrite_filter();
+  int rewrite_filter(uint32 &depth);
   int judge_whether_use_common_cg_iter(
       sql::ObPushdownFilterExecutor *filter);
   int transform_filter_tree(

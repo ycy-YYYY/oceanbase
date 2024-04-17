@@ -62,7 +62,9 @@ ObLogFetcher::ObLogFetcher() :
     stop_flag_(true),
     paused_(false),
     pause_time_(OB_INVALID_TIMESTAMP),
-    resume_time_(OB_INVALID_TIMESTAMP)
+    resume_time_(OB_INVALID_TIMESTAMP),
+    decompression_blk_mgr_(DECOMPRESSION_MEM_LIMIT_THRESHOLD),
+    decompression_alloc_(ObMemAttr(OB_SERVER_TENANT_ID, "decompress_buf"), common::OB_MALLOC_BIG_BLOCK_SIZE, decompression_blk_mgr_)
 {
 }
 
@@ -126,7 +128,8 @@ int ObLogFetcher::init(
         cfg.blacklist_history_overdue_time_min,
         cfg.blacklist_history_clear_interval_min,
         true/*is_tenant_mode*/,
-        source_tenant_id))) {
+        source_tenant_id,
+        self_tenant_id))) {
       LOG_ERROR("ObLogRouterService init failer", KR(ret), K(region), K(cluster_id), K(source_tenant_id));
     } else if (OB_FAIL(progress_controller_.init(cfg.ls_count_upper_limit))) {
       LOG_ERROR("init progress controller fail", KR(ret));
@@ -440,6 +443,34 @@ int ObLogFetcher::add_ls(
   } else {
     LOG_INFO("LogFetcher add ls succ", K(tls_id), K(is_loading_data_dict_baseline_data_),
         K(start_parameters));
+  }
+
+  if (OB_FAIL(ret)) {
+    int tmp_ret = OB_SUCCESS;
+    logservice::TenantLSID failed_tls_id(source_tenant_id_, ls_id);
+    if (OB_TMP_FAIL(ls_fetch_mgr_.recycle_ls(failed_tls_id))) {
+      if (OB_ENTRY_NOT_EXIST != tmp_ret) {
+        LOG_WARN_RET(tmp_ret, "failed to recycle ls in failure post process", K(failed_tls_id));
+      } else {
+        LOG_INFO("tls_id is not in ls_fetch_mgr, recycle done", K(failed_tls_id));
+      }
+    }
+
+    if (OB_TMP_FAIL(fs_container_mgr_.remove_fsc(failed_tls_id))) {
+      if (OB_ENTRY_NOT_EXIST != tmp_ret) {
+        LOG_WARN_RET(tmp_ret, "failed ", K(failed_tls_id));
+      } else {
+        LOG_INFO("tls_id not exist in fs_container_mgr_, remove done", K(failed_tls_id));
+      }
+    }
+
+    if (OB_TMP_FAIL(ls_fetch_mgr_.remove_ls(failed_tls_id))) {
+      if (OB_ENTRY_NOT_EXIST != tmp_ret) {
+        LOG_WARN_RET(tmp_ret, "failed to remove ls in ls_fetch_mgr ", K(failed_tls_id));
+      } else {
+        LOG_INFO("tls_id not exist in ls_fetch_mgr_, remove done", K(failed_tls_id));
+      }
+    }
   }
 
   return ret;
@@ -858,6 +889,22 @@ void ObLogFetcher::print_fetcher_stat_()
         "global_upper_limit", NTS_TO_STR(global_upper_limit),
         "dml_progress_limit_sec", dml_progress_limit / _SEC_,
         "fetcher_delay", TVAL_TO_STR(fetcher_delay));
+  }
+}
+
+void *ObLogFetcher::alloc_decompression_buf(int64_t size)
+{
+  void *buf = NULL;
+  if (IS_INIT) {
+    buf = decompression_alloc_.alloc(size);
+  }
+  return buf;
+}
+void ObLogFetcher::free_decompression_buf(void *buf)
+{
+  if (NULL != buf) {
+    decompression_alloc_.free(buf);
+    buf = NULL;
   }
 }
 

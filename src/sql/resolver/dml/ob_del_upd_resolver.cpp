@@ -86,7 +86,8 @@ ObDelUpdResolver::ObDelUpdResolver(ObResolverParams &params)
     insert_column_ids_(),
     is_column_specify_(false),
     is_oracle_tmp_table_(false),
-    oracle_tmp_table_type_(0)
+    oracle_tmp_table_type_(0),
+    is_resolve_insert_update_(false)
 {
   // TODO Auto-generated constructor stub
 }
@@ -713,7 +714,8 @@ int ObDelUpdResolver::add_assignment(common::ObIArray<ObTableAssignment> &assign
       table_assign = &assigns.at(assigns.count() - 1);
     }
   }
-  if (OB_SUCC(ret) && (is_mysql_mode() || assign.column_expr_->is_generated_column())) {
+  if (OB_SUCC(ret) && !params_.is_prepare_stage_
+      && (is_mysql_mode() || assign.column_expr_->is_generated_column())) {
     //in MySQL:
     //The second assignment in the following statement sets col2 to the current (updated) col1 value,
     //not the original col1 value.
@@ -1529,8 +1531,8 @@ int ObDelUpdResolver::resolve_returning(const ParseNode *parse_tree)
           }
         }
         if (OB_SUCC(ret)
-            && (ob_is_user_defined_sql_type(expr->get_data_type())
-                || ob_is_xml_pl_type(expr->get_data_type(), expr->get_udt_id()))) {
+            && (ob_is_xml_pl_type(expr->get_data_type(), expr->get_udt_id()) ||
+                ob_is_xml_sql_type(expr->get_result_type().get_type(), expr->get_result_type().get_subschema_id()))) {
           // ORA-22816 returning clause is currently not object type columns
           // but this is success in ORA: execute immediate 'insert into t1 values(4,5) returning udt1(c1, c2) into :a' using out a;
           // xmltype is not allowed: execute immediate 'insert into t2 values(:b) returning xmltype(c1) into :a' using b, out a;
@@ -2351,11 +2353,50 @@ int ObDelUpdResolver::view_pullup_part_exprs()
           LOG_WARN("failed to push back pullup partition expr", K(ret));
         }
       }
+
+      // pull up the partition expr from view stmt to root stmt
+      const ObTableSchema *table_schema = NULL;
+      if (OB_FAIL(ret)) {
+        // do nothing
+      } else if (OB_ISNULL(table) || OB_ISNULL(schema_checker_) || OB_ISNULL(session_info_) || OB_ISNULL(table)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("table item is null", K(ret));
+      } else if (OB_FAIL(schema_checker_->get_table_schema(session_info_->get_effective_tenant_id(),
+                                                       table->get_base_table_item().ref_id_,
+                                                       table_schema))) {
+        LOG_WARN("fail to get table schema", K(ret), K(table->get_base_table_item().ref_id_));
+      } else if (OB_NOT_NULL(table_schema)) {
+        const common::ObIArray<ObForeignKeyInfo> &foreign_key_infos = table_schema->get_foreign_key_infos();
+        for (int64_t i = 0; OB_SUCC(ret) && i < sel_stmt->get_part_exprs().count(); ++i) {
+          ObDMLStmt::PartExprItem pei = sel_stmt->get_part_exprs().at(i);
+          if (!is_fk_parent_table(foreign_key_infos, pei.index_tid_)) {
+            continue;
+          } else if (OB_FAIL(copier.copy(pei.part_expr_, pei.part_expr_))) {
+            LOG_WARN("failed to copy part expr", K(ret));
+          } else if (OB_FAIL(copier.copy(pei.subpart_expr_, pei.subpart_expr_))) {
+            LOG_WARN("failed to copy subpart expr", K(ret));
+          } else if (OB_FAIL(stmt->get_part_exprs().push_back(pei))) {
+            LOG_WARN("failed to push back pullup partition expr", K(ret));
+          }
+        }
+      }
     }
   }
   return ret;
 }
 
+bool ObDelUpdResolver::is_fk_parent_table(const common::ObIArray<ObForeignKeyInfo> &foreign_key_infos, const uint64_t table_id)
+{
+  bool is_pk_table = false;
+  for (int64_t i = 0; i < foreign_key_infos.count() && !is_pk_table; i++) {
+    const ObForeignKeyInfo &foreign_key_info = foreign_key_infos.at(i);
+    const uint64_t parent_table_id = foreign_key_info.parent_table_id_;
+    if (table_id == parent_table_id) {
+      is_pk_table = true;
+    }
+  }
+  return is_pk_table;
+}
 int ObDelUpdResolver::expand_record_to_columns(const ParseNode &record_node,
                                                ObIArray<ObRawExpr *> &value_list)
 {
@@ -2640,7 +2681,7 @@ int ObDelUpdResolver::generate_column_conv_function(ObInsertTableInfo &table_inf
       } else if (OB_FAIL(find_value_desc(table_info, column_id, column_ref))) {
         LOG_WARN("fail to check column is exists", K(ret), K(column_id));
       } else if ((!session_info_->get_ddl_info().is_ddl() || OB_ISNULL(column_ref)) &&
-                 ( tbl_col->is_xml_column() || (tbl_col->is_udt_hidden_column()))) {
+                 (tbl_col->is_xml_column() || (tbl_col->is_udt_hidden_column()))) {
         if (!tbl_col->is_xml_column()) {
           // do nothing, hidden column with build with xml column together
         } else if (OB_FAIL(build_column_conv_function_for_udt_column(table_info, i, column_ref))) {
@@ -3227,7 +3268,8 @@ int ObDelUpdResolver::resolve_insert_columns(const ParseNode *node,
 }
 
 int ObDelUpdResolver::resolve_insert_values(const ParseNode *node,
-                                            ObInsertTableInfo& table_info)
+                                            ObInsertTableInfo& table_info,
+                                            ObIArray<uint64_t> &label_se_columns)
 {
   int ret = OB_SUCCESS;
   ObDelUpdStmt *del_upd_stmt = get_del_upd_stmt();
@@ -3456,6 +3498,8 @@ int ObDelUpdResolver::resolve_insert_values(const ParseNode *node,
       if (OB_SUCC(ret)) {
         if (OB_FAIL(add_new_value_for_oracle_temp_table(value_row))) {
           LOG_WARN("failed to add __session_id value");
+        } else if (OB_FAIL(add_new_value_for_oracle_label_security_table(table_info, label_se_columns, value_row))) {
+          LOG_WARN("fail to add new value for oracle label security table", K(ret));
         } else if (OB_FAIL(append(table_info.values_vector_, value_row))) {
           LOG_WARN("failed to append value row", K(ret));
         }

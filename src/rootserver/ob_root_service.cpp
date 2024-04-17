@@ -880,7 +880,7 @@ int ObRootService::init(ObServerConfig &config,
   } else if (OB_FAIL(root_inspection_.init(*schema_service_, zone_manager_, sql_proxy_, &common_proxy_))) {
     FLOG_WARN("init root inspection failed", KR(ret));
   } else if (OB_FAIL(upgrade_executor_.init(*schema_service_,
-             root_inspection_, sql_proxy_, rpc_proxy_, common_proxy_))) {
+             root_inspection_, sql_proxy_, oracle_sql_proxy_, rpc_proxy_, common_proxy_))) {
     FLOG_WARN("init upgrade_executor failed", KR(ret));
   } else if (OB_FAIL(upgrade_storage_format_executor_.init(*this, ddl_service_))) {
     FLOG_WARN("init upgrade storage format executor failed", KR(ret));
@@ -2686,13 +2686,10 @@ int ObRootService::alter_resource_pool(const obrpc::ObAlterResourcePoolArg &arg)
     } else if (OB_FAIL(unit_manager_.alter_resource_pool(
             pool, arg.unit_, arg.delete_unit_id_array_))) {
       LOG_WARN("alter_resource_pool failed", K(pool), K(arg), "resource unit", arg.unit_, K(ret));
-      int mysql_error = -common::ob_mysql_errno(ret);
-      if (OB_TIMEOUT == ret || OB_TIMEOUT == mysql_error) {
-        int tmp_ret = OB_SUCCESS;
-        if (OB_SUCCESS != (tmp_ret = submit_reload_unit_manager_task())) {
-          if (OB_CANCELED != tmp_ret) {
-            LOG_ERROR("fail to reload unit_manager, please try 'alter system reload unit'", K(tmp_ret));
-          }
+      int tmp_ret = OB_SUCCESS;
+      if (OB_TMP_FAIL(submit_reload_unit_manager_task())) {//ensure submit task all case
+        if (OB_CANCELED != tmp_ret) {
+          LOG_ERROR("fail to reload unit_mgr, please try 'alter system reload unit'", KR(ret), K(tmp_ret));
         }
       }
     }
@@ -5520,11 +5517,17 @@ int ObRootService::do_restart()
   }
 
   // broadcast root server address, ignore error
-  if (OB_SUCC(ret)) {
-    int tmp_ret = update_rslist();
-    if (OB_SUCCESS != tmp_ret) {
-      FLOG_WARN("failed to update rslist but ignored", KR(tmp_ret));
-    }
+  // not full service, can not update rs_list success
+  //if (OB_SUCC(ret)) {
+  //  int tmp_ret = update_rslist();
+  //  if (OB_SUCCESS != tmp_ret) {
+  //    FLOG_WARN("failed to update rslist but ignored", KR(tmp_ret));
+  //  }
+  //}
+  if (FAILEDx(submit_update_rslist_task(true))) {
+    FLOG_WARN("submit_update_rslist_task failed", KR(ret));
+  } else {
+    FLOG_INFO("submit_update_rslist_task succeed");
   }
 
   if (OB_SUCC(ret)) {
@@ -5634,17 +5637,17 @@ int ObRootService::do_restart()
 
   // broadcast root server address again, this task must be in the end part of do_restart,
   // because system may work properly without it.
-  if (FAILEDx(update_rslist())) {
-    FLOG_WARN("broadcast root address failed but ignored", KR(ret));
+  //if (FAILEDx(update_rslist())) {
+  //  FLOG_WARN("broadcast root address failed but ignored", KR(ret));
     // it's ok ret be overwritten, update_rslist_task will retry until succeed
-    if (OB_FAIL(submit_update_rslist_task(true))) {
-      FLOG_WARN("submit_update_rslist_task failed", KR(ret));
-    } else {
-      FLOG_INFO("submit_update_rslist_task succeed");
-    }
+  if (FAILEDx(submit_update_rslist_task(true))) {
+    FLOG_WARN("submit_update_rslist_task failed", KR(ret));
   } else {
-    FLOG_INFO("broadcast root address succeed");
+    FLOG_INFO("submit_update_rslist_task succeed");
   }
+  //} else {
+  //  FLOG_INFO("broadcast root address succeed");
+  //}
 
   if (FAILEDx(report_single_replica(tenant_id, SYS_LS))) {
     FLOG_WARN("report all_core_table replica failed, but ignore",
@@ -6023,14 +6026,6 @@ int ObRootService::fetch_sys_tenant_ls_info()
   return ret;
 }
 
-int ObRootService::not_implement()
-{
-  int ret = OB_NOT_IMPLEMENT;
-  bt("not implement");
-  LOG_WARN("rpc not implemented", K(ret));
-  return ret;
-}
-
 ObRootService::ObRestartTask::ObRestartTask(ObRootService &root_service)
 :ObAsyncTimerTask(root_service.task_queue_),
     root_service_(root_service)
@@ -6406,9 +6401,9 @@ int ObRootService::create_outline(const ObCreateOutlineArg &arg)
     const ObDatabaseSchema *db_schema = NULL;
     if (OB_FAIL(ddl_service_.get_tenant_schema_guard_with_version_in_inner_table(tenant_id, schema_guard))) {
       LOG_WARN("get schema guard in inner table failed", K(ret));
-    } else if (database_name == OB_OUTLINE_DEFAULT_DATABASE_NAME) {
+    } else if (database_name == OB_MOCK_DEFAULT_DATABASE_NAME) {
       // if not specify database, set default database name and database id;
-      outline_info.set_database_id(OB_OUTLINE_DEFAULT_DATABASE_ID);
+      outline_info.set_database_id(OB_MOCK_DEFAULT_DATABASE_ID);
     } else if (OB_FAIL(schema_guard.get_database_schema(tenant_id, database_name, db_schema))) {
       LOG_WARN("get database schema failed", K(ret));
     } else if (NULL == db_schema) {
@@ -6814,10 +6809,13 @@ int ObRootService::create_udt(const ObCreateUDTArg &arg)
     uint64_t tenant_id = udt_info.get_tenant_id();
     ObString database_name = arg.db_name_;
     bool is_or_replace = arg.is_or_replace_;
+    bool exist_valid_udt = arg.exist_valid_udt_;
     ObSchemaGetterGuard schema_guard;
     const ObDatabaseSchema *db_schema = NULL;
     if (OB_FAIL(ddl_service_.get_tenant_schema_guard_with_version_in_inner_table(tenant_id, schema_guard))) {
       LOG_WARN("get schema guard in inner table failed", K(ret));
+    } else if (OB_FAIL(check_parallel_ddl_conflict(schema_guard, arg))) {
+      LOG_WARN("check parallel ddl conflict failed", K(ret));
     } else if (OB_FAIL(schema_guard.get_database_schema(tenant_id, database_name, db_schema))) {
       LOG_WARN("get database schema failed", K(ret));
     } else if (NULL == db_schema) {
@@ -6838,9 +6836,8 @@ int ObRootService::create_udt(const ObCreateUDTArg &arg)
           udt_info.get_type_name(), UDT_SCHEMA, INVALID_ROUTINE_TYPE, is_or_replace,
           conflict_schema_types))) {
         LOG_WARN("fail to check oracle_object exist", K(ret), K(udt_info.get_type_name()));
-      } else if (1 == conflict_schema_types.count()
-                 && UDT_SCHEMA == conflict_schema_types.at(0) && udt_info.is_object_type()) {
-        // skip
+      } else if (1 == conflict_schema_types.count() && UDT_SCHEMA == conflict_schema_types.at(0)) {
+        // judge later
       } else if (conflict_schema_types.count() > 0) {
         ret = OB_ERR_EXIST_OBJECT;
         LOG_WARN("Name is already used by an existing object", K(ret), K(udt_info.get_type_name()),
@@ -6849,24 +6846,49 @@ int ObRootService::create_udt(const ObCreateUDTArg &arg)
     }
     bool exist = false;
     ObUDTTypeCode type_code = udt_info.is_object_body_ddl()
-      ? UDT_TYPE_OBJECT_BODY : static_cast<ObUDTTypeCode>(udt_info.get_typecode());
+                            ? UDT_TYPE_OBJECT_BODY
+                            : static_cast<ObUDTTypeCode>(udt_info.get_typecode());
     if (OB_SUCC(ret)) {
+      bool udt_dependency_feature_enabled =
+          GET_MIN_CLUSTER_VERSION() >= CLUSTER_VERSION_4_3_1_0 ||
+          (GET_MIN_CLUSTER_VERSION() >= CLUSTER_VERSION_4_2_2_0 &&
+           GET_MIN_CLUSTER_VERSION() < CLUSTER_VERSION_4_3_0_0);
       if (OB_FAIL(schema_guard.check_udt_exist(tenant_id,
-                                              db_schema->get_database_id(),
-                                              OB_INVALID_ID,
-                                              type_code,
-                                              udt_info.get_type_name(),
-                                              exist))) {
+                                               db_schema->get_database_id(),
+                                               OB_INVALID_ID,
+                                               type_code,
+                                               udt_info.get_type_name(),
+                                               exist))) {
         LOG_WARN("failed to check udt info exist", K(udt_info), K(ret));
-      } else if (exist && !is_or_replace) {
-        if (!udt_info.is_object_type()) {
+      } else if (udt_info.is_object_body_ddl()) {
+        // udt type body do not check validation during resolving
+        if (exist && !is_or_replace) {
           ret = OB_ERR_SP_ALREADY_EXISTS;
           LOG_USER_ERROR(OB_ERR_SP_ALREADY_EXISTS, "UDT",
-                        udt_info.get_type_name().length(), udt_info.get_type_name().ptr());
+                         udt_info.get_type_name().length(), udt_info.get_type_name().ptr());
+        }
+      } else if (udt_dependency_feature_enabled) {
+        if (!exist && exist_valid_udt) {
+          ret = OB_ERR_PARALLEL_DDL_CONFLICT;
+          LOG_WARN("valid udt at resolve stage can not be found any more at rootservice stage, "
+                   "could be dropped by another parallel ddl",
+                   K(ret), K(database_name), K(udt_info.get_type_name()));
+        } else if (exist && exist_valid_udt && !is_or_replace) {
+          ret = OB_ERR_SP_ALREADY_EXISTS;
+          LOG_USER_ERROR(OB_ERR_SP_ALREADY_EXISTS, "UDT",
+                         udt_info.get_type_name().length(), udt_info.get_type_name().ptr());
+        } else {
+          // proceed only if 1)udt does not exist or is invalid or 2)ddl specified `or replace`
         }
       } else {
-        // do nothing
+        // not udt_dependency_feature_enabled && not type body
+        if (exist && !is_or_replace) {
+          ret = OB_ERR_SP_ALREADY_EXISTS;
+          LOG_USER_ERROR(OB_ERR_SP_ALREADY_EXISTS, "UDT",
+                         udt_info.get_type_name().length(), udt_info.get_type_name().ptr());
+        }
       }
+
       if (exist && OB_SUCC(ret)) {
         if (OB_FAIL(schema_guard.get_udt_info(tenant_id,
                                               db_schema->get_database_id(),
@@ -6892,31 +6914,33 @@ int ObRootService::create_udt(const ObCreateUDTArg &arg)
           }
         } else {
           CK (OB_NOT_NULL(old_udt_info));
-          OV (old_udt_info->get_type_id() == udt_info.get_type_id(), OB_ERR_UNEXPECTED, KPC(old_udt_info), K(udt_info));
+          OV (old_udt_info->get_type_id() == udt_info.get_type_id(),
+              OB_ERR_UNEXPECTED, KPC(old_udt_info), K(udt_info));
         }
-      }
-      // 这儿检查object是否能插入，当name相同，且不是replace的时候，只有一种情况可以插入
-      // 新的body不为空，但是老的body为空，这说明需要增加body信息
-      if (OB_SUCC(ret) && exist && !is_or_replace) {
-        ret = OB_ERR_SP_ALREADY_EXISTS;
-        LOG_USER_ERROR(OB_ERR_SP_ALREADY_EXISTS, "UDT",
-                    udt_info.get_type_name().length(), udt_info.get_type_name().ptr());
       }
 
       if (OB_SUCC(ret)) {
         ObErrorInfo error_info = arg.error_info_;
         ObSArray<ObRoutineInfo> &public_routine_infos =
-                      const_cast<ObSArray<ObRoutineInfo> &>(arg.public_routine_infos_);
+            const_cast<ObSArray<ObRoutineInfo> &>(arg.public_routine_infos_);
         ObSArray<ObDependencyInfo> &dep_infos =
-                     const_cast<ObSArray<ObDependencyInfo> &>(arg.dependency_infos_);
+            const_cast<ObSArray<ObDependencyInfo> &>(arg.dependency_infos_);
+        // 1) replace an existing udt
+        // 2) name of the created type confilicts with an invalid type (support after 4.2.2)
+        bool need_replace = (exist && is_or_replace);
+        if (udt_dependency_feature_enabled) {
+          need_replace = need_replace || (exist && !is_or_replace && !exist_valid_udt);
+        }
         if (OB_FAIL(ddl_service_.create_udt(udt_info,
                                             old_udt_info,
-                                            (exist && is_or_replace),
                                             public_routine_infos,
                                             error_info,
                                             schema_guard,
                                             dep_infos,
-                                            &arg.ddl_stmt_str_))) {
+                                            &arg.ddl_stmt_str_,
+                                            need_replace,
+                                            exist_valid_udt,
+                                            arg.is_force_))) {
           LOG_WARN("failed to create udt", K(udt_info), K(ret));
         }
       }
@@ -6938,6 +6962,8 @@ int ObRootService::drop_udt(const ObDropUDTArg &arg)
     uint64_t tenant_id = arg.tenant_id_;
     const ObString &db_name = arg.db_name_;
     const ObString &udt_name = arg.udt_name_;
+    const bool is_force = (1 == arg.force_or_validate_); // 0: none, 1: force, 2: valiate
+    const bool exist_valid_udt = arg.exist_valid_udt_;
     ObSchemaGetterGuard schema_guard;
     const ObDatabaseSchema *db_schema = NULL;
     if (db_name.empty()) {
@@ -6959,72 +6985,57 @@ int ObRootService::drop_udt(const ObDropUDTArg &arg)
     }
 
     if (OB_SUCC(ret)) {
-      if (!arg.is_type_body_) {
-        bool exist = false;
-        const ObUDTTypeInfo *udt_info = NULL;
-        ObUDTTypeInfo udt;
-        const ObUDTTypeCode type_code = ObUDTTypeCode::UDT_TYPE_OBJECT;
-        if (OB_FAIL(schema_guard.check_udt_exist(tenant_id,
-                                                db_schema->get_database_id(),
-                                                OB_INVALID_ID, type_code,
-                                                udt_name, exist))) {
-            LOG_WARN("failed to check udt info exist", K(udt_name), K(ret));
-        } else if (exist) {
-          if (OB_FAIL(schema_guard.get_udt_info(tenant_id,
-                                                db_schema->get_database_id(),
-                                                OB_INVALID_ID,
-                                                udt_name, type_code, udt_info))) {
-            LOG_WARN("get udt info failed", K(ret));
-          }
-        } else if (!arg.if_exist_) {
-          ret = OB_ERR_SP_DOES_NOT_EXIST;
-          LOG_USER_ERROR(OB_ERR_SP_DOES_NOT_EXIST, "UDT", db_name.length(), db_name.ptr(),
-                        udt_name.length(), udt_name.ptr());
+      bool exist = false;
+      const ObUDTTypeInfo *udt_info = NULL;
+      ObUDTTypeInfo udt;
+      const ObUDTTypeCode type_code = arg.is_type_body_ ? UDT_TYPE_OBJECT_BODY : UDT_TYPE_OBJECT;
+      if (OB_FAIL(schema_guard.check_udt_exist(tenant_id,
+                                              db_schema->get_database_id(),
+                                              OB_INVALID_ID, type_code,
+                                              udt_name, exist))) {
+          LOG_WARN("failed to check udt info exist", K(udt_name), K(ret));
+      } else if (!exist && exist_valid_udt) {
+        ret = OB_ERR_PARALLEL_DDL_CONFLICT;
+        LOG_WARN("valid udt at resolve stage can not be found any more at rootservice stage, "
+                 "could be dropped by another parallel ddl", K(ret), K(udt_name));
+      } else if (exist) {
+        if (OB_FAIL(schema_guard.get_udt_info(tenant_id,
+                                              db_schema->get_database_id(),
+                                              OB_INVALID_ID,
+                                              udt_name, type_code, udt_info))) {
+          LOG_WARN("get udt info failed", K(ret));
         }
+      } else if (!arg.if_exist_) {
+        ret = OB_ERR_SP_DOES_NOT_EXIST;
+        LOG_USER_ERROR(OB_ERR_SP_DOES_NOT_EXIST, "UDT", db_name.length(), db_name.ptr(),
+                      udt_name.length(), udt_name.ptr());
+      }
 
+      if (!arg.is_type_body_) {
         if (OB_SUCC(ret) && !OB_ISNULL(udt_info)) {
           if (OB_FAIL(udt.assign(*udt_info))) {
             LOG_WARN("assign udt info failed", K(ret), KPC(udt_info));
           } else if (udt.is_object_type()) {
-              udt.clear_property_flag(ObUDTTypeFlag::UDT_FLAG_OBJECT_TYPE_BODY);
-              udt.set_object_ddl_type(ObUDTTypeFlag::UDT_FLAG_OBJECT_TYPE_SPEC);
+            udt.clear_property_flag(ObUDTTypeFlag::UDT_FLAG_OBJECT_TYPE_BODY);
+            udt.set_object_ddl_type(ObUDTTypeFlag::UDT_FLAG_OBJECT_TYPE_SPEC);
           }
           if (OB_SUCC(ret)
-           && OB_FAIL(ddl_service_.drop_udt(udt, schema_guard, &arg.ddl_stmt_str_))) {
+              && OB_FAIL(ddl_service_.drop_udt(
+                     udt, schema_guard, &arg.ddl_stmt_str_, is_force, exist_valid_udt))) {
             LOG_WARN("drop udt failed", K(ret), K(udt_name), K(*udt_info));
           }
         }
       } else {
-        bool exist = false;
-        const ObUDTTypeInfo *udt_info = NULL;
-        ObUDTTypeInfo udt;
-        const ObUDTTypeCode type_code = ObUDTTypeCode::UDT_TYPE_OBJECT_BODY;
-        if (OB_FAIL(schema_guard.check_udt_exist(tenant_id,
-                                                db_schema->get_database_id(),
-                                                OB_INVALID_ID, type_code,
-                                                udt_name, exist))) {
-            LOG_WARN("failed to check udt info exist", K(udt_name), K(ret));
-        } else if (exist) {
-          if (OB_FAIL(schema_guard.get_udt_info(tenant_id,
-                                                db_schema->get_database_id(),
-                                                OB_INVALID_ID,
-                                                udt_name, type_code, udt_info))) {
-            LOG_WARN("get udt info failed", K(ret));
-          }
-        } else if (!arg.if_exist_) {
-          ret = OB_ERR_SP_DOES_NOT_EXIST;
-          LOG_USER_ERROR(OB_ERR_SP_DOES_NOT_EXIST, "UDT", db_name.length(), db_name.ptr(),
-                        udt_name.length(), udt_name.ptr());
-        }
         if (OB_SUCC(ret) && exist && !OB_ISNULL(udt_info)) {
           if (OB_FAIL(udt.assign(*udt_info))) {
             LOG_WARN("assign udt info failed", K(ret), KPC(udt_info));
           } else if (udt.is_object_type()) {
-              udt.clear_property_flag(ObUDTTypeFlag::UDT_FLAG_OBJECT_TYPE_SPEC);
-              udt.set_object_ddl_type(ObUDTTypeFlag::UDT_FLAG_OBJECT_TYPE_BODY);
+            udt.clear_property_flag(ObUDTTypeFlag::UDT_FLAG_OBJECT_TYPE_SPEC);
+            udt.set_object_ddl_type(ObUDTTypeFlag::UDT_FLAG_OBJECT_TYPE_BODY);
           }
           if (OB_SUCC(ret)
-            && OB_FAIL(ddl_service_.drop_udt(udt, schema_guard, &arg.ddl_stmt_str_))) {
+              && OB_FAIL(ddl_service_.drop_udt(
+                     udt, schema_guard, &arg.ddl_stmt_str_, is_force, exist_valid_udt))) {
             LOG_WARN("drop udt failed", K(ret), K(udt_name), K(*udt_info));
           }
         }
@@ -7267,15 +7278,17 @@ int ObRootService::create_package(const obrpc::ObCreatePackageArg &arg)
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid arg", K(arg), K(ret));
   } else {
-    ObPackageInfo new_package_info = arg.package_info_;
+    ObPackageInfo new_package_info;
     const ObPackageInfo *old_package_info = NULL;
-    uint64_t tenant_id = new_package_info.get_tenant_id();
+    uint64_t tenant_id = arg.package_info_.get_tenant_id();
     ObString database_name = arg.db_name_;
     ObSchemaGetterGuard schema_guard;
     const ObDatabaseSchema *db_schema = NULL;
     const ObUserInfo *user_info = NULL;
     bool is_oracle_mode = false;
-    if (OB_FAIL(ObCompatModeGetter::check_is_oracle_mode_with_tenant_id(
+    if (OB_FAIL(new_package_info.assign(arg.package_info_))) {
+      LOG_WARN("fail to assign package info", K(ret));
+    } else if (OB_FAIL(ObCompatModeGetter::check_is_oracle_mode_with_tenant_id(
                 tenant_id, is_oracle_mode))) {
       LOG_WARN("fail to check is oracle mode", K(ret));
     } else if (OB_FAIL(ddl_service_.get_tenant_schema_guard_with_version_in_inner_table(tenant_id, schema_guard))) {
@@ -7421,12 +7434,34 @@ int ObRootService::alter_package(const obrpc::ObAlterPackageArg &arg)
         } else if (OB_ISNULL(package_info)) {
           ret = OB_ERR_UNEXPECTED;
           LOG_WARN("package info is null", K(db_schema->get_database_id()), K(package_name), K(package_type), K(ret));
-        } else if (OB_FAIL(ddl_service_.alter_package(schema_guard,
-                                                      *package_info,
-                                                      public_routine_infos,
-                                                      const_cast<ObErrorInfo &>(arg.error_info_),
-                                                      &arg.ddl_stmt_str_))) {
-          LOG_WARN("drop package failed", K(ret), K(package_name));
+        }
+        if (OB_SUCC(ret)) {
+          if (GET_MIN_CLUSTER_VERSION() < CLUSTER_VERSION_4_3_1_0) {
+            if (OB_FAIL(ddl_service_.alter_package(schema_guard,
+                                                    *package_info,
+                                                    public_routine_infos,
+                                                    const_cast<ObErrorInfo &>(arg.error_info_),
+                                                    &arg.ddl_stmt_str_))) {
+              LOG_WARN("drop package failed", K(ret), K(package_name));
+            }
+          } else {
+            ObSArray<ObDependencyInfo> &dep_infos =
+                               const_cast<ObSArray<ObDependencyInfo> &>(arg.dependency_infos_);
+            ObPackageInfo new_package_info;
+            if (OB_FAIL(new_package_info.assign(*package_info))) {
+              LOG_WARN("failed to copy new package info", K(ret));
+            } else if (OB_FAIL(new_package_info.set_exec_env(arg.exec_env_))) {
+              LOG_WARN("fail to set exec env", K(ret));
+            } else if (OB_FAIL(ddl_service_.create_package(schema_guard,
+                                                    package_info,
+                                                    new_package_info,
+                                                    public_routine_infos,
+                                                    const_cast<ObErrorInfo &>(arg.error_info_),
+                                                    dep_infos,
+                                                    &arg.ddl_stmt_str_))) {
+              LOG_WARN("create package failed", K(ret), K(new_package_info));
+            }
+          }
         }
       } else {
         ret = OB_ERR_PACKAGE_DOSE_NOT_EXIST;
@@ -9965,6 +10000,12 @@ int ObRootService::set_config_pre_hook(obrpc::ObAdminSetConfigArg &arg)
       ret = check_tx_share_memory_limit_(*item);
     } else if (0 == STRCMP(item->name_.ptr(), MEMSTORE_LIMIT_PERCENTAGE)) {
       ret = check_memstore_limit_(*item);
+    } else if (0 == STRCMP(item->name_.ptr(), DATA_DISK_WRITE_LIMIT_PERCENTAGE)) {
+      ret = check_data_disk_write_limit_(*item);
+    } else if (0 == STRCMP(item->name_.ptr(), DATA_DISK_USAGE_LIMIT_PERCENTAGE)) {
+      ret = check_data_disk_usage_limit_(*item);
+    } else if (0 == STRCMP(item->name_.ptr(), TENANT_MEMSTORE_LIMIT_PERCENTAGE)) {
+      ret = check_tenant_memstore_limit_(*item);
     } else if (0 == STRCMP(item->name_.ptr(), _TX_DATA_MEMORY_LIMIT_PERCENTAGE)) {
       ret = check_tx_data_memory_limit_(*item);
     } else if (0 == STRCMP(item->name_.ptr(), _MDS_MEMORY_LIMIT_PERCENTAGE)) {
@@ -10066,6 +10107,19 @@ int ObRootService::set_config_pre_hook(obrpc::ObAdminSetConfigArg &arg)
     }                                                                                      \
   } while (0)
 
+#define CHECK_CLUSTER_CONFIG_WITH_FUNC(FUNCTOR, LOG_INFO)                                  \
+  do {                                                                                     \
+    bool valid = true;                                                                     \
+    for (int i = 0; i < tenant_ids.count() && valid; i++) {                                \
+      valid = valid && FUNCTOR::check(tenant_ids.at(i), item);                             \
+      if (!valid) {                                                                        \
+        ret = OB_INVALID_ARGUMENT;                                                         \
+        LOG_USER_ERROR(OB_INVALID_ARGUMENT, LOG_INFO);                                     \
+        LOG_WARN("config invalid", "item", item, K(ret), K(i), K(tenant_ids.at(i)));       \
+      }                                                                                    \
+    }                                                                                      \
+  } while (0)
+
 int ObRootService::check_tx_share_memory_limit_(obrpc::ObAdminSetConfigItem &item)
 {
   int ret = OB_SUCCESS;
@@ -10079,9 +10133,32 @@ int ObRootService::check_tx_share_memory_limit_(obrpc::ObAdminSetConfigItem &ite
 int ObRootService::check_memstore_limit_(obrpc::ObAdminSetConfigItem &item)
 {
   int ret = OB_SUCCESS;
-  const char *warn_log = "tenant config memstore_limit_percentage. "
-                         "It should less than or equal with _tx_share_memory_limit_percentage";
-  CHECK_TENANTS_CONFIG_WITH_FUNC(ObConfigTxDataLimitChecker, warn_log);
+  const char *warn_log = "cluster config memstore_limit_percentage. "
+                         "It should less than or equal with all tenant's _tx_share_memory_limit_percentage";
+  ObArray<uint64_t> tenant_ids;
+  ObSchemaGetterGuard schema_guard;
+  if (OB_UNLIKELY(!inited_)) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("not inited", KR(ret));
+  } else if (OB_ISNULL(schema_service_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("schema service is null", KR(ret));
+  } else if (OB_FAIL(schema_service_->get_tenant_schema_guard(OB_SYS_TENANT_ID, schema_guard))) {
+    LOG_WARN("get schema guard failed", KR(ret));
+  } else if (OB_FAIL(schema_guard.get_tenant_ids(tenant_ids))) {
+    LOG_WARN("failed to get all tenant ids", KR(ret), K(tenant_ids));
+  } else {
+    CHECK_CLUSTER_CONFIG_WITH_FUNC(ObConfigMemstoreLimitChecker, warn_log);
+  }
+  return ret;
+}
+
+int ObRootService::check_tenant_memstore_limit_(obrpc::ObAdminSetConfigItem &item)
+{
+  int ret = OB_SUCCESS;
+  const char *warn_log = "tenant config _memstore_limit_percentage. "
+    "It should less than or equal with _tx_share_memory_limit_percentage";
+  CHECK_TENANTS_CONFIG_WITH_FUNC(ObConfigMemstoreLimitChecker, warn_log);
   return ret;
 }
 
@@ -10121,7 +10198,54 @@ int ObRootService::check_write_throttle_trigger_percentage(obrpc::ObAdminSetConf
   return ret;
 }
 
+int ObRootService::check_data_disk_write_limit_(obrpc::ObAdminSetConfigItem &item)
+{
+  int ret = OB_SUCCESS;
+  bool is_valid = false;
+  int64_t value = ObConfigIntParser::get(item.value_.ptr(), is_valid);
+  const char *warn_log = "cluster config data_disk_write_limit_percentage. "
+    "It should greater than or equal with data_disk_usage_limit_percentage";
+  if (OB_UNLIKELY(!inited_)) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("not inited", KR(ret));
+  } else if (!is_valid) {
+    // invalid argument
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", K(value));
+  } else if (value == 0) {
+    // does not need check data disk write limit percentage
+  } else if (value < GCONF.data_disk_usage_limit_percentage) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_USER_ERROR(OB_INVALID_ARGUMENT, warn_log);
+  }
+  return ret;
+}
+
+int ObRootService::check_data_disk_usage_limit_(obrpc::ObAdminSetConfigItem &item)
+{
+  int ret = OB_SUCCESS;
+  bool is_valid = false;
+  int64_t value = ObConfigIntParser::get(item.value_.ptr(), is_valid);
+  const char *warn_log = "cluster config data_disk_usage_limit_percentage. "
+    "It should less than or equal with data_disk_write_limit_percentage";
+  if (OB_UNLIKELY(!inited_)) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("not inited", KR(ret));
+  } else if (!is_valid) {
+    // invalid argument
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", K(value));
+  } else if (0 == GCONF.data_disk_write_limit_percentage) {
+    // does not need check data disk write limit percentage
+  } else if (value > GCONF.data_disk_write_limit_percentage) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_USER_ERROR(OB_INVALID_ARGUMENT, warn_log);
+  }
+  return ret;
+}
+
 #undef CHECK_TENANTS_CONFIG_WITH_FUNC
+#undef CHECK_CLUSTER_CONFIG_WITH_FUNC
 
 int ObRootService::set_config_post_hook(const obrpc::ObAdminSetConfigArg &arg)
 {
@@ -11253,6 +11377,26 @@ int ObRootService::get_root_key_from_obs_(const obrpc::ObRootKeyArg &arg,
   } else if (OB_FAIL(ObDDLService::notify_root_key(rpc_proxy_, arg, active_server_list, result,
                                                    enable_default, true/*skip_call_rs*/))) {
     LOG_WARN("failed to notify root key", KR(ret));
+  }
+  return ret;
+}
+
+int ObRootService::reload_master_key(const obrpc::ObReloadMasterKeyArg &arg,
+                                     obrpc::ObReloadMasterKeyResult &result)
+{
+  int ret = OB_SUCCESS;
+  uint64_t max_version = 0;
+  if (!inited_) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("not init", K(ret));
+  } else if (OB_UNLIKELY(!arg.is_valid())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid arg", K(arg), K(ret));
+  } else if (OB_FAIL(master_key_mgr_.reload_tenant_max_key_version(arg.tenant_id_, max_version))) {
+    LOG_WARN("failed to reload master key version", K(ret), K(arg));
+  } else {
+    result.tenant_id_ = arg.tenant_id_;
+    result.master_key_id_ = max_version;
   }
   return ret;
 }

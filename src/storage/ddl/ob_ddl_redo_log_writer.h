@@ -270,9 +270,21 @@ public:
       const ObITable::TableKey &table_key,
       const share::SCN &start_scn,
       ObTabletDirectLoadMgrHandle &direct_load_mgr_handle,
+      ObTabletHandle &tablet_handle,
       share::SCN &commit_scn,
       bool &is_remote_write,
       uint32_t &lock_tid);
+  int write_commit_log_with_retry(
+      const bool allow_remote_write,
+      const ObITable::TableKey &table_key,
+      const share::SCN &start_scn,
+      ObTabletDirectLoadMgrHandle &direct_load_mgr_handle,
+      ObTabletHandle &tablet_handle,
+      share::SCN &commit_scn,
+      bool &is_remote_write,
+      uint32_t &lock_tid);
+  static const int64_t DEFAULT_RETRY_TIMEOUT_US = 60L * 1000L * 1000L; // 1min
+  static bool need_retry(int ret_code);
 private:
   int switch_to_remote_write();
   int local_write_ddl_start_log(
@@ -290,6 +302,7 @@ private:
       const share::ObLSID &ls_id,
       logservice::ObLogHandler *log_handler,
       ObTabletDirectLoadMgrHandle &direct_load_mgr_handle,
+      ObTabletDirectLoadMgrHandle &lob_direct_load_mgr_handle,
       ObDDLCommitLogHandle &handle,
       uint32_t &lock_tid);
   int remote_write_ddl_commit_redo(
@@ -345,8 +358,10 @@ public:
       const int64_t buf_len,
       const int64_t row_count);
   int wait();
+  virtual int64_t get_ddl_start_row_offset() const override { return row_id_offset_; }
 private:
   bool is_column_group_info_valid() const;
+  int retry(const int64_t timeout_us);
 private:
   bool is_inited_;
   blocksstable::ObDDLMacroBlockRedoInfo redo_info_;
@@ -357,6 +372,9 @@ private:
   int64_t task_id_;
   share::SCN start_scn_;
   uint64_t data_format_version_;
+  // if has one macro block with 100 rows before, this macro block's ddl_start_row_offset will be 100.
+  // if current macro block finish with 50 rows, current macro block's end_row_offset will be 149.
+  // end_row_offset = ddl_start_row_offset + curr_row_count - 1.
   int64_t row_id_offset_;
 };
 

@@ -124,7 +124,7 @@ public:
   virtual int multi_version_compare(const ObPartitionMergeIter &other, int &cmp_ret)
   { UNUSEDx(other, cmp_ret); return OB_NOT_SUPPORTED;}
   virtual OB_INLINE const storage::ObITable *get_table() const override { return table_; }
-  virtual OB_INLINE bool is_rowkey_first_row_already_output() { return is_rowkey_first_row_reused_; }
+  virtual OB_INLINE bool is_rowkey_first_row_already_output() { return is_rowkey_first_row_already_output_; }
   virtual OB_INLINE bool is_rowkey_shadow_row_already_output() { return is_rowkey_shadow_row_reused_; }
 
   OB_INLINE bool is_base_iter() const { return is_base_iter_; }
@@ -155,7 +155,7 @@ public:
 
   INHERIT_TO_STRING_KV("ObMergeIter", ObMergeIter, K_(tablet_id), K_(iter_end), K_(schema_rowkey_column_cnt), K_(schema_version), K_(merge_range),
       KPC(table_), K_(store_ctx), KPC_(read_info), KPC(row_iter_), K_(iter_row_count), KPC(curr_row_), K_(is_inited),
-      K_(iter_row_id), K_(last_macro_block_reused), K_(is_rowkey_first_row_reused), K_(is_base_iter), K(access_context_));
+      K_(iter_row_id), K_(last_macro_block_reused), K_(is_rowkey_first_row_already_output), K_(is_base_iter), K(access_context_));
 protected:
   virtual bool inner_check(const ObMergeParameter &merge_param) = 0;
   virtual int inner_init(const ObMergeParameter &merge_param) = 0;
@@ -185,7 +185,7 @@ protected:
   bool iter_end_;
   common::ObIAllocator &allocator_;
   bool last_macro_block_reused_;
-  bool is_rowkey_first_row_reused_;
+  bool is_rowkey_first_row_already_output_;
   bool is_rowkey_shadow_row_reused_;
   bool is_reserve_mode_;
 };
@@ -193,15 +193,19 @@ protected:
 class ObPartitionRowMergeIter : public ObPartitionMergeIter
 {
 public:
-  ObPartitionRowMergeIter(common::ObIAllocator &allocator, const bool &ignore_shadow_row = false);
+  ObPartitionRowMergeIter(common::ObIAllocator &allocator, const bool iter_co_build_row_store = false , const bool &ignore_shadow_row = false);
   virtual ~ObPartitionRowMergeIter();
   virtual int next() override;
   INHERIT_TO_STRING_KV("ObPartitionRowMergeIter", ObPartitionMergeIter, KPC(row_iter_), K_(ignore_shadow_row));
 protected:
   virtual int inner_init(const ObMergeParameter &merge_param) override;
   virtual bool inner_check(const ObMergeParameter &merge_param) override;
+  int construct_out_cols_project(const ObMergeParameter &merge_param);
+  int inner_init_row_iter(const ObMergeParameter &merge_param);
 private:
+  const bool iter_co_build_row_store_;
   const bool ignore_shadow_row_;
+  ObFixedArray<int32_t, ObIAllocator> out_cols_project_;
 };
 
 class ObPartitionMacroMergeIter : public ObPartitionMergeIter
@@ -307,6 +311,14 @@ protected:
   virtual int compare_multi_version_col(const ObPartitionMergeIter &other,
                                         const int64_t multi_version_col,
                                         int &cmp_ret);
+  bool need_recycle_mv_row()
+  {
+    return curr_row_ != nullptr && !curr_row_->is_uncommitted_row() && !curr_row_->is_last_multi_version_row() &&
+                 -curr_row_->storage_datums_[schema_rowkey_column_cnt_].get_int() <=
+                      access_context_.trans_version_range_.multi_version_start_;
+  }
+  int skip_ghost_row();
+  int compact_old_row();
 protected:
   common::ObArenaAllocator obj_copy_allocator_;
   storage::ObNopPos *nop_pos_[CRI_MAX];

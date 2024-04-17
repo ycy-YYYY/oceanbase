@@ -467,7 +467,7 @@ int ObRestoreScheduler::fill_restore_statistics(const share::ObPhysicalRestoreJo
   return ret;
 }
 
-int ObRestoreScheduler::convert_parameters(
+int ObRestoreScheduler::convert_tde_parameters(
     const ObPhysicalRestoreJob &job_info)
 {
   int ret = OB_SUCCESS;
@@ -503,17 +503,9 @@ int ObRestoreScheduler::convert_parameters(
     if (OB_FAIL(ret)) {
     } else if (!ObTdeMethodUtil::is_valid(tde_method)) {
       // do nothing
-    } else if (OB_FAIL(sql.assign_fmt("ALTER SYSTEM SET tde_method = '%s'", tde_method.ptr()))) {
-      LOG_WARN("failed to assign fmt", K(ret), K(sql));
-    } else if (OB_FAIL(sql_proxy_->write(tenant_id, sql.ptr(), affected_row))) {
-      LOG_WARN("failed to execute", K(ret), K(affected_row), K(sql));
-    } else if (ObTdeMethodUtil::is_internal(tde_method)) {
-      // do nothing
-    } else if (FALSE_IT(sql.reset())) {
-    } else if (OB_FAIL(sql.assign_fmt("ALTER SYSTEM SET external_kms_info= '%s'", kms_info.ptr()))) {
-      LOG_WARN("failed to assign fmt", K(ret), K(sql));
-    } else if (OB_FAIL(sql_proxy_->write(tenant_id, sql.ptr(), affected_row))) {
-      LOG_WARN("failed to execute", K(ret), K(affected_row), K(sql));
+    } else if (OB_FAIL(ObRestoreCommonUtil::set_tde_parameters(sql_proxy_, rpc_proxy_,
+                                    tenant_id, tde_method, kms_info))) {
+      LOG_WARN("failed to set_tde_parameters", KR(ret), K(tenant_id), K(tde_method));
     }
   }
 #endif
@@ -629,7 +621,7 @@ int ObRestoreScheduler::post_check(const ObPhysicalRestoreJob &job_info)
     LOG_WARN("failed to process schema", KR(ret));
   }
 
-  if (FAILEDx(convert_parameters(job_info))) {
+  if (FAILEDx(convert_tde_parameters(job_info))) {
     LOG_WARN("fail to convert parameters", K(ret), K(job_info));
   }
 

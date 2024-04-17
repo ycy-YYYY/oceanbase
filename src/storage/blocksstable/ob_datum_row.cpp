@@ -511,6 +511,9 @@ DEF_TO_STRING(ObDatumRow)
       J_ARRAY_END();
     }
   }
+  if (trans_info_) {
+    databuff_printf(buf, buf_len, pos, ",trans_info[version, scn, txid, seq_no(branch_id, seq)]:%s", trans_info_);
+  }
   J_OBJ_END();
   return pos;
 }
@@ -836,8 +839,7 @@ int ObGhostRowUtil::make_ghost_row(
     blocksstable::ObDatumRow &row)
 {
   int ret = OB_SUCCESS;
-  if (OB_UNLIKELY((!query_flag.is_sstable_cut()
-                   && (!row.mvcc_row_flag_.is_uncommitted_row() || !row.trans_id_.is_valid()))
+  if (OB_UNLIKELY(((!row.mvcc_row_flag_.is_uncommitted_row() || !row.trans_id_.is_valid()))
                   || !row.mvcc_row_flag_.is_last_multi_version_row()
                   || row.get_column_count() < sql_sequence_col_idx)) {
     ret = OB_INVALID_ARGUMENT;

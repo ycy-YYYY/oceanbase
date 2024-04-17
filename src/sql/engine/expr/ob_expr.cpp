@@ -365,7 +365,7 @@ int ObExpr::eval_enumset(ObEvalCtx &ctx,
   if (is_batch_result()) {
     // Evaluate one datum within a batch.
     bool need_evaluate = false;
-    if (eval_info->projected_){
+    if (eval_info->projected_) {
       datum = datum + ctx.get_batch_idx();
     } else {
       ObBitVector* evaluated_flags = to_bit_vector(frame + eval_flags_off_);
@@ -468,6 +468,11 @@ int ObDatumObjParam::to_objparam(common::ObObjParam &obj_param, ObIAllocator *al
   meta.set_scale(meta_.scale_);
   if (res_flags_ & HAS_LOB_HEADER_FLAG) {
     meta.set_has_lob_header();
+  }
+  if (ob_is_user_defined_sql_type(meta_.type_) &&
+      meta_.cs_type_ == CS_TYPE_INVALID) {
+    // xmltype
+    meta.set_collation_level(CS_LEVEL_EXPLICIT);
   }
   if (OB_UNLIKELY(meta_.is_ext_sql_array())) {
     if (OB_ISNULL(allocator)) {
@@ -709,6 +714,8 @@ int ObExpr::eval_one_datum_of_batch(ObEvalCtx &ctx, common::ObDatum *&datum) con
     info->notnull_ = true;
     if (enable_rich_format()) {
       ret = init_vector(ctx, VEC_UNIFORM, ctx.get_batch_size());
+    } else if (UINT32_MAX != vector_header_off_) {
+      get_vector_header(ctx).format_ = VEC_INVALID;
     }
   } else {
     ObBitVector *evaluated_flags = to_bit_vector(frame + eval_flags_off_);
@@ -767,8 +774,12 @@ int ObExpr::do_eval_batch(ObEvalCtx &ctx,
       reset_datums_ptr(frame, size);
       info->notnull_ = false;
       info->point_to_frame_ = true;
+      info->evaluated_ = true;
+      info->cnt_ = size;
       if (enable_rich_format()) {
         ret = init_vector(ctx, VEC_UNIFORM, size);
+      } else if (UINT32_MAX != vector_header_off_) {
+        get_vector_header(ctx).format_ = VEC_INVALID;
       }
     }
     if (OB_FAIL(ret)) {
@@ -786,10 +797,6 @@ int ObExpr::do_eval_batch(ObEvalCtx &ctx,
         ret = (*eval_batch_func_)(*this, ctx, skip, size);
       }
       if (OB_SUCC(ret)) {
-        if (!info->evaluated_) {
-          info->cnt_ = size;
-          info->evaluated_ = true;
-        }
         #ifndef NDEBUG
           if (is_oracle_mode() && (ob_is_string_tc(datum_meta_.type_) || ob_is_raw(datum_meta_.type_))) {
             ObDatum *datum = reinterpret_cast<ObDatum *>(frame + datum_off_);
@@ -1132,7 +1139,10 @@ int ObExpr::eval_vector(ObEvalCtx &ctx,
   //TODO shengle CHECK_BOUND(bound); check skip and all_rows_active wheth match
   ObEvalInfo &info = get_eval_info(ctx);
   char *frame = ctx.frames_[frame_idx_];
-  int64_t const_skip = 0;
+  int64_t const_skip = 1;
+  if (skip.accumulate_bit_cnt(bound) < bound.range_size()) {
+    const_skip = 0;
+  }
   const ObBitVector *rt_skip = batch_result_ ? &skip : to_bit_vector(&const_skip);
   bool need_evaluate = false;
   // in old operator, rowset_v2 expr eval param use eval_vector,
@@ -1147,10 +1157,12 @@ int ObExpr::eval_vector(ObEvalCtx &ctx,
              || (!batch_result_ && info.evaluated_)) {
     // expr values is projected by child or has no evaluate func, do nothing.
   } else if (!info.evaluated_) {
-    need_evaluate = true;
+    // if const_skip == 1, no need to evaluated expr, just `init_vector`
+    need_evaluate = batch_result_ || (const_skip == 0);
     get_evaluated_flags(ctx).reset(BATCH_SIZE());
     info.notnull_ = false;
     info.point_to_frame_ = true;
+    info.evaluated_ = batch_result_ ? true : false;
     VectorFormat format = (expr_default_eval_vector_func == eval_vector_func_ && is_batch_result())
                           ? VEC_UNIFORM
                           : get_default_res_format();
@@ -1315,6 +1327,7 @@ int eval_assign_question_mark_func(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &
         res_acc.precision_ = expr.datum_meta_.precision_;
         cast_ctx.res_accuracy_ = &res_acc;
       }
+      cast_ctx.exec_ctx_ = &ctx.exec_ctx_;
       if (OB_FAIL(ObObjCaster::to_type(dst_meta.get_type(), cast_ctx, v, dst_obj))) {
         LOG_WARN("failed to cast obj to dst type", K(ret), K(v), K(dst_meta));
       } else if (OB_FAIL(datum_param.alloc_datum_reserved_buff(
@@ -1350,9 +1363,9 @@ int ToStrVectorHeader::to_string_helper(char *buf, const int64_t buf_len) const
         ObLength length = vector->get_length(i);
         BUF_PRINTF(", len: %d, ptr: %p, hex: ", length, vector->get_payload(i));
         hex_print(vector->get_payload(i), length, buf, buf_len, pos);
+        ObDatum tmp_datum(vector->get_payload(i), length, vector->is_null(i));
         ObObj tmp_obj;
-        ObDatum* tmp_datum = new ObDatum(vector->get_payload(i), length, vector->is_null(i));
-        if (OB_SUCCESS == tmp_datum->to_obj(tmp_obj, expr_.obj_meta_, expr_.obj_datum_map_)) {
+        if (OB_SUCCESS == tmp_datum.to_obj(tmp_obj, expr_.obj_meta_, expr_.obj_datum_map_)) {
           BUF_PRINTF(", value: ");
           pos += tmp_obj.to_string(buf + pos, buf_len - pos);
         }

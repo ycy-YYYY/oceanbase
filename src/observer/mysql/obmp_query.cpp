@@ -14,6 +14,7 @@
 
 #include "observer/mysql/obmp_query.h"
 
+#include "lib/allocator/ob_sql_mem_leak_checker.h"
 #include "lib/utility/ob_macro_utils.h"
 #include "lib/utility/ob_tracepoint.h"
 #include "lib/worker.h"
@@ -690,7 +691,7 @@ OB_INLINE int ObMPQuery::do_process(ObSQLSessionInfo &session,
   ObTenantCachedSchemaGuardInfo &cached_schema_info = session.get_cached_schema_guard_info();
   int64_t tenant_version = 0;
   int64_t sys_version = 0;
-  common::ObSqlInfoGuard si_guard(sql);
+  SQL_INFO_GUARD(sql, session.get_cur_sql_id());
   ObSqlFatalErrExtraInfoGuard extra_info_guard;
   extra_info_guard.set_cur_sql(sql);
   extra_info_guard.set_tenant_id(session.get_effective_tenant_id());
@@ -711,6 +712,7 @@ OB_INLINE int ObMPQuery::do_process(ObSQLSessionInfo &session,
       LOG_ERROR("invalid sql engine", K(ret), K(gctx_));
     } else {
       session.set_current_execution_id(GCTX.sql_engine_->get_execution_id());
+      session.reset_plsql_exec_time();
       result.get_exec_context().set_need_disconnect(true);
       ctx_.schema_guard_ = schema_guard;
       retry_ctrl_.set_tenant_local_schema_version(tenant_version);
@@ -748,6 +750,7 @@ OB_INLINE int ObMPQuery::do_process(ObSQLSessionInfo &session,
         LOG_WARN("fail to set session active", K(ret));
       } else if (OB_FAIL(gctx_.sql_engine_->stmt_query(sql, ctx_, result))) {
         exec_start_timestamp_ = ObTimeUtility::current_time();
+        session.reset_plsql_exec_time();
         if (!THIS_WORKER.need_retry()) {
           int cli_ret = OB_SUCCESS;
           retry_ctrl_.test_and_save_retry_state(gctx_, ctx_, result, ret, cli_ret);
@@ -779,6 +782,7 @@ OB_INLINE int ObMPQuery::do_process(ObSQLSessionInfo &session,
       } else {
         //监控项统计开始
         exec_start_timestamp_ = ObTimeUtility::current_time();
+        session.reset_plsql_exec_time();
         result.get_exec_context().set_plan_start_time(exec_start_timestamp_);
         // 本分支内如果出错，全部会在response_result内部处理妥当
         // 无需再额外处理回复错误包
@@ -941,6 +945,10 @@ OB_INLINE int ObMPQuery::do_process(ObSQLSessionInfo &session,
       audit_record.params_value_ = params_value_;
       audit_record.params_value_len_ = params_value_len_;
       audit_record.is_perf_event_closed_ = !lib::is_diagnose_info_enabled();
+      audit_record.plsql_exec_time_ = session.get_plsql_exec_time();
+      if (result.is_pl_stmt(result.get_stmt_type()) && OB_NOT_NULL(ObCurTraceId::get_trace_id())) {
+        audit_record.pl_trace_id_ = *ObCurTraceId::get_trace_id();
+      }
 
       ObPhysicalPlanCtx *plan_ctx = result.get_exec_context().get_physical_plan_ctx();
       if (OB_ISNULL(plan_ctx)) {
@@ -950,8 +958,7 @@ OB_INLINE int ObMPQuery::do_process(ObSQLSessionInfo &session,
       }
     }
       //update v$sql statistics
-    if ((OB_SUCC(ret) || audit_record.is_timeout())
-        && session.get_local_ob_enable_plan_cache()
+    if (session.get_local_ob_enable_plan_cache()
         && !retry_ctrl_.need_retry()) {
       ObIArray<ObTableRowCount> *table_row_count_list = NULL;
       ObPhysicalPlanCtx *plan_ctx = result.get_exec_context().get_physical_plan_ctx();
@@ -1270,6 +1277,7 @@ OB_INLINE int ObMPQuery::response_result(ObMySQLResultSet &result,
   // 通过判断 plan 是否为 null 来确定是 plan 还是 cmd
   // 针对 plan 和 cmd 分开处理，逻辑会较为清晰。
   if (OB_LIKELY(NULL != result.get_physical_plan())) {
+    ENABLE_SQL_MEMLEAK_GUARD;
     if (need_trans_cb) {
       ObAsyncPlanDriver drv(gctx_, ctx_, session, retry_ctrl_, *this);
       // NOTE: sql_end_cb必须在drv.response_result()之前初始化好

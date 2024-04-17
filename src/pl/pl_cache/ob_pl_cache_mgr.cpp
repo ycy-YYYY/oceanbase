@@ -90,17 +90,10 @@ int ObPLCacheMgr::get_pl_cache(ObPlanCache *lib_cache, ObCacheObjGuard& guard, O
     // update pl func/package stat
     pl::PLCacheObjStat *stat = NULL;
     int64_t current_time = ObTimeUtility::current_time();
-    if (ObLibCacheNameSpace::NS_PKG != guard.get_cache_obj()->get_ns() &&
-        ObLibCacheNameSpace::NS_CALLSTMT != guard.get_cache_obj()->get_ns()) {
-      pl::ObPLFunction* pl_func = static_cast<pl::ObPLFunction*>(guard.get_cache_obj());
-      stat = &pl_func->get_stat_for_update();
-      ATOMIC_INC(&(stat->hit_count_));
-      ATOMIC_STORE(&(stat->last_active_time_), current_time);
-    } else {
-      //todo:support package
-      //pl::ObPLPackage* pl_pkg = static_cast<pl::ObPLPackage*>(guard.get_cache_obj());
-      //stat = &pl_pkg->get_stat_for_update();
-    }
+    pl::ObPLCacheObject* pl_object = static_cast<pl::ObPLFunction*>(guard.get_cache_obj());
+    stat = &pl_object->get_stat_for_update();
+    ATOMIC_INC(&(stat->hit_count_));
+    ATOMIC_STORE(&(stat->last_active_time_), current_time);
   }
   return ret;
 }
@@ -203,6 +196,28 @@ int ObPLCacheMgr::cache_evict_all_pl(ObPlanCache *lib_cache)
 
   return ret;
 }
+
+template<typename GETPLKVEntryOp, typename EvictAttr>
+int ObPLCacheMgr::cache_evict_pl_cache_single(ObPlanCache *lib_cache, uint64_t db_id, EvictAttr &attr)
+{
+  int ret = OB_SUCCESS;
+  PL_CACHE_LOG(TRACE, "cache evict single plan start");
+  if (OB_ISNULL(lib_cache)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("lib cache is null");
+  } else {
+    LCKeyValueArray to_evict_keys;
+    GETPLKVEntryOp get_ids_op(db_id, attr, &to_evict_keys, PCV_GET_PL_KEY_HANDLE);
+    if (OB_FAIL(lib_cache->foreach_cache_evict(get_ids_op))) {
+      PL_CACHE_LOG(WARN, "failed to foreach cache evict", K(ret));
+    }
+  }
+  PL_CACHE_LOG(TRACE, "cache evict single plan end");
+  return ret;
+}
+
+template int ObPLCacheMgr::cache_evict_pl_cache_single<ObGetPLKVEntryBySchemaIdOp, uint64_t>(ObPlanCache *lib_cache, uint64_t db_id, uint64_t &schema_id);
+template int ObPLCacheMgr::cache_evict_pl_cache_single<ObGetPLKVEntryBySQLIDOp, common::ObString>(ObPlanCache *lib_cache, uint64_t db_id, common::ObString &sql_id);
 
 }
 }

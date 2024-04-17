@@ -221,6 +221,7 @@ int ObInsertLobColumnHelper::insert_lob_column(ObIAllocator &allocator,
                                                blocksstable::ObStorageDatum &datum,
                                                const int64_t timeout_ts,
                                                const bool has_lob_header,
+                                               const uint64_t src_tenant_id,
                                                ObLobMetaWriteIter &iter)
 {
   int ret = OB_SUCCESS;
@@ -238,7 +239,7 @@ int ObInsertLobColumnHelper::insert_lob_column(ObIAllocator &allocator,
     int64_t byte_len = 0;
     if (OB_FAIL(src.get_lob_data_byte_len(byte_len))) {
       LOG_WARN("fail to get lob data byte len", K(ret), K(src));
-    } else if (src.has_inrow_data() && byte_len <= ObLobManager::LOB_IN_ROW_MAX_LENGTH) {
+    } else if (src.has_inrow_data() && lob_mngr->can_write_inrow(data.length(), lob_storage_param.inrow_threshold_)) {
       // do fast inrow
       if (OB_FAIL(src.get_inrow_data(data))) {
         LOG_WARN("fail to get inrow data", K(ret), K(src));
@@ -272,6 +273,7 @@ int ObInsertLobColumnHelper::insert_lob_column(ObIAllocator &allocator,
       lob_param.offset_ = 0;
       lob_param.spec_lob_id_ = lob_id;
       lob_param.inrow_threshold_ = lob_storage_param.inrow_threshold_;
+      lob_param.src_tenant_id_ = src_tenant_id;
       if (!src.is_valid()) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("invalid src lob locator.", K(ret));

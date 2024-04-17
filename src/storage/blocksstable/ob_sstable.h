@@ -202,7 +202,7 @@ public:
       storage::ObTableAccessContext &context,
       share::SCN &max_trans_version,
       ObRowsInfo &rows_info);
-  int set_upper_trans_version(const int64_t upper_trans_version);
+  int set_upper_trans_version(const int64_t upper_trans_version, const bool force_update);
   virtual int64_t get_upper_trans_version() const override
   {
     return meta_cache_.upper_trans_version_;
@@ -239,7 +239,6 @@ public:
   int set_addr(const ObMetaDiskAddr &addr);
   OB_INLINE const ObMetaDiskAddr &get_addr() const { return addr_; }
   OB_INLINE int64_t get_data_macro_block_count() const { return meta_cache_.data_macro_block_count_; }
-  OB_INLINE int64_t get_merged_row_count() const { return is_ddl_merge_empty_sstable() ? INT64_MAX : meta_cache_.row_count_; } // empty ddl_merge_sstable cannot speed up queries
   OB_INLINE int64_t get_macro_offset() const { return meta_cache_.nested_offset_; }
   OB_INLINE int64_t get_macro_read_size() const { return meta_cache_.nested_size_; }
 
@@ -345,7 +344,11 @@ protected:
       const ObDatumRowkey &rowkey,
       ObTableAccessContext &access_context,
       ObStoreRowIterator *&iter);
-  int build_multi_exist_iterator(ObRowsInfo &rows_info, ObStoreRowIterator *&iter);
+  int build_multi_exist_iterator(
+      const ObTableIterParam &iter_param,
+      const common::ObIArray<blocksstable::ObDatumRowkey> &rowkeys,
+      ObTableAccessContext &access_context,
+      ObStoreRowIterator *&iter);
   int init_sstable_meta(const ObTabletCreateSSTableParam &param, common::ObArenaAllocator *allocator);
   int get_last_rowkey(const ObDatumRowkey *&sstable_endkey);
   int serialize_fixed_struct(char *buf, const int64_t buf_len, int64_t &pos) const;

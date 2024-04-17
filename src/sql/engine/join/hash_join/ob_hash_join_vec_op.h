@@ -315,7 +315,7 @@ private:
 public:
   virtual int inner_open() override;
   virtual int inner_rescan() override;
-  virtual int drain_exch() override;
+  virtual int do_drain_exch() override;
   virtual int inner_get_next_batch(const int64_t max_row_cnt) override;
   virtual int inner_get_next_row() { return common::OB_NOT_IMPLEMENT; };
   virtual void destroy() override;
@@ -433,20 +433,20 @@ private:
   // memory used for dump that it's really used
   OB_INLINE int64_t get_cur_mem_used()
   {
-    return get_mem_used() - join_table_.get_bucket_mem_size() - dumped_fixed_mem_size_;
+    return get_mem_used() - join_table_.get_mem_used() - dumped_fixed_mem_size_;
   }
   OB_INLINE int64_t get_data_mem_used() { return sql_mem_processor_.get_data_size(); }
   OB_INLINE bool need_dump(int64_t mem_used)
   {
-    return mem_used > sql_mem_processor_.get_mem_bound() ;
+    return mem_used > sql_mem_processor_.get_mem_bound() * data_ratio_;
   }
   OB_INLINE bool need_dump()
   {
-    return get_cur_mem_used() > sql_mem_processor_.get_mem_bound();
+    return get_cur_mem_used() > sql_mem_processor_.get_mem_bound() * data_ratio_;
   }
   int64_t get_need_dump_size(int64_t mem_used)
   {
-    return mem_used - sql_mem_processor_.get_mem_bound() + 2 * 1024 * 1024;
+    return mem_used - sql_mem_processor_.get_mem_bound() * data_ratio_ + 2 * 1024 * 1024;
   }
   OB_INLINE bool all_in_memory(int64_t size) const
   { return size < remain_data_memory_size_; }
@@ -473,7 +473,7 @@ private:
   {
     int64_t bucket_cnt = profile_.get_bucket_size();
     const int64_t DEFAULT_EXTRA_SIZE = 2 * 1024 * 1024;
-    int64_t res = join_table_.get_bucket_mem_size();
+    int64_t res = join_table_.get_mem_used();
     return  res < 0 ? DEFAULT_EXTRA_SIZE : res;
   }
 
@@ -599,7 +599,9 @@ private:
   bool skip_left_null_;
   bool skip_right_null_;
 
+  double data_ratio_;
   OutputInfo output_info_;
+  ObTempRowStore::IterationAge iter_age_;
 };
 
 } // end namespace sql

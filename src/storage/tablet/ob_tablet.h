@@ -192,6 +192,7 @@ public:
       const share::SCN &create_scn,
       const int64_t snapshot_version,
       const ObCreateTabletSchema &storage_schema,
+      const bool need_create_empty_major_sstable,
       ObFreezer *freezer);
   // dump/merge build new multi version tablet
   int init_for_merge(
@@ -265,6 +266,7 @@ public:
   bool is_empty_shell() const;
   // major merge or medium merge call
   bool is_data_complete() const;
+  int get_ready_for_read_param(ObReadyForReadParam &parm) const;
 
   // serialize & deserialize
   // TODO: change the impl of serialize and get_serialize_size after rebase
@@ -386,6 +388,7 @@ public:
   // 2. If a tablet may be being accessed, shouldn't call this function.
   int rebuild_memtables(const share::SCN scn);
 
+  void reset_memtable();
   // ATTENTION!!! The following two interfaces only release memtable from memtable manager.
   int release_memtables(const share::SCN scn);
   // force release all memtables
@@ -410,9 +413,6 @@ public:
       const int64_t len,
       share::ObLSID &ls_id,
       common::ObTabletID &tablet_id);
-  static int64_t get_lock_wait_timeout(
-      const int64_t abs_lock_timeout,
-      const int64_t stmt_timeout);
   static int check_transfer_seq_equal(const ObTablet &tablet, const int64_t transfer_seq);
   int rowkey_exists(
       ObRelativeTable &relative_table,
@@ -517,6 +517,7 @@ public:
       int64_t &required_size,
       const bool need_checksums = true);
   int check_and_set_initial_state();
+  int set_memtable_clog_checkpoint_scn(const ObMigrationTabletParam *tablet_meta);
   int read_mds_table(
       common::ObIAllocator &allocator,
       ObTabletMdsData &mds_data,
@@ -585,13 +586,14 @@ public:
   int64_t to_string(char *buf, const int64_t buf_len) const;
   int get_max_column_cnt_on_schema_recorder(int64_t &max_column_cnt);
   static int get_tablet_version(const char *buf, const int64_t len, int32_t &version);
+  int get_all_minor_sstables(ObTableStoreIterator &table_store_iter) const;
 protected:// for MDS use
   virtual bool check_is_inited_() const override final { return is_inited_; }
   virtual const ObTabletMdsData &get_mds_data_() const override final { return mds_data_; }
   virtual const ObTabletMeta &get_tablet_meta_() const override final { return tablet_meta_; }
   virtual int get_mds_table_handle_(mds::MdsTableHandle &handle,
                                     const bool create_if_not_exist) const override final;
-  virtual ObTabletPointer *get_tablet_ponter_() const override final {
+  virtual ObTabletPointer *get_tablet_pointer_() const override final {
     return static_cast<ObTabletPointer*>(pointer_hdl_.get_resource_ptr());
   }
 private:
@@ -809,7 +811,6 @@ private:
   bool exist_memtable_with_end_scn(const ObITable *table, const share::SCN &end_scn);
   int assign_memtables(memtable::ObIMemtable * const *memtables, const int64_t memtable_count);
   int assign_ddl_kvs(ObDDLKV * const *ddl_kvs, const int64_t ddl_kv_count);
-  void reset_memtable();
   int pull_ddl_memtables(ObArenaAllocator &allocator, ObDDLKV **&ddl_kvs_addr, int64_t &ddl_kv_count);
   void reset_ddl_memtables();
   int wait_release_memtables_();
@@ -822,6 +823,7 @@ private:
       ObUpdateTabletPointerParam &param,
       const bool need_tablet_attr = true) const;
   int calc_tablet_attr(ObTabletAttr &attr) const;
+  int check_ready_for_read_if_need(const ObTablet &old_tablet);
 private:
   // ObTabletDDLKvMgr::MAX_DDL_KV_CNT_IN_STORAGE
   // Array size is too large, need to shrink it if possible
@@ -945,14 +947,6 @@ inline int64_t ObTablet::dec_ref()
   STORAGE_LOG(DEBUG, "tablet dec ref", KP(this), K(tablet_id), "ref_cnt", cnt, K(lbt()));
 
   return cnt;
-}
-
-inline int64_t ObTablet::get_lock_wait_timeout(
-    const int64_t abs_lock_timeout,
-    const int64_t stmt_timeout)
-{
-  return (abs_lock_timeout < 0 ? stmt_timeout :
-          (abs_lock_timeout > stmt_timeout ? stmt_timeout : abs_lock_timeout));
 }
 
 #ifdef OB_BUILD_TDE_SECURITY

@@ -433,6 +433,7 @@ public:
   static int extract_contain_exprs(ObRawExpr *raw_expr,
                                    const common::ObIArray<ObRawExpr*> &src_exprs,
                                    common::ObIArray<ObRawExpr *> &contain_exprs);
+  static int extract_invalid_sequence_expr(ObRawExpr *raw_expr, ObRawExpr *&sequence_expr);
   static int mark_column_explicited_reference(ObRawExpr &expr);
   static int extract_column_ids(const ObIArray<ObRawExpr*> &exprs, common::ObIArray<uint64_t> &column_ids);
   static int extract_column_ids(const ObRawExpr *raw_expr, common::ObIArray<uint64_t> &column_ids);
@@ -496,6 +497,7 @@ public:
                                         ObExprResType &utf8_type);
 
   static int erase_inner_added_exprs(ObRawExpr *src_expr, ObRawExpr *&out_expr);
+  static int erase_inner_cast_exprs(ObRawExpr *src_expr, ObRawExpr *&out_expr);
 
   // erase implicit cast which added for operand casting.
   static int erase_operand_implicit_cast(ObRawExpr *src, ObRawExpr *&out);
@@ -557,11 +559,10 @@ public:
                                    ObRawExprFactory &expr_factory,
                                    ObRawExpr *&expr,
                                    bool is_onetime = false);
-
-  static int create_exec_param_expr(ObQueryCtx *query_ctx,
-                                    ObRawExprFactory &expr_factory,
-                                    ObRawExpr *&src_expr,
-                                    std::pair<int64_t, ObRawExpr*> &init_expr);
+  static int create_new_exec_param(ObRawExprFactory &expr_factory,
+                                   ObRawExpr *ref_expr,
+                                   ObExecParamRawExpr *&exec_param,
+                                   bool is_onetime = false);
   static int create_param_expr(ObRawExprFactory &expr_factory, int64_t param_idx, ObRawExpr *&expr);
   static int build_trim_expr(const share::schema::ObColumnSchemaV2 *column_schema,
                              ObRawExprFactory &expr_factory,
@@ -860,13 +861,16 @@ public:
                                      bool is_pkg_body_udf,
                                      bool is_pl_agg,
                                      int64_t type_id,
-                                     ObUDFInfo &udf_info);
+                                     ObUDFInfo &udf_info,
+                                     uint64_t dblink_id,
+                                     const ObString &dblink_name);
   static int resolve_udf_param_types(const share::schema::ObIRoutineInfo* func_info,
                                      share::schema::ObSchemaGetterGuard &schema_guard,
                                      sql::ObSQLSessionInfo &session_info,
                                      common::ObIAllocator &allocator,
                                      common::ObMySQLProxy &sql_proxy,
-                                     ObUDFInfo &udf_info);
+                                     ObUDFInfo &udf_info,
+                                     pl::ObPLDbLinkGuard &dblink_guard);
   static int resolve_udf_param_exprs(ObResolverParams &params,
                                      const share::schema::ObIRoutineInfo *func_info,
                                      ObUDFInfo &udf_info);
@@ -1069,6 +1073,13 @@ public:
                              const ObIArray<common::ObField> *field_array,
                              const ObIArray<ObRawExpr*> &input_exprs,
                              ObRawExpr *&pack_expr);
+  static int build_inner_row_cmp_expr(ObRawExprFactory &expr_factory,
+                                      const ObSQLSessionInfo *session_info,
+                                      ObRawExpr *cast_expr,
+                                      ObRawExpr *input_expr,
+                                      ObRawExpr *next_expr,
+                                      const uint64_t ret_code,
+                                      ObSysFunRawExpr *&new_expr);
 
   static int set_call_in_pl(ObRawExpr *&raw_expr);
 
@@ -1188,6 +1199,7 @@ public:
   static int extract_local_vars_for_gencol(ObRawExpr *expr,
                                            const ObSQLMode sql_mode,
                                            ObColumnSchemaV2 &gen_col);
+  static int check_contain_op_row_expr(const ObRawExpr *raw_expr, bool &contain);
 
 private :
   static int create_real_cast_expr(ObRawExprFactory &expr_factory,

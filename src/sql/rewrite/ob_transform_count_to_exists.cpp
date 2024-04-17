@@ -96,7 +96,7 @@ int ObTransformCountToExists::construct_transform_hint(ObDMLStmt &stmt, void *tr
         LOG_WARN("get unexpected null", K(ret), K(query_expr));
       } else if (OB_FAIL(query_expr->get_ref_stmt()->get_qb_name(qb_name))) {
         LOG_WARN("failed to get qb name", K(ret));
-      } else if (OB_FAIL(hint->get_qb_name_list().push_back(qb_name))) {
+      } else if (OB_FAIL(hint->get_qb_names().push_back(qb_name))) {
         LOG_WARN("failed to push back qb name", K(ret));
       }
     }
@@ -202,7 +202,9 @@ int ObTransformCountToExists::check_trans_valid(ObDMLStmt *stmt, ObRawExpr *expr
     } else if (has_rownum) {
       // do nothing
     } else if (tmp_subquery_expr->get_ref_count() > 1 ||
-               tmp_subquery->has_having() || !tmp_subquery->is_scala_group_by()) {
+               tmp_subquery->has_having() || !tmp_subquery->is_scala_group_by() ||
+               tmp_subquery->has_order_by() || tmp_subquery->has_limit() ||
+               tmp_subquery->has_window_function_filter()) {
       // only scalar group by subquery without having and referred by once can be transformed
       OPT_TRACE("only scalar group by subquery without having and referred by once can be transformed");
     } else if (OB_FAIL(check_sel_expr_valid(sel_expr,

@@ -157,7 +157,8 @@ int ObIMvccCtx::register_row_replay_cb(
 int ObIMvccCtx::register_table_lock_cb_(
     ObLockMemtable *memtable,
     ObMemCtxLockOpLinkNode *lock_op,
-    ObOBJLockCallback *&cb)
+    ObOBJLockCallback *&cb,
+    const share::SCN replay_scn)
 {
   int ret = OB_SUCCESS;
   static ObFakeStoreRowKey tablelock_fake_rowkey("tbl", 3);
@@ -171,6 +172,9 @@ int ObIMvccCtx::register_table_lock_cb_(
     TRANS_LOG(WARN, "encode memtable key failed", K(ret));
   } else {
     cb->set(mt_key, lock_op);
+    if (replay_scn.is_valid()) {
+      cb->set_scn(replay_scn);
+    }
     if (OB_FAIL(append_callback(cb))) {
       TRANS_LOG(WARN, "append table lock callback failed", K(ret), K(*cb));
     } else {
@@ -216,10 +220,10 @@ int ObIMvccCtx::register_table_lock_replay_cb(
     TRANS_LOG(WARN, "invalid argument", K(ret), K(memtable), K(lock_op));
   } else if (OB_FAIL(register_table_lock_cb_(memtable,
                                              lock_op,
-                                             cb))) {
+                                             cb,
+                                             scn))) {
     TRANS_LOG(WARN, "register tablelock callback failed", K(ret), KPC(lock_op));
   } else {
-    cb->set_scn(scn);
     TRANS_LOG(DEBUG, "replay register table lock callback", K(*cb));
   }
   return ret;
@@ -282,7 +286,9 @@ ObMvccWriteGuard::~ObMvccWriteGuard()
     int ret = OB_SUCCESS;
     transaction::ObPartTransCtx *tx_ctx = ctx_->get_trans_ctx();
     ctx_->write_done();
-    if (OB_NOT_NULL(memtable_)) {
+    if (write_ret_ && OB_SUCCESS == *write_ret_
+        && OB_NOT_NULL(memtable_)
+        && try_flush_redo_) {
       bool is_freeze = memtable_->is_frozen_memtable();
       ret = tx_ctx->submit_redo_after_write(is_freeze/*force*/, write_seq_no_);
       if (OB_FAIL(ret)) {
@@ -310,6 +316,9 @@ int ObMvccWriteGuard::write_auth(storage::ObStoreCtx &store_ctx)
   } else {
     ctx_ = mem_ctx;
     write_seq_no_ = store_ctx.mvcc_acc_ctx_.tx_scn_;
+    try_flush_redo_ = !(store_ctx.mvcc_acc_ctx_.write_flag_.is_skip_flush_redo()
+                        // for lob column write, delay flush redo to its main tablet's write
+                        || store_ctx.mvcc_acc_ctx_.write_flag_.is_lob_aux());
   }
   return ret;
 }

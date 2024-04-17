@@ -14,6 +14,7 @@
 #define SRC_LIBRARY_SRC_LIB_RESTORE_OB_STORAGE_S3_BASE_H_
 
 #include <openssl/md5.h>
+#include <malloc.h>
 #include "lib/restore/ob_i_storage.h"
 #include "lib/container/ob_array.h"
 #include "lib/container/ob_se_array.h"
@@ -47,6 +48,7 @@
 #include <aws/core/utils/ratelimiter/DefaultRateLimiter.h>
 #include <aws/core/utils/HashingUtils.h>
 #include <aws/core/utils/crypto/CRC32.h>
+#include <aws/core/client/DefaultRetryStrategy.h>
 #pragma pop_macro("private")
 
 namespace oceanbase
@@ -61,13 +63,6 @@ int init_s3_env();
 // You need to clean s3 resource when not use cos any more.
 // Thread safe guaranteed by user.
 void fin_s3_env();
-
-// default s3 checksum algorithm
-static ObStorageCRCAlgorithm default_s3_crc_algo = ObStorageCRCAlgorithm::OB_INVALID_CRC_ALGO;
-// set checksum algorithm for writing object into s3
-void set_s3_checksum_algorithm(const ObStorageCRCAlgorithm crc_algo);
-// get current checksum algorithm
-ObStorageCRCAlgorithm get_s3_checksum_algorithm();
 
 static constexpr int64_t S3_CONNECT_TIMEOUT_MS = 10 * 1000;
 static constexpr int64_t S3_REQUEST_TIMEOUT_MS = 10 * 1000;
@@ -125,13 +120,20 @@ public:
   virtual void *AllocateMemory(std::size_t blockSize,
       std::size_t alignment, const char *allocationTag = NULL) override
   {
+    // When memory allocation fails, S3 SDK calls abort, causing a program crash.
+    // Replaced ob_malloc_align with memalign,, which retries allocation with ob_malloc_retry,
+    // thus hanging the thread instead of crashing.
+    // The ob_malloc_retry function exits the loop only when it successfully allocates memory or
+    // when the requested allocation is greater than or equal to 2GB. Thus, if an allocation of
+    // 2GB or more fails, it may still cause the program to crash.
+    lib::ObMallocHookAttrGuard guard(attr_);
     UNUSED(allocationTag);
     std::size_t real_alignment = MAX(alignment, 16); // should not be smaller than 16
-    return ob_malloc_align(real_alignment, blockSize, attr_);
+    return memalign(real_alignment, blockSize);
   }
   virtual void FreeMemory(void *memoryPtr) override
   {
-    ob_free_align(memoryPtr);
+    free(memoryPtr);
     memoryPtr = NULL;
   }
 
@@ -277,7 +279,6 @@ public:
 
   virtual int open(const ObString &uri, ObObjectStorageInfo *storage_info);
   virtual bool is_inited() const { return is_inited_; }
-  int build_bucket_and_object_name(const ObString &uri);
 
   int get_s3_file_meta(S3ObjectMeta &meta)
   {
@@ -294,6 +295,10 @@ protected:
   ObS3Client *s3_client_;
   ObString bucket_;
   ObString object_;
+  // The default is ObStorageChecksumType::OB_MD5_ALGO
+  // The S3 SDK cannot disable checksum,
+  // therefore ObStorageChecksumType::OB_NO_CHECKSUM_ALGO is not supported
+  ObStorageChecksumType checksum_type_;
 
 private:
   bool is_inited_;
@@ -493,7 +498,7 @@ private:
   DISALLOW_COPY_AND_ASSIGN(ObStorageS3AppendWriter);
 };
 
-class ObStorageS3MultiPartWriter : public ObStorageS3Base, public ObIStorageWriter
+class ObStorageS3MultiPartWriter : public ObStorageS3Base, public ObIStorageMultiPartWriter
 {
 public:
   ObStorageS3MultiPartWriter();
@@ -512,6 +517,14 @@ public:
   {
     return do_safely(&ObStorageS3MultiPartWriter::pwrite_, this, buf, size, offset);
   }
+  virtual int complete() override
+  {
+    return do_safely(&ObStorageS3MultiPartWriter::complete_, this);
+  }
+  virtual int abort() override
+  {
+    return do_safely(&ObStorageS3MultiPartWriter::abort_, this);
+  }
   virtual int close() override
   {
     return do_safely(&ObStorageS3MultiPartWriter::close_, this);
@@ -519,12 +532,12 @@ public:
   virtual int64_t get_length() const override { return file_length_; }
   virtual bool is_opened() const override { return is_opened_; }
 
-  int cleanup();
-
 private:
   int open_(const ObString &uri, ObObjectStorageInfo *storage_info);
   int write_(const char *buf, const int64_t size);
   int pwrite_(const char *buf, const int64_t size, const int64_t offset);
+  int complete_();
+  int abort_();
   int close_();
   int write_single_part_();
 
@@ -535,7 +548,6 @@ protected:
   char *upload_id_;
   int partnum_;
   int64_t file_length_;
-  Aws::Utils::Crypto::CRC32 *sum_hash_; // for calc the complete crc based on each part's crc.
 
 private:
   DISALLOW_COPY_AND_ASSIGN(ObStorageS3MultiPartWriter);

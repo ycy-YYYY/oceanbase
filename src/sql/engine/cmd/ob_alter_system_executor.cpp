@@ -44,9 +44,11 @@
 #include "share/ob_primary_standby_service.h" // ObPrimaryStandbyService
 #include "rpc/obmysql/ob_sql_sock_session.h"
 #include "sql/plan_cache/ob_plan_cache.h"
+#include "pl/pl_cache/ob_pl_cache_mgr.h"
 #include "sql/plan_cache/ob_ps_cache.h"
 #include "share/table/ob_ttl_util.h"
 #include "rootserver/restore/ob_tenant_clone_util.h"
+
 namespace oceanbase
 {
 using namespace common;
@@ -379,7 +381,38 @@ int ObFlushCacheExecutor::execute(ObExecContext &ctx, ObFlushCacheStmt &stmt)
         break;
       }
       case CACHE_TYPE_PL_OBJ: {
-        if (0 == tenant_num) {
+        if (stmt.flush_cache_arg_.is_fine_grained_) {
+          // purge in sql_id level, aka. fine-grained plan evict
+          // we assume tenant_list must not be empty and this will be checked in resolve phase
+          if (0 == tenant_num) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("unexpected tenant_list in fine-grained plan evict", K(tenant_num));
+          } else {
+            bool is_evict_by_schema_id = common::OB_INVALID_ID != stmt.flush_cache_arg_.schema_id_;
+            for (int64_t i = 0; i < tenant_num; i++) { // ignore ret
+              int64_t t_id = stmt.flush_cache_arg_.tenant_ids_.at(i);
+              MTL_SWITCH(t_id) {
+                ObPlanCache* plan_cache = MTL(ObPlanCache*);
+                // not specified db_name, evict all dbs
+                if (db_num == 0) {
+                  if (is_evict_by_schema_id) {
+                    ret = plan_cache->flush_pl_cache_single_cache_obj<pl::ObGetPLKVEntryBySchemaIdOp>(OB_INVALID_ID, stmt.flush_cache_arg_.schema_id_);
+                  } else {
+                    ret = plan_cache->flush_pl_cache_single_cache_obj<pl::ObGetPLKVEntryBySQLIDOp>(OB_INVALID_ID, sql_id);
+                  }
+                } else { // evict db by db
+                  for(int64_t j = 0; j < db_num; j++) { // ignore ret
+                    if (is_evict_by_schema_id) {
+                      ret = plan_cache->flush_pl_cache_single_cache_obj<pl::ObGetPLKVEntryBySchemaIdOp>(stmt.flush_cache_arg_.db_ids_.at(j), stmt.flush_cache_arg_.schema_id_);
+                    } else {
+                      ret = plan_cache->flush_pl_cache_single_cache_obj<pl::ObGetPLKVEntryBySQLIDOp>(stmt.flush_cache_arg_.db_ids_.at(j), sql_id);
+                    }
+                  }
+                }
+              }
+            }
+          }
+        } else if (0 == tenant_num) {
           common::ObArray<uint64_t> tenant_ids;
           if (OB_ISNULL(GCTX.omt_)) {
             ret = OB_ERR_UNEXPECTED;
@@ -1841,6 +1874,8 @@ int ObCancelTaskExecutor::parse_task_id(
 int ObSetDiskValidExecutor::execute(ObExecContext &ctx, ObSetDiskValidStmt &stmt)
 {
   int ret = OB_SUCCESS;
+  const ObZone null_zone;
+  ObArray<ObAddr> server_list;
   ObTaskExecutorCtx *task_exec_ctx = NULL;
   obrpc::ObSrvRpcProxy *srv_rpc_proxy = NULL;
   ObAddr server = stmt.server_;
@@ -1853,6 +1888,11 @@ int ObSetDiskValidExecutor::execute(ObExecContext &ctx, ObSetDiskValidStmt &stmt
   } else if (OB_ISNULL(srv_rpc_proxy = task_exec_ctx->get_srv_rpc())) {
     ret = OB_NOT_INIT;
     LOG_WARN("get srv rpc proxy failed");
+  } else if (OB_FAIL(SVR_TRACER.get_alive_servers(null_zone, server_list))) {
+    LOG_WARN("get alive server failed", KR(ret), K(null_zone));
+  } else if (!has_exist_in_array(server_list, server)) {
+    ret = OB_ENTRY_NOT_EXIST;
+    LOG_WARN("server does not exist in the alive server list", K(ret), K(null_zone), K(server_list), K(server));
   } else if (OB_FAIL(srv_rpc_proxy->to(server).set_disk_valid(arg))) {
     LOG_WARN("rpc proxy set_disk_valid failed", K(ret));
   } else {
@@ -2569,6 +2609,8 @@ int ObClearRestoreSourceExecutor::execute(ObExecContext &ctx, ObClearRestoreSour
 int ObCheckpointSlogExecutor::execute(ObExecContext &ctx, ObCheckpointSlogStmt &stmt)
 {
   int ret = OB_SUCCESS;
+  const ObZone null_zone;
+  ObArray<ObAddr> server_list;
   ObTaskExecutorCtx *task_exec_ctx = NULL;
   obrpc::ObSrvRpcProxy *srv_rpc_proxy = NULL;
   const ObAddr server = stmt.server_;
@@ -2581,6 +2623,11 @@ int ObCheckpointSlogExecutor::execute(ObExecContext &ctx, ObCheckpointSlogStmt &
   } else if (OB_ISNULL(srv_rpc_proxy = task_exec_ctx->get_srv_rpc())) {
     ret = OB_NOT_INIT;
     LOG_WARN("get srv rpc proxy failed");
+  } else if (OB_FAIL(SVR_TRACER.get_alive_servers(null_zone, server_list))) {
+    LOG_WARN("get alive server failed", KR(ret), K(null_zone));
+  } else if (!has_exist_in_array(server_list, server)) {
+    ret = OB_ENTRY_NOT_EXIST;
+    LOG_WARN("server does not exist in the alive server list", K(ret), K(null_zone), K(server_list), K(server));
   } else if (OB_FAIL(srv_rpc_proxy->to(server).timeout(THIS_WORKER.get_timeout_remain()).checkpoint_slog(arg))) {
     LOG_WARN("rpc proxy checkpoint slog failed", K(ret));
   }
@@ -2747,5 +2794,18 @@ int ObCancelCloneExecutor::execute(ObExecContext &ctx, ObCancelCloneStmt &stmt)
   return ret;
 }
 
+int ObTransferPartitionExecutor::execute(ObExecContext& ctx, ObTransferPartitionStmt& stmt)
+{
+  int ret = OB_SUCCESS;
+  const rootserver::ObTransferPartitionArg &arg = stmt.get_arg();
+  rootserver::ObTransferPartitionCommand command;
+  if (OB_UNLIKELY(!arg.is_valid())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invaid argument", KR(ret), K(arg));
+  } else if (OB_FAIL(command.execute(arg))) {
+    LOG_WARN("fail to execute command", KR(ret), K(arg));
+  }
+  return ret;
+}
 } // end namespace sql
 } // end namespace oceanbase

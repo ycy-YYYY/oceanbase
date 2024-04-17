@@ -49,8 +49,9 @@
 #include "storage/tx_storage/ob_tenant_freezer.h"
 #include "storage/column_store/ob_column_oriented_sstable.h"
 #include "storage/access/ob_row_sample_iterator.h"
-
 #include "storage/concurrency_control/ob_trans_stat_row.h"
+
+#include "logservice/ob_log_service.h"
 
 namespace oceanbase
 {
@@ -123,7 +124,6 @@ ObMemtable::ObMemtable()
       freeze_scn_(SCN::max_scn()),
       max_end_scn_(ObScnRange::MIN_SCN),
       rec_scn_(SCN::max_scn()),
-      state_(ObMemtableState::INVALID),
       freeze_state_(ObMemtableFreezeState::INVALID),
       timestamp_(0),
       is_tablet_freeze_(false),
@@ -140,6 +140,7 @@ ObMemtable::ObMemtable()
       max_column_cnt_(0)
 {
   mt_stat_.reset();
+  migration_clog_checkpoint_scn_.set_min();
 }
 
 ObMemtable::~ObMemtable()
@@ -192,7 +193,6 @@ int ObMemtable::init(const ObITable::TableKey &table_key,
     } else {
       mode_ = MTL(lib::Worker::CompatMode);
     }
-    state_ = ObMemtableState::ACTIVE;
     freeze_state_ = ObMemtableFreezeState::NOT_READY_FOR_FLUSH;
     timestamp_ = ObTimeUtility::current_time();
     is_inited_ = true;
@@ -260,7 +260,6 @@ void ObMemtable::destroy()
   max_data_schema_version_ = 0;
   max_column_cnt_ = 0;
   mt_stat_.reset();
-  state_ = ObMemtableState::INVALID;
   freeze_state_ = ObMemtableFreezeState::INVALID;
   unsubmitted_cnt_ = 0;
   logging_blocked_ = false;
@@ -270,6 +269,7 @@ void ObMemtable::destroy()
   transfer_freeze_flag_ = false;
   recommend_snapshot_version_.reset();
   max_end_scn_ = ObScnRange::MIN_SCN;
+  migration_clog_checkpoint_scn_.set_min();
   rec_scn_ = SCN::max_scn();
   read_barrier_ = false;
   is_tablet_freeze_ = false;
@@ -279,6 +279,7 @@ void ObMemtable::destroy()
   contain_hotspot_row_ = false;
   snapshot_version_.set_max();
   encrypt_meta_ = nullptr;
+  reset_trace_id();
 }
 
 int ObMemtable::safe_to_destroy(bool &is_safe)
@@ -291,6 +292,64 @@ int ObMemtable::safe_to_destroy(bool &is_safe)
   is_safe = (0 == ref_cnt && 0 == write_ref_cnt);
   if (is_safe) {
     is_safe = (0 == unsubmitted_cnt);
+  }
+
+  if (is_safe) {
+    // In scenarios where the memtable is forcefully remove (such as when the
+    // table is dropped or the ls goes offline), relying solely on the
+    // previously mentioned conditions(write_ref and unsubmitted_cnt) cannot
+    // guarantee that all the data on the memtable has been synced. This can
+    // lead to the memtable being destroyed prematurely, which in turn can cause
+    // later txns to encounter the coredump when trying to access data from the
+    // destroyed memtable. Therefore, we need to ensure that all data has indeed
+    // been synced before the memtable is safe to destroy. The solutions to
+    // the problem can be unified into the following two scenarios:
+    // 1. If the ls hasnot gone offline:
+    //   In this case, we can rely on max decided scn to ensure that all data on
+    //   the memtable has been synced.
+    // 2. If the ls has gone offline:
+    //   In this case, the ls cannot provide a decided scn. Therefore, we rely
+    //   on the apply status of apply service to decide whether all data have
+    //   been synced.
+    share::SCN max_decided_scn = share::ObScnRange::MIN_SCN;
+    if (!is_inited_) {
+      is_safe = true;
+      TRANS_LOG(INFO, "memtable is not inited and safe to destroy", KPC(this));
+    } else if (OB_FAIL(ls_handle_.get_ls()->get_max_decided_scn(max_decided_scn))) {
+      TRANS_LOG(WARN, "fail to get max decided scn", K(ret), K(max_decided_scn));
+      is_safe = false;
+    } else {
+      is_safe = max_decided_scn >= get_max_end_scn();
+    }
+
+    // STATE_NOT_MATCH means ls is offlined and we need replies on the apply
+    // service to guarantee all logs have been applied
+    if (!is_safe && ret == OB_STATE_NOT_MATCH) {
+      ret = OB_SUCCESS;
+      bool is_done = false;
+      share::LSN end_lsn;
+      if (OB_FAIL(MTL(logservice::ObLogService*)->get_log_apply_service()->
+                  is_apply_done(ls_handle_.get_ls()->get_ls_id(),
+                                is_done,
+                                end_lsn))) {
+        if (OB_ENTRY_NOT_EXIST == ret) {
+          ret = OB_SUCCESS;
+          is_safe = true;
+          TRANS_LOG(INFO, "apply is decided after ls removed when safe to destroy",
+                    K(ret), K(end_lsn), K(is_done));
+        } else {
+          TRANS_LOG(WARN, "fail to is_apply_done", K(ret), K(max_decided_scn));
+        }
+      } else {
+        TRANS_LOG(INFO, "apply is decided after ls offlined when safe to destroy",
+                  K(ret), K(end_lsn), K(is_done));
+        if (is_done) {
+          is_safe = true;
+        } else {
+          is_safe = false;
+        }
+      }
+    }
   }
 
   return ret;
@@ -327,7 +386,7 @@ int ObMemtable::multi_set(
     storage::ObRowsInfo &rows_info)
 {
   int ret = OB_SUCCESS;
-  ObMvccWriteGuard guard;
+  ObMvccWriteGuard guard(ret);
   ObMemtableKeyGenerator mtk_generator;
   if (IS_NOT_INIT) {
     TRANS_LOG(WARN, "Not inited", K(*this));
@@ -427,7 +486,7 @@ int ObMemtable::set(
     const share::ObEncryptMeta *encrypt_meta)
 {
   int ret = OB_SUCCESS;
-  ObMvccWriteGuard guard;
+  ObMvccWriteGuard guard(ret);
   ObMemtableKeyGenerator mtk_generator;
   if (IS_NOT_INIT) {
     TRANS_LOG(WARN, "not init", K(*this));
@@ -489,7 +548,7 @@ int ObMemtable::set(
     const share::ObEncryptMeta *encrypt_meta)
 {
   int ret = OB_SUCCESS;
-  ObMvccWriteGuard guard;
+  ObMvccWriteGuard guard(ret);
   ObMemtableKeyGenerator mtk_generator;
   if (IS_NOT_INIT) {
     TRANS_LOG(WARN, "not init", K(*this));
@@ -545,7 +604,7 @@ int ObMemtable::lock(
     const common::ObNewRow &row)
 {
   int ret = OB_SUCCESS;
-  ObMvccWriteGuard guard;
+  ObMvccWriteGuard guard(ret);
   ObStoreRowkey tmp_key;
   ObMemtableKey mtk;
 
@@ -595,7 +654,7 @@ int ObMemtable::lock(
     const blocksstable::ObDatumRowkey &rowkey)
 {
   int ret = OB_SUCCESS;
-  ObMvccWriteGuard guard;
+  ObMvccWriteGuard guard(ret);
   ObMemtableKey mtk;
 
   if (IS_NOT_INIT) {
@@ -680,6 +739,7 @@ int ObMemtable::exist(
   } else if (OB_FAIL(mvcc_engine_.get(context.store_ctx_->mvcc_acc_ctx_,
                                       query_flag,
                                       &parameter_mtk,
+                                      ls_id_,
                                       NULL,
                                       value_iter,
                                       lock_state))) {
@@ -812,6 +872,7 @@ int ObMemtable::get(
     } else if (OB_FAIL(mvcc_engine_.get(context.store_ctx_->mvcc_acc_ctx_,
                                         context.query_flag_,
                                         &parameter_mtk,
+                                        ls_id_,
                                         &returned_mtk,
                                         value_iter,
                                         lock_state))) {
@@ -1749,7 +1810,7 @@ void ObMemtable::resolve_left_boundary_for_active_memtable()
 {
   int ret = OB_SUCCESS;
   storage::ObTabletMemtableMgr *memtable_mgr = get_memtable_mgr_();
-  const SCN new_start_scn = get_end_scn();
+  const SCN new_start_scn = MAX(get_end_scn(), get_migration_clog_checkpoint_scn());
 
   if (OB_NOT_NULL(memtable_mgr)) {
     do {
@@ -1812,6 +1873,23 @@ int ObMemtable::get_frozen_schema_version(int64_t &schema_version) const
 {
   UNUSED(schema_version);
   return OB_NOT_SUPPORTED;
+}
+
+int ObMemtable::set_migration_clog_checkpoint_scn(const SCN &clog_checkpoint_scn)
+{
+  int ret = OB_SUCCESS;
+
+  if (OB_UNLIKELY(!is_inited_)) {
+    ret = OB_NOT_INIT;
+    TRANS_LOG(WARN, "not inited", K(ret));
+  } else if (clog_checkpoint_scn <= ObScnRange::MIN_SCN) {
+    ret = OB_SCN_OUT_OF_BOUND;
+    TRANS_LOG(WARN, "invalid clog_checkpoint_ts", K(ret));
+  } else {
+    (void)migration_clog_checkpoint_scn_.atomic_store(clog_checkpoint_scn);
+  }
+
+  return ret;
 }
 
 int ObMemtable::set_snapshot_version(const SCN snapshot_version)
@@ -2136,7 +2214,7 @@ void ObMemtable::print_ready_for_flush()
             K(ret), K(bool_ret),
             K(frozen_memtable_flag), K(write_ref),
             K(current_right_boundary), K(end_scn),
-            K(logstream_freeze_clock), K(memtable_freeze_clock));
+            K(logstream_freeze_clock), K(memtable_freeze_clock), K_(trace_id));
 }
 
 // The freeze_snapshot_version is needed for mini merge, which represents that
@@ -2285,6 +2363,38 @@ int ObMemtable::resolve_right_boundary()
   return ret;
 }
 
+int ObMemtable::resolve_right_boundary_for_migration()
+{
+  bool bool_ret = false;
+  int ret = OB_SUCCESS;
+  share::ObLSID ls_id = freezer_->get_ls_id();
+  int64_t start_time = ObTimeUtility::current_time();
+
+  do {
+    bool_ret = is_frozen_memtable() && 0 == get_write_ref();
+    if (bool_ret) {
+      if (OB_FAIL(resolve_snapshot_version_())) {
+        TRANS_LOG(WARN, "fail to resolve snapshot version", K(ret), KPC(this), K(ls_id));
+      } else if (OB_FAIL(resolve_max_end_scn_())) {
+        TRANS_LOG(WARN, "fail to resolve max_end_scn", K(ret), KPC(this), K(ls_id));
+      } else {
+        resolve_right_boundary();
+        TRANS_LOG(INFO, "resolve_right_boundary_for_migration", K(ls_id), KPC(this));
+      }
+    } else {
+      const int64_t cost_time = ObTimeUtility::current_time() - start_time;
+      if (cost_time > 5 * 1000 * 1000) {
+        if (TC_REACH_TIME_INTERVAL(5 * 1000 * 1000)) {
+          TRANS_LOG(WARN, "cannot resolve_right_boundary_for_migration", K(ret), KPC(this), K(ls_id));
+        }
+      }
+      ob_usleep(100);
+    }
+  } while (!bool_ret);
+
+  return ret;
+}
+
 void ObMemtable::resolve_left_boundary(SCN end_scn)
 {
   set_start_scn(end_scn);
@@ -2298,6 +2408,7 @@ void ObMemtable::set_freeze_state(const int64_t state)
   }
 }
 
+DEF_REPORT_CHEKCPOINT_DIAGNOSE_INFO(UpdateScheduleDagTime, update_schedule_dag_time)
 int ObMemtable::flush(share::ObLSID ls_id)
 {
   int ret = OB_SUCCESS;
@@ -2320,6 +2431,7 @@ int ObMemtable::flush(share::ObLSID ls_id)
       }
     } else {
       mt_stat_.create_flush_dag_time_ = cur_time;
+      report_memtable_diagnose_info(UpdateScheduleDagTime());
       TRANS_LOG(INFO, "schedule tablet merge dag successfully", K(ret), K(param), KPC(this));
     }
 
@@ -2361,10 +2473,6 @@ bool ObMemtable::is_active_memtable() const
 
 bool ObMemtable::is_frozen_memtable() const
 {
-  // return ObMemtableState::MAJOR_FROZEN == state_
-  //     || ObMemtableState::MAJOR_MERGING == state_
-  //     || ObMemtableState::MINOR_FROZEN == state_
-  //     || ObMemtableState::MINOR_MERGING == state_;
   // Note (yanyuan.cxf) log_frozen_memstore_info() will use this func after local_allocator_ init
   // Now freezer_ and ls_ will not be released before memtable
   const uint32_t logstream_freeze_clock = OB_NOT_NULL(freezer_) ? freezer_->get_freeze_clock() : 0;
@@ -3293,6 +3401,17 @@ int ObMemtable::set_memtable_mgr_(storage::ObTabletMemtableMgr *mgr)
 storage::ObTabletMemtableMgr *ObMemtable::get_memtable_mgr_()
 {
   return static_cast<ObTabletMemtableMgr *>(memtable_mgr_handle_.get_memtable_mgr());
+}
+
+int ObMemtable::finish_freeze()
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(ObFreezeCheckpoint::finish_freeze())) {
+    TRANS_LOG(WARN, "fail to finish_freeze", KR(ret));
+  } else {
+    report_memtable_diagnose_info(UpdateFreezeInfo(*this));
+  }
+  return ret;
 }
 
 } // namespace memtable

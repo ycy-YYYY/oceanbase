@@ -66,7 +66,7 @@ int ObTableTTLDeleteTask::init(ObTenantTabletTTLMgr *ttl_tablet_mgr,
       rowkey_.reset();
     } else {
       int64_t pos = 0;
-      if (OB_FAIL(rowkey_.deserialize(allocator_, ttl_info.row_key_.ptr(), ttl_info.row_key_.length(), pos))) {
+      if (OB_FAIL(rowkey_.deserialize(rowkey_allocator_, ttl_info.row_key_.ptr(), ttl_info.row_key_.length(), pos))) {
         LOG_WARN("fail to deserialize rowkey",  KR(ret), K(ttl_info.row_key_));
       }
     }
@@ -524,7 +524,11 @@ int ObTableTTLDeleteRowIterator::get_next_row(ObNewRow*& row)
   } else {
     bool is_expired = false;
     while(OB_SUCC(ret) && !is_expired) {
-      if (OB_FAIL(ObTableApiScanRowIterator::get_next_row(row))) {
+      int64_t cur_ts = ObTimeUtility::current_time();
+      if (cur_ts > iter_end_ts_ && hbase_new_cq_) {
+        ret = OB_ITER_END;
+        LOG_DEBUG("iter_end_ts reached, stop current iterator", KR(ret), K(cur_ts), K_(iter_end_ts));
+      } else if (OB_FAIL(ObTableApiScanRowIterator::get_next_row(row))) {
         if (OB_ITER_END != ret) {
           LOG_WARN("fail to get next row", K(ret));
         }
@@ -552,6 +556,8 @@ int ObTableTTLDeleteRowIterator::get_next_row(ObNewRow*& row)
           } else {
             cur_version_++;
           }
+          // NOTE: after ttl_cnt_ or cur_del_rows_ is incremented, the row must be return to delete iterator
+          // cuz we will check the affected_rows correctness after finish delete.
           if (max_version_ > 0 && cur_version_ > max_version_) {
             max_version_cnt_++;
             cur_del_rows_++;
@@ -575,9 +581,6 @@ int ObTableTTLDeleteRowIterator::get_next_row(ObNewRow*& row)
             is_last_row_ttl_ = true;
           }
         }
-      }
-      if (ObTimeUtility::current_time() > iter_end_ts_ && hbase_new_cq_) {
-        ret = OB_ITER_END;
       }
     }
   }
@@ -656,6 +659,7 @@ int ObTableTTLDeleteTask::execute_ttl_delete(ObTableTTLDeleteRowIterator &ttl_ro
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("unexpected rowkey column count", KR(ret), K(row_cell_cnt), K(rowkey_cnt));
       } else {
+        rowkey_.reset();
         rowkey_allocator_.reuse();
         ObObj *rowkey_buf = nullptr;
         common::ObIArray<uint64_t> &row_cell_ids = ttl_row_iter.rowkey_cell_ids_;

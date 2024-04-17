@@ -877,6 +877,13 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
           } else {
             ctx.not_param_ = not_param;
             ctx.ignore_scale_check_ = ignore_scale_check;
+            // select a + 1 as 'a' from t where b = ?; 'a' in SQL will be recognized as a constant by fast parser
+            // In the ps parameterization scenario, 'a' will be added to the param store as a fixed parameter in
+            // the execute phase. The param store has two parameters, causing correctness problems.
+            // Therefore, the scene ps parameterization ability of specifying aliases needs to be disabled.
+            if (T_ALIAS == root->type_ && NULL != root->str_value_) {
+              ctx.sql_info_->ps_need_parameterized_ = false;
+            }
             if (T_ALIAS == root->type_ && 0 == i) {
               // alias node的param_num_处理必须等到其第一个子节点转换完之后
               // select a + 1 as 'a'，'a'不能被参数化，但是它在raw_params数组内的下标必须是计算了1的下标之后才能得到
@@ -2218,8 +2225,10 @@ int ObSqlParameterization::transform_minus_op(ObIAllocator &alloc, ParseNode *tr
     // select 1 - (2/3/4) from dual;
     // 对于常量节点2，都不能转换成-2
     // do nothing
-  } else if (ob_is_numeric_type(ITEM_TO_OBJ_TYPE(tree->children_[1]->type_)) &&
-             tree->children_[1]->value_ >= 0) {
+  } else if (ob_is_number_or_decimal_int_tc(ITEM_TO_OBJ_TYPE(tree->children_[1]->type_))
+             || ((ob_is_integer_type(ITEM_TO_OBJ_TYPE(tree->children_[1]->type_))
+                  || ob_is_real_type(ITEM_TO_OBJ_TYPE(tree->children_[1]->type_)))
+                 && tree->children_[1]->value_ >= 0)) {
     ParseNode *child = tree->children_[1];
     tree->type_ = T_OP_ADD;
     if (!is_from_pl) {
@@ -2249,8 +2258,7 @@ int ObSqlParameterization::transform_minus_op(ObIAllocator &alloc, ParseNode *tr
     } else {
       child->is_trans_from_minus_ = 1;
     }
-  } else if (T_OP_MUL == tree->children_[1]->type_
-             || T_OP_DIV == tree->children_[1]->type_
+  } else if (T_OP_MUL == tree->children_[1]->type_ || T_OP_DIV == tree->children_[1]->type_
              || T_OP_INT_DIV == tree->children_[1]->type_
              || (lib::is_mysql_mode() && T_OP_MOD == tree->children_[1]->type_)) {
     /*  '0 - 2 * 3' should be transformed to '0 + (-2) * 3' */

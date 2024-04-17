@@ -1045,7 +1045,7 @@ int ObDMLStmt::construct_join_table(const ObDMLStmt &other_stmt,
  * for or-expansion transformation
  * todo: do not update semi id in semi info now
  */
-int ObDMLStmt::update_stmt_table_id(const ObDMLStmt &other)
+int ObDMLStmt::update_stmt_table_id(ObIAllocator *allocator, const ObDMLStmt &other)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(other.table_items_.count() != table_items_.count())) {
@@ -1072,7 +1072,7 @@ int ObDMLStmt::update_stmt_table_id(const ObDMLStmt &other)
                other.table_items_.at(i)->is_generated_table() &&
                NULL != table_items_.at(i)->ref_query_ &&
                NULL != other.table_items_.at(i)->ref_query_ &&
-               OB_FAIL(table_items_.at(i)->ref_query_->update_stmt_table_id(
+               OB_FAIL(table_items_.at(i)->ref_query_->update_stmt_table_id(allocator,
                        *other.table_items_.at(i)->ref_query_))) {
       LOG_WARN("failed to update table id for generated table", K(ret));
     } else { /*do nothing*/ }
@@ -1087,7 +1087,7 @@ int ObDMLStmt::update_stmt_table_id(const ObDMLStmt &other)
       LOG_WARN("null point error", K(subquery_exprs_.at(i)), K(other.subquery_exprs_.at(i)),
           K(subquery_exprs_.at(i)->get_ref_stmt()), K(other.subquery_exprs_.at(i)->get_ref_stmt()),
           K(ret));
-    } else if (OB_FAIL(subquery_exprs_.at(i)->get_ref_stmt()->update_stmt_table_id(
+    } else if (OB_FAIL(subquery_exprs_.at(i)->get_ref_stmt()->update_stmt_table_id(allocator,
                        *other.subquery_exprs_.at(i)->get_ref_stmt()))) {
       LOG_WARN("failed to update table id for subquery exprs", K(ret));
     } else { /*do nothing*/ }
@@ -1116,7 +1116,8 @@ int ObDMLStmt::update_stmt_table_id(const ObDMLStmt &other)
     } else if (OB_FAIL(update_table_item_id(other,
                                             *other.table_items_.at(i),
                                             true,
-                                            *table_items_.at(i)))) {
+                                            *table_items_.at(i),
+                                            allocator))) {
       LOG_WARN("failed to update table id for table item", K(ret));
     } else { /*do nothing*/ }
   }
@@ -1270,7 +1271,7 @@ int ObDMLStmt::update_table_item_id_for_joined_table(const ObDMLStmt &other_stmt
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("null table item", K(other.left_table_), K(other.right_table_),
         K(current.left_table_), K(current.right_table_), K(ret));
-  } else if (OB_FAIL(update_table_item_id(other_stmt, other, false, current))) {
+  } else if (OB_FAIL(update_table_item_id(other_stmt, other, false, current, NULL))) {
     LOG_WARN("failed to update table id", K(ret));
   } else if (other.left_table_->is_joined_table() &&
              current.left_table_->is_joined_table() &&
@@ -1291,27 +1292,29 @@ int ObDMLStmt::update_table_item_id_for_joined_table(const ObDMLStmt &other_stmt
 int ObDMLStmt::update_table_item_id(const ObDMLStmt &other,
                                     const TableItem &old_item,
                                     const bool has_bit_index,
-                                    TableItem &new_item)
+                                    TableItem &new_item,
+                                    ObIAllocator *allocator)
 {
   int ret = OB_SUCCESS;
   if (OB_ISNULL(query_ctx_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("null query ctx", K(ret));
-  // } else if (OB_FAIL(get_qb_name(new_item.qb_name_))) {
-  //   LOG_WARN("fail to get qb_name", K(ret), K(get_stmt_id()));
-  // do not update table item qb name
   } else {
     uint64_t old_table_id = old_item.table_id_;
     uint64_t new_table_id = query_ctx_->available_tb_id_--;
     int32_t old_bit_id = OB_INVALID_INDEX;
     int32_t new_bit_id = OB_INVALID_INDEX;
     new_item.table_id_ = new_table_id;
-    if (TableItem::TableType::BASE_TABLE == new_item.type_) {
-      new_item.type_ = TableItem::TableType::ALIAS_TABLE;
-      new_item.alias_name_ = ObString::make_string("");
-    }
     if (has_bit_index) {
-      if (OB_FAIL(set_table_bit_index(new_table_id))) {
+      bool adjusted = false;
+      if (OB_ISNULL(allocator)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected null", K(ret), K(ret), K(allocator));
+      } else if (OB_FAIL(get_qb_name(new_item.qb_name_))) {
+        LOG_WARN("fail to get qb_name", K(ret), K(get_stmt_id()));
+      } else if (OB_FAIL(adjust_duplicated_table_name(*allocator, new_item, adjusted))) {
+        LOG_WARN("fail to update dup table name", K(ret), K(new_item));
+      } else if (OB_FAIL(set_table_bit_index(new_table_id))) {
         LOG_WARN("failed to set table bit index", K(ret));
       } else if (&new_item == &old_item) {
         /* do nothing */
@@ -1356,6 +1359,93 @@ int ObDMLStmt::update_table_item_id(const ObDMLStmt &other,
                                                                               pseudo_column_like_exprs_))) {
         LOG_WARN("failed to update table id for view table id", K(ret));
       } else { /*do nothing*/ }
+    }
+  }
+  return ret;
+}
+
+//  to keep object_name@qb_name unique in query, need adjust table alias name when update table item qb name
+int ObDMLStmt::adjust_duplicated_table_name(ObIAllocator &allocator,
+                                            TableItem &table_item,
+                                            bool &adjusted)
+{
+  int ret = OB_SUCCESS;
+  adjusted = false;
+  const TableItem *cur_table = NULL;
+  bool find_dup = false;
+  for (int64_t i = 0; !find_dup && OB_SUCC(ret) && i < table_items_.count(); i++) {
+    if (OB_ISNULL(cur_table = table_items_.at(i))) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("null table item", K(ret), K(i), K(table_items_));
+    } else if (cur_table == &table_item) {
+      /* do nothing */
+    } else if (0 != table_item.get_object_name().case_compare(cur_table->get_object_name())) {
+      /* do nothing */
+    } else {
+      find_dup = true;
+    }
+  }
+
+  if (OB_SUCC(ret) && find_dup) {
+    int64_t pos = 0;
+    // just to generate an unique alias name, use a minimal max name length value: OB_MAX_USER_TABLE_NAME_LENGTH_MYSQL = 64
+    // ignore oracle mode max name length OB_MAX_USER_TABLE_NAME_LENGTH_ORACLE = 128
+    char buf[OB_MAX_USER_TABLE_NAME_LENGTH_MYSQL + 1];
+    const int64_t MAX_TIMES_FOR_GET_NO_DUP_ALIAS_NAME = 20;
+    int64_t buf_len = OB_MAX_USER_TABLE_NAME_LENGTH_MYSQL;
+    int32_t prefix_len = table_item.get_object_name().length();
+    prefix_len = prefix_len > buf_len - 3 ? buf_len - 3 : prefix_len;
+    if (OB_FAIL(BUF_PRINTF("%.*s_", prefix_len, table_item.get_object_name().ptr()))) {
+      LOG_WARN("append name to buf error", K(ret));
+    } else {
+      int64_t old_pos = pos;
+      int64_t id = 1;
+      for (; find_dup && OB_SUCC(ret) && id <= MAX_TIMES_FOR_GET_NO_DUP_ALIAS_NAME; id++) {
+        pos = old_pos;
+        if (OB_FAIL(BUF_PRINTF("%ld", id))) {
+          LOG_WARN("failed to print id", K(ret), K(id));
+        } else {
+          find_dup = false;
+          for (int64_t i = 0; !find_dup && OB_SUCC(ret) && i < table_items_.count(); ++i) {
+            if (OB_ISNULL(table_items_.at(i))) {
+              ret = OB_ERR_UNEXPECTED;
+              LOG_WARN("null table item", K(ret), K(i), K(table_items_));
+            } else {
+              find_dup = (0 == table_items_.at(i)->get_object_name().case_compare(buf));
+            }
+          }
+        }
+      }
+      if (OB_FAIL(ret)) {
+      } else if (find_dup) {
+        LOG_WARN("failed to update alias table name no dup", K(MAX_TIMES_FOR_GET_NO_DUP_ALIAS_NAME),
+                                                K(id), K(table_item.get_object_name()));
+      } else if (OB_FAIL(ob_write_string(allocator, ObString(pos, buf), table_item.alias_name_))) {
+        LOG_WARN("failed to write string", K(ret));
+      } else {
+        adjusted = true;
+      }
+    }
+  }
+  return ret;
+}
+
+int ObDMLStmt::adjust_duplicated_table_names(ObIAllocator &allocator, bool &adjusted)
+{
+  int ret = OB_SUCCESS;
+  adjusted = false;
+  bool is_adjusted = false;
+  TableItem *table_item = NULL;
+  for (int64_t i = 0; OB_SUCC(ret) && i < table_items_.count(); ++i) {
+    if (OB_ISNULL(table_item = table_items_.at(i))) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpect null", K(ret), K(table_item));
+    } else if (OB_FAIL(adjust_duplicated_table_name(allocator,
+                                                    *table_item,
+                                                    is_adjusted))) {
+      LOG_WARN("fail to update dup table name", K(ret), KPC(table_item));
+    } else {
+      adjusted |= is_adjusted;
     }
   }
   return ret;
@@ -1664,6 +1754,7 @@ int ObDMLStmt::formalize_relation_exprs(ObSQLSessionInfo *session_info)
     LOG_WARN("get relation exprs failed", K(ret));
   } else {
     // rel id maintenance of dependent exprs
+    subquery_exprs_.reset();
     for (int64_t i = 0; OB_SUCC(ret) && i < column_items_.count(); i++) {
       ObColumnRefRawExpr *column_expr = NULL;
       if (OB_ISNULL(column_expr = column_items_.at(i).expr_)) {
@@ -1687,6 +1778,7 @@ int ObDMLStmt::formalize_relation_exprs(ObSQLSessionInfo *session_info)
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("expr is NULL", K(ret));
       } else if (OB_FAIL(expr->formalize(session_info))) {
+        // 'formalize' method calls 'extract_info' and 'decude_type' methods inside
         LOG_WARN("failed to formalize expr", K(ret));
       } else if (OB_FAIL(expr->pull_relation_id())) {
         LOG_WARN("pull expr relation ids failed", K(ret), K(*expr));
@@ -1694,6 +1786,8 @@ int ObDMLStmt::formalize_relation_exprs(ObSQLSessionInfo *session_info)
         // zhanyue todo: adjust this.
         // Add IS_JOIN_COND flag need use expr relation_ids, here call extract_info() again.
         LOG_WARN("failed to extract info", K(*expr));
+      } else if (OB_FAIL(ObTransformUtils::extract_query_ref_expr(expr, subquery_exprs_, true))) {
+        LOG_WARN("failed to extract query ref expr", K(ret));
       }
     }
   }
@@ -1712,6 +1806,17 @@ int ObDMLStmt::formalize_stmt_expr_reference(ObRawExprFactory *expr_factory,
   } else if (OB_FAIL(get_relation_exprs(stmt_exprs))) {
     LOG_WARN("get relation exprs failed", K(ret));
   } else {
+    // SQL DEFENSIVE CODE
+    for (int64_t i = 0; OB_SUCC(ret) && i < subquery_exprs_.count(); ++i) {
+      ObQueryRefRawExpr *query_ref = subquery_exprs_.at(i);
+      if (OB_ISNULL(query_ref)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("query ref expr is null", K(ret));
+      } else if (OB_UNLIKELY(query_ref->is_explicited_reference())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("query ref expr is referenced at two different levels", K(ret));
+      }
+    }
     for (int64_t i = 0; OB_SUCC(ret) && i < stmt_exprs.count(); i++) {
       if (OB_ISNULL(stmt_exprs.at(i))) {
         ret = OB_ERR_UNEXPECTED;
@@ -1747,8 +1852,6 @@ int ObDMLStmt::formalize_stmt_expr_reference(ObRawExprFactory *expr_factory,
   }
   return ret;
 }
-
-
 
 int ObDMLStmt::formalize_child_stmt_expr_reference(ObRawExprFactory *expr_factory,
                                                    ObSQLSessionInfo *session_info)
@@ -1862,10 +1965,12 @@ int ObDMLStmt::set_sharable_expr_reference(ObRawExpr &expr, ExplicitedRefType re
       LOG_WARN("failed to find pseudo column", K(ret), K(expr));
     } else if (expr.is_query_ref_expr() &&
                !ObRawExprUtils::find_expr(get_subquery_exprs(), &expr)) {
+      // SQL DEFENSIVE CODE
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("query ref expr does not exist in the stmt", K(ret), K(expr));
     } else if (is_select_stmt() &&
                OB_FAIL(static_cast<ObSelectStmt *>(this)->check_aggr_and_winfunc(expr))) {
+      // SQL DEFENSIVE CODE
       LOG_WARN("failed to check aggr and winfunc validity", K(ret));
     }
   } else if (expr.is_exec_param_expr()) {
@@ -2056,14 +2161,6 @@ int ObDMLStmt::clear_sharable_expr_reference()
       expr->clear_explicited_referece();
     }
   }
-  for (int64_t i = 0; OB_SUCC(ret) && i < subquery_exprs_.count(); i++) {
-    if (OB_ISNULL(subquery_exprs_.at(i))) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("get unexpected null", K(ret));
-    } else {
-      subquery_exprs_.at(i)->clear_explicited_referece();
-    }
-  }
   for (int64_t i = 0; OB_SUCC(ret) && i < pseudo_column_like_exprs_.count(); i++) {
     if (OB_ISNULL(pseudo_column_like_exprs_.at(i))) {
       ret = OB_ERR_UNEXPECTED;
@@ -2078,6 +2175,7 @@ int ObDMLStmt::clear_sharable_expr_reference()
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("query ref expr is null", K(ret));
     } else {
+      query_ref->clear_explicited_referece();
       for (int64_t j = 0; OB_SUCC(ret) && j < query_ref->get_exec_params().count(); ++j) {
         ObExecParamRawExpr *exec_param = query_ref->get_exec_params().at(j);
         if (OB_ISNULL(exec_param)) {
@@ -3865,6 +3963,24 @@ int ObDMLStmt::get_sequence_exprs(ObIArray<ObRawExpr *> &exprs) const
   return ret;
 }
 
+int ObDMLStmt::get_udf_exprs(common::ObIArray<ObRawExpr *> &exprs) const
+{
+  int ret = OB_SUCCESS;
+  ObSEArray<ObRawExpr *, 8> relation_exprs;
+  if (OB_FAIL(get_relation_exprs(relation_exprs))) {
+    LOG_WARN("failed to get relation exprs", K(ret));
+  }
+  ObRawExpr *cur_expr = NULL;
+  for (int64_t i = 0; OB_SUCC(ret) && i < relation_exprs.count(); i++) {
+    if (OB_ISNULL(cur_expr = relation_exprs.at(i))) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("get null expr", K(ret));
+    } else if (OB_FAIL(ObTransformUtils::extract_udf_exprs(cur_expr, exprs))) {
+      LOG_WARN("failed to extract udf exprs", K(ret));
+    }
+  }
+  return ret;
+}
 int ObDMLStmt::find_var_assign_in_query_ctx(bool &is_found) const
 {
   int ret = OB_SUCCESS;
@@ -4440,7 +4556,7 @@ int ObDMLStmt::disable_writing_external_table(bool basic_stmt_is_dml /* defualt 
       } else if (schema::EXTERNAL_TABLE == table_item->table_type_) {
         disable_write_table = true;
       } else if (table_item->is_view_table_ && NULL != table_item->ref_query_) {
-        OZ( table_item->ref_query_->disable_writing_external_table(true) );
+        OZ( SMART_CALL(table_item->ref_query_->disable_writing_external_table(true)) );
       }
     }
   }
@@ -4453,7 +4569,7 @@ int ObDMLStmt::disable_writing_external_table(bool basic_stmt_is_dml /* defualt 
       LOG_WARN("failed to get stmt's child_stmts", K(ret));
     } else {
       for (int64_t i = 0; OB_SUCC(ret) && i < child_stmts.count(); ++i) {
-        OZ( child_stmts.at(i)->disable_writing_external_table() );
+        OZ( SMART_CALL(child_stmts.at(i)->disable_writing_external_table()) );
       }
     }
   }

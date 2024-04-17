@@ -47,6 +47,7 @@ struct ObTabletStatKey;
 
 namespace compaction
 {
+struct ObTabletSchedulePair;
 
 class ObFastFreezeChecker
 {
@@ -73,7 +74,7 @@ private:
       const int64_t memtable_create_timestamp,
       int64_t &adaptive_threshold);
 private:
-  static const int64_t FAST_FREEZE_INTERVAL_US = 120 * 1000 * 1000L;  //120s
+  static const int64_t FAST_FREEZE_INTERVAL_US = 300 * 1000 * 1000L;  //300s
   static const int64_t PRINT_LOG_INVERVAL = 2 * 60 * 1000 * 1000L; // 2m
   static const int64_t TOMBSTONE_DEFAULT_ROW_COUNT = 250000;
   static const int64_t TOMBSTONE_MAX_ROW_COUNT = 500000;
@@ -223,7 +224,7 @@ public:
       const ObMergeType merge_type,
       const int64_t &merge_snapshot_version);
   static int schedule_tablet_ddl_major_merge(
-      const share::ObLSID &ls_id,
+      ObLSHandle &ls_handle,
       ObTabletHandle &tablet_handle);
 
   int get_min_dependent_schema_version(int64_t &min_schema_version);
@@ -261,7 +262,7 @@ private:
     const bool enable_adaptive_compaction,
     bool &is_leader,
     bool &tablet_merge_finish,
-    bool &tablet_need_freeze_flag,
+    ObTabletSchedulePair &schedule_pair,
     ObCompactionTimeGuard &time_guard);
   int after_schedule_tenant_medium(
     const int64_t merge_version,
@@ -294,6 +295,9 @@ private:
     const bool &tablet_could_schedule_medium,
     const bool &could_major_merge,
     const share::ObLSID &ls_id);
+  int schedule_batch_freeze_dag(
+      const share::ObLSID &ls_id,
+      const common::ObIArray<compaction::ObTabletSchedulePair> &tablet_ids);
 public:
   static const int64_t INIT_COMPACTION_SCN = 1;
   typedef common::ObSEArray<ObGetMergeTablesResult, compaction::ObPartitionMergePolicy::OB_MINOR_PARALLEL_INFO_ARRAY_SIZE> MinorParallelResultArray;

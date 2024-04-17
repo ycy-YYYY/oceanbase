@@ -27,7 +27,7 @@
 #include "observer/ob_server_struct.h"
 #include "lib/json/ob_json_print_utils.h"
 #include "sql/optimizer/ob_optimizer_util.h"
-#include "sql/ob_select_stmt_printer.h"
+#include "sql/printer/ob_select_stmt_printer.h"
 namespace oceanbase
 {
 namespace sql
@@ -85,6 +85,7 @@ int ObTransformerCtx::add_src_hash_val(uint64_t trans_type)
   int ret = OB_SUCCESS;
   const char *str = NULL;
   if (OB_ISNULL(str = get_trans_type_string(trans_type))) {
+    ret = OB_ERR_UNEXPECTED;
     LOG_WARN("failed to convert trans type to src value", K(ret));
   } else {
     uint32_t hash_val = src_hash_val_.empty() ? 0 : src_hash_val_.at(src_hash_val_.count() - 1);
@@ -923,7 +924,11 @@ int ObTryTransHelper::recover(ObQueryCtx *query_ctx)
     LOG_WARN("unexpected null query context", K(ret), K(query_ctx));
   } else if (OB_FAIL(query_ctx->query_hint_.recover_qb_names(qb_name_counts_, query_ctx->stmt_count_))) {
     LOG_WARN("failed to revover qb names", K(ret));
+  } else if (NULL != unique_key_provider_
+             && OB_FAIL(unique_key_provider_->recover_useless_unique_for_temp_table())) {
+    LOG_WARN("failed to recover useless unique for temp table", K(ret));
   } else {
+    unique_key_provider_ = NULL;
     query_ctx->available_tb_id_ = available_tb_id_;
     query_ctx->subquery_count_ = subquery_count_;
     query_ctx->temp_table_count_ = temp_table_count_;

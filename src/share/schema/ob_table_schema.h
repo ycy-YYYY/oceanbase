@@ -166,6 +166,9 @@ enum ObTableModeFlag
   TABLE_MODE_NORMAL = 0,
   TABLE_MODE_QUEUING = 1,
   TABLE_MODE_PRIMARY_AUX_VP = 2,
+  TABLE_MODE_QUEUING_ENHANCED = 3,  // Placeholder: ENHANCED/SUPERIOR/PREMIUM will be introduced in 4.2.3 and not supported by resolver now.
+  TABLE_MODE_QUEUING_SUPERIOR = 4,
+  TABLE_MODE_QUEUING_PREMIUM = 5,
   TABLE_MODE_MAX,
 };
 
@@ -238,6 +241,24 @@ enum ObMVAvailableFlag
   IS_MV_AVAILABLE = 1,
 };
 
+enum ObTableReferencedByMVFlag
+{
+  IS_NOT_REFERENCED_BY_MV = 0,
+  IS_REFERENCED_BY_MV = 1,
+};
+
+enum ObMVEnableQueryRewriteFlag
+{
+  IS_MV_DISABLE_QUERY_REWRITE = 0,
+  IS_MV_ENABLE_QUERY_REWRITE = 1,
+};
+
+enum ObMVOnQueryComputationFlag
+{
+  IS_NOT_MV_ON_QUERY_COMPUTATION = 0,
+  IS_MV_ON_QUERY_COMPUTATION = 1,
+};
+
 struct ObTableMode {
   OB_UNIS_VERSION_V(1);
 private:
@@ -261,7 +282,13 @@ private:
   static const int32_t TM_MV_CONTAINER_TABLE_BITS = 1;
   static const int32_t TM_MV_AVAILABLE_OFFSET = 25;
   static const int32_t TM_MV_AVAILABLE_BITS = 1;
-  static const int32_t TM_RESERVED = 6;
+  static const int32_t TM_TABLE_REFERENCED_BY_MV_OFFSET = 26;
+  static const int32_t TM_TABLE_REFERENCED_BY_MV_BITS = 1;
+  static const int32_t TM_MV_ENABLE_QUERY_REWRITE_OFFSET = 27;
+  static const int32_t TM_MV_ENABLE_QUERY_REWRITE_BITS = 1;
+  static const int32_t TM_MV_ON_QUERY_COMPUTATION_OFFSET = 28;
+  static const int32_t TM_MV_ON_QUERY_COMPUTATION_BITS = 1;
+  static const int32_t TM_RESERVED = 3;
 
   static const uint32_t MODE_FLAG_MASK = (1U << TM_MODE_FLAG_BITS) - 1;
   static const uint32_t PK_MODE_MASK = (1U << TM_PK_MODE_BITS) - 1;
@@ -273,6 +300,9 @@ private:
   static const uint32_t VIEW_COLUMN_FILLED_MASK = (1U << TM_VIEW_COLUMN_FILLED_BITS) - 1;
   static const uint32_t MV_CONTAINER_TABLE_MASK = (1U << TM_MV_CONTAINER_TABLE_BITS) - 1;
   static const uint32_t MV_AVAILABLE_MASK = (1U << TM_MV_AVAILABLE_BITS) - 1;
+  static const uint32_t TABLE_REFERENCED_BY_MV_MASK = (1U << TM_TABLE_REFERENCED_BY_MV_BITS) - 1;
+  static const uint32_t MV_ENABLE_QUERY_REWRITE_MASK = (1U << TM_MV_ENABLE_QUERY_REWRITE_BITS) - 1;
+  static const uint32_t MV_ON_QUERY_COMPUTATION_MASK = (1U << TM_MV_ON_QUERY_COMPUTATION_BITS) - 1;
 public:
   ObTableMode() { reset(); }
   virtual ~ObTableMode() { reset(); }
@@ -324,6 +354,18 @@ public:
   static ObMVAvailableFlag get_mv_available_flag(int32_t table_mode)
   {
     return (ObMVAvailableFlag)((table_mode >> TM_MV_AVAILABLE_OFFSET) & MV_AVAILABLE_MASK);
+  }
+  static ObTableReferencedByMVFlag get_table_referenced_by_mv_flag(int32_t table_mode)
+  {
+      return (ObTableReferencedByMVFlag)((table_mode >> TM_TABLE_REFERENCED_BY_MV_OFFSET) & TABLE_REFERENCED_BY_MV_MASK);
+  }
+  static ObMVEnableQueryRewriteFlag get_mv_enable_query_rewrite_flag(int32_t table_mode)
+  {
+      return (ObMVEnableQueryRewriteFlag)((table_mode >> TM_MV_ENABLE_QUERY_REWRITE_OFFSET) & MV_ENABLE_QUERY_REWRITE_MASK);
+  }
+  static ObMVOnQueryComputationFlag get_mv_on_query_computation_flag(int32_t table_mode)
+  {
+      return (ObMVOnQueryComputationFlag)((table_mode >> TM_MV_ON_QUERY_COMPUTATION_OFFSET) & MV_ON_QUERY_COMPUTATION_MASK);
   }
   inline bool is_user_hidden_table() const
   { return TABLE_STATE_IS_HIDDEN_MASK & state_flag_; }
@@ -1125,6 +1167,8 @@ public:
   int set_ttl_definition(const common::ObString &ttl_definition) { return deep_copy_str(ttl_definition, ttl_definition_); }
   int set_kv_attributes(const common::ObString &kv_attributes) { return deep_copy_str(kv_attributes, kv_attributes_); }
   void set_lob_inrow_threshold(const int64_t lob_inrow_threshold) { lob_inrow_threshold_ = lob_inrow_threshold;}
+  inline void set_auto_increment_cache_size(const int64_t auto_increment_cache_size)
+  { auto_increment_cache_size_ = auto_increment_cache_size; }
 //get methods
   bool is_valid() const;
 
@@ -1215,6 +1259,7 @@ public:
   inline const common::ObString &get_ttl_definition() const { return ttl_definition_; }
   inline const common::ObString &get_kv_attributes() const { return kv_attributes_; }
   inline int64_t get_lob_inrow_threshold() const { return lob_inrow_threshold_; }
+  inline int64_t get_auto_increment_cache_size() const { return auto_increment_cache_size_; }
   bool has_check_constraint() const;
   inline bool has_constraint() const { return cst_cnt_ > 0; }
   bool is_column_in_check_constraint(const uint64_t col_id) const;
@@ -1556,7 +1601,7 @@ public:
 
 
   int get_column_schema_in_same_col_group(uint64_t column_id, uint64_t udt_set_id,
-                                          common::ObSEArray<ObColumnSchemaV2 *, 1> &column_group) const;
+                                          common::ObIArray<ObColumnSchemaV2 *> &column_group) const;
   ObColumnSchemaV2* get_xml_hidden_column_schema(uint64_t column_id, uint64_t udt_set_id) const;
   bool is_same_type_category(const ObColumnSchemaV2 &src_column,
                              const ObColumnSchemaV2 &dst_column) const;
@@ -1802,6 +1847,7 @@ protected:
 
   ObNameGeneratedType name_generated_type_;
   int64_t lob_inrow_threshold_;
+  int64_t auto_increment_cache_size_;
 
   // column group
   bool is_column_store_supported_;
@@ -2099,11 +2145,9 @@ int ObTableSchema::add_column(const ColumnType &column)
       ret = common::OB_ERR_UNEXPECTED;
       SHARE_SCHEMA_LOG(WARN, "Fail to new local_column", KR(ret));
     } else {
-      *local_column = column;
-      ret = local_column->get_err_ret();
-      local_column->set_table_id(table_id_);
-      if (OB_FAIL(ret)) {
+      if (OB_FAIL(local_column->assign(column))) {
         SHARE_SCHEMA_LOG(WARN, "failed copy assign column", KR(ret), K(column));
+      } else if (FALSE_IT(local_column->set_table_id(table_id_))) {
       } else if (!local_column->is_valid()) {
         ret = common::OB_ERR_UNEXPECTED;
         SHARE_SCHEMA_LOG(WARN, "The local column is not valid", KR(ret));

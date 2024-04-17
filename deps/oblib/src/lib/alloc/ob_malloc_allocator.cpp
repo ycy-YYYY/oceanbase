@@ -586,9 +586,7 @@ int64_t ObMallocAllocator::sync_wash(uint64_t tenant_id, uint64_t from_ctx_id, i
        i++) {
     int64_t ctx_id = (from_ctx_id + i) % ObCtxIds::MAX_CTX_ID;
     auto allocator = get_tenant_ctx_allocator(tenant_id, ctx_id);
-    if (NULL == allocator) {
-      // do-nothing
-    } else {
+    if (NULL != allocator && !(CTX_ATTR(ctx_id).disable_sync_wash_)) {
       washed_size += allocator->sync_wash(wash_size - washed_size);
     }
   }
@@ -717,18 +715,21 @@ int ObMallocAllocator::recycle_tenant_allocator(uint64_t tenant_id)
       if (NULL == ctx_allocator) {
         ctx_allocator = &ta[ctx_id];
         char first_label[AOBJECT_LABEL_SIZE + 1] = {'\0'};
-        bool has_unfree = ctx_allocator->check_has_unfree(first_label);
+        char first_bt[MAX_BACKTRACE_LENGTH] = {'\0'};
+        bool has_unfree = ctx_allocator->check_has_unfree(first_label, first_bt);
         if (has_unfree) {
           if (ObCtxIds::GLIBC == ctx_id
               && 0 == strncmp("Pl", first_label, 2)
               && pl_leaked_times_++ < 10) {
             LOG_WARN("tenant memory leak!!!", K(tenant_id), K(ctx_id),
                      "ctx_name", get_global_ctx_info().get_ctx_name(ctx_id),
-                     "label", first_label);
+                     "label", first_label,
+                     "backtrace", first_bt);
           } else {
             LOG_ERROR("tenant memory leak!!!", K(tenant_id), K(ctx_id),
                       "ctx_name", get_global_ctx_info().get_ctx_name(ctx_id),
-                      "label", first_label);
+                      "label", first_label,
+                      "backtrace", first_bt);
           }
           tas[ctx_id] = ctx_allocator;
         }

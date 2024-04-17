@@ -157,6 +157,7 @@ int ObDirectLoadInsertTabletContext::open()
       direct_load_param.runtime_only_param_.table_id_ = param_.table_id_;
       direct_load_param.runtime_only_param_.schema_version_ = param_.schema_version_;
       direct_load_param.runtime_only_param_.task_cnt_ = 1; // default value.
+      direct_load_param.runtime_only_param_.parallel_ = param_.reserved_parallel_;
       if (OB_FAIL(sstable_insert_mgr->create_tablet_direct_load(
             param_.context_id_, param_.execution_id_, direct_load_param))) {
         LOG_WARN("create tablet manager failed", K(ret));
@@ -188,6 +189,7 @@ int ObDirectLoadInsertTabletContext::close()
       LOG_WARN("fail to close tablet direct load", KR(ret), K(param_.ls_id_),
                K(param_.tablet_id_));
     } else {
+      handle_.reset();
       is_open_ = false;
     }
   }
@@ -405,7 +407,8 @@ int ObDirectLoadInsertTabletContext::close_sstable_slice(const int64_t slice_id)
     slice_info.data_tablet_id_ = param_.tablet_id_;
     slice_info.slice_id_ = slice_id;
     slice_info.context_id_ = param_.context_id_;
-    if (OB_FAIL(sstable_insert_mgr->close_sstable_slice(slice_info))) {
+    blocksstable::ObMacroDataSeq unused_seq;
+    if (OB_FAIL(sstable_insert_mgr->close_sstable_slice(slice_info, nullptr/*insert_monitor*/, unused_seq))) {
       LOG_WARN("fail to close tablet direct load", KR(ret), K(slice_id),
                K(param_.tablet_id_));
     }
@@ -428,7 +431,8 @@ int ObDirectLoadInsertTabletContext::close_lob_sstable_slice(const int64_t slice
     slice_info.data_tablet_id_ = param_.tablet_id_;
     slice_info.slice_id_ = slice_id;
     slice_info.context_id_ = param_.context_id_;
-    if (OB_FAIL(sstable_insert_mgr->close_sstable_slice(slice_info))) {
+    blocksstable::ObMacroDataSeq unused_seq;
+    if (OB_FAIL(sstable_insert_mgr->close_sstable_slice(slice_info, nullptr/*insert_monitor*/, unused_seq))) {
       LOG_WARN("fail to close tablet direct load", KR(ret), K(slice_id),
                 K(param_.tablet_id_));
     }
@@ -436,7 +440,7 @@ int ObDirectLoadInsertTabletContext::close_lob_sstable_slice(const int64_t slice
   return ret;
 }
 
-int ObDirectLoadInsertTabletContext::calc_range()
+int ObDirectLoadInsertTabletContext::calc_range(const int64_t thread_cnt)
 {
   int ret = OB_SUCCESS;
   if (IS_NOT_INIT) {
@@ -444,7 +448,7 @@ int ObDirectLoadInsertTabletContext::calc_range()
     LOG_WARN("ObDirectLoadInsertTableContext not init", KR(ret), KP(this));
   } else {
     ObTenantDirectLoadMgr *sstable_insert_mgr = MTL(ObTenantDirectLoadMgr *);
-    if (OB_FAIL(sstable_insert_mgr->calc_range(param_.ls_id_, param_.tablet_id_, true))) {
+    if (OB_FAIL(sstable_insert_mgr->calc_range(param_.ls_id_, param_.tablet_id_, thread_cnt, true))) {
       LOG_WARN("fail to calc range", KR(ret), K(param_.tablet_id_));
     } else {
       LOG_INFO("success to calc range", K(param_.tablet_id_));
@@ -488,7 +492,11 @@ int ObDirectLoadInsertTabletContext::cancel()
  * ObDirectLoadInsertTableContext
  */
 
-ObDirectLoadInsertTableContext::ObDirectLoadInsertTableContext() : is_inited_(false) {}
+ObDirectLoadInsertTableContext::ObDirectLoadInsertTableContext()
+  : allocator_("TLD_InsertTbl"), is_inited_(false)
+{
+  allocator_.set_tenant_id(MTL_ID());
+}
 
 ObDirectLoadInsertTableContext::~ObDirectLoadInsertTableContext() { destory(); }
 
@@ -607,6 +615,26 @@ int ObDirectLoadInsertTableContext::get_tablet_context(
     }
   }
   return ret;
+}
+
+void ObDirectLoadInsertTableContext::cancel()
+{
+  int ret = OB_SUCCESS;
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("ObDirectLoadInsertTableContext not init", KR(ret), KP(this));
+  } else {
+    FOREACH(iter, tablet_ctx_map_) {
+      const ObTabletID &tablet_id = iter->first;
+      ObDirectLoadInsertTabletContext *tablet_ctx = iter->second;
+      if (OB_ISNULL(tablet_ctx)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected tablet ctx is NULL", KR(ret), K(tablet_id));
+      } else if (OB_FAIL(tablet_ctx->cancel())) {
+        LOG_WARN("fail to cancel tablet ctx", KR(ret), K(tablet_id));
+      }
+    }
+  }
 }
 
 } // namespace storage

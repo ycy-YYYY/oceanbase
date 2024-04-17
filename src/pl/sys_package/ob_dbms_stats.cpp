@@ -265,6 +265,7 @@ int ObDbmsStats::gather_schema_stats(ObExecContext &ctx, ParamStore &params, ObO
       update_optimizer_gather_stat_info(NULL, &gather_stat);
       ObOptStatGatherStatList::instance().remove(gather_stat);
       task_info.completed_table_count_ ++;
+      ret = ret == OB_TABLE_NOT_EXIST ? OB_SUCCESS : ret;//skip table not exist in schema stats op.
     }
     task_info.task_end_time_ = ObTimeUtility::current_time();
     task_info.ret_code_ = ret;
@@ -420,21 +421,26 @@ int ObDbmsStats::fast_gather_index_stats(ObExecContext &ctx,
 {
   int ret = OB_SUCCESS;
   is_all_fast_gather = true;
-  ObSEArray<ObAuxTableMetaInfo, 4> simple_index_infos;
+  uint64_t index_tids[OB_MAX_INDEX_PER_TABLE + 1];
+  int64_t index_count = OB_MAX_INDEX_PER_TABLE + 1;
   share::schema::ObSchemaGetterGuard *schema_guard = ctx.get_virtual_table_ctx().schema_guard_;
-  if (OB_FAIL(get_table_index_infos(ctx, data_param.table_id_, simple_index_infos))) {
+  if (OB_FAIL(get_table_index_infos(schema_guard,
+                                    ctx.get_my_session()->get_effective_tenant_id(),
+                                    data_param.table_id_,
+                                    index_tids,
+                                    index_count))) {
     LOG_WARN("failed to get table index infos", K(ret));
   } else {
-    for (int64_t i = 0; OB_SUCC(ret) && i < simple_index_infos.count(); ++i) {
+    for (int64_t i = 0; OB_SUCC(ret) && i < index_count; ++i) {
       StatTable stat_table;
       stat_table.database_id_ = data_param.db_id_;
-      stat_table.table_id_ = simple_index_infos.at(i).table_id_;
+      stat_table.table_id_ = index_tids[i];
       ObTableStatParam index_param;
       index_param.is_index_stat_ = true;
       index_param.assign_common_property(data_param);
       bool is_fast_gather = true;
       const share::schema::ObTableSchema *index_schema = NULL;
-      if (simple_index_infos.at(i).table_id_ == data_param.table_id_) {
+      if (index_tids[i] == data_param.table_id_) {
         //do nothing, remove primary table
       } else if (OB_FAIL(parse_table_part_info(ctx, stat_table, index_param))) {
         LOG_WARN("failed to parse table part info", K(ret));
@@ -984,9 +990,9 @@ int ObDbmsStats::delete_schema_stats(ObExecContext &ctx, ParamStore &params, ObO
             LOG_WARN("failed to delete index stats", K(ret));
           } else {
             tmp_alloc.reset();
-            LOG_TRACE("Succeed to delete table stats", K(stat_param));
           }
         }
+        ret = ret == OB_TABLE_NOT_EXIST ? OB_SUCCESS : ret;//skip table not exist in schema stats op.
       }
     }
   }
@@ -1071,17 +1077,22 @@ int ObDbmsStats::delete_table_index_stats(sql::ObExecContext &ctx,
                                           const ObTableStatParam data_param)
 {
   int ret = OB_SUCCESS;
-  ObSEArray<ObAuxTableMetaInfo, 4> simple_index_infos;
-  if (OB_FAIL(get_table_index_infos(ctx, data_param.table_id_, simple_index_infos))) {
+  uint64_t index_tids[OB_MAX_INDEX_PER_TABLE + 1];
+  int64_t index_count = OB_MAX_INDEX_PER_TABLE + 1;
+  if (OB_FAIL(get_table_index_infos(ctx.get_virtual_table_ctx().schema_guard_,
+                                    ctx.get_my_session()->get_effective_tenant_id(),
+                                    data_param.table_id_,
+                                    index_tids,
+                                    index_count))) {
     LOG_WARN("failed to get table index infos", K(ret));
   } else {
-    for (int64_t i = 0; OB_SUCC(ret) && i < simple_index_infos.count(); ++i) {
+    for (int64_t i = 0; OB_SUCC(ret) && i < index_count; ++i) {
       StatTable stat_table;
       stat_table.database_id_ = data_param.db_id_;
-      stat_table.table_id_ = simple_index_infos.at(i).table_id_;
+      stat_table.table_id_ = index_tids[i];
       ObTableStatParam index_param;
       index_param.assign_common_property(data_param);
-      if (simple_index_infos.at(i).table_id_ == data_param.table_id_) {
+      if (index_tids[i] == data_param.table_id_) {
         //do nothing, remove primary table
       } else if (OB_FAIL(parse_table_part_info(ctx, stat_table, index_param))) {
         LOG_WARN("failed to parse table part info", K(ret));
@@ -1460,8 +1471,8 @@ int ObDbmsStats::export_schema_stats(ObExecContext &ctx, ParamStore &params, ObO
             LOG_WARN("failed to export table index stats", K(ret));
           } else {
             tmp_alloc.reset();
-            LOG_TRACE("succeed to export table stats", K(stat_param));
           }
+          ret = ret == OB_TABLE_NOT_EXIST ? OB_SUCCESS : ret;//skip table not exist in schema stats op.
         }
       }
     }
@@ -1543,17 +1554,22 @@ int ObDbmsStats::export_table_index_stats(sql::ObExecContext &ctx,
                                           const ObTableStatParam data_param)
 {
   int ret = OB_SUCCESS;
-  ObSEArray<ObAuxTableMetaInfo, 4> simple_index_infos;
-  if (OB_FAIL(get_table_index_infos(ctx, data_param.table_id_, simple_index_infos))) {
+  uint64_t index_tids[OB_MAX_INDEX_PER_TABLE + 1];
+  int64_t index_count = OB_MAX_INDEX_PER_TABLE + 1;
+  if (OB_FAIL(get_table_index_infos(ctx.get_virtual_table_ctx().schema_guard_,
+                                    ctx.get_my_session()->get_effective_tenant_id(),
+                                    data_param.table_id_,
+                                    index_tids,
+                                    index_count))) {
     LOG_WARN("failed to get table index infos", K(ret));
   } else {
-    for (int64_t i = 0; OB_SUCC(ret) && i < simple_index_infos.count(); ++i) {
+    for (int64_t i = 0; OB_SUCC(ret) && i < index_count; ++i) {
       StatTable stat_table;
       stat_table.database_id_ = data_param.db_id_;
-      stat_table.table_id_ = simple_index_infos.at(i).table_id_;
+      stat_table.table_id_ = index_tids[i];
       ObTableStatParam index_param;
       index_param.assign_common_property(data_param);
-      if (simple_index_infos.at(i).table_id_ == data_param.table_id_) {
+      if (index_tids[i] == data_param.table_id_) {
         //do nothing, remove primary table
       } else if (OB_FAIL(parse_table_part_info(ctx, stat_table, index_param))) {
         LOG_WARN("failed to parse table part info", K(ret));
@@ -1832,8 +1848,8 @@ int ObDbmsStats::import_schema_stats(ObExecContext &ctx, ParamStore &params, ObO
             LOG_WARN("failed to import table index stats", K(ret));
           } else {
             tmp_alloc.reset();
-            LOG_TRACE("succeed to import table stats", K(stat_param));
           }
+          ret = ret == OB_TABLE_NOT_EXIST ? OB_SUCCESS : ret;//skip table not exist in schema stats op.
         }
       }
     }
@@ -1929,17 +1945,22 @@ int ObDbmsStats::import_table_index_stats(sql::ObExecContext &ctx,
                                           const ObTableStatParam data_param)
 {
   int ret = OB_SUCCESS;
-  ObSEArray<ObAuxTableMetaInfo, 4> simple_index_infos;
-  if (OB_FAIL(get_table_index_infos(ctx, data_param.table_id_, simple_index_infos))) {
+  uint64_t index_tids[OB_MAX_INDEX_PER_TABLE + 1];
+  int64_t index_count = OB_MAX_INDEX_PER_TABLE + 1;
+  if (OB_FAIL(get_table_index_infos(ctx.get_virtual_table_ctx().schema_guard_,
+                                    ctx.get_my_session()->get_effective_tenant_id(),
+                                    data_param.table_id_,
+                                    index_tids,
+                                    index_count))) {
     LOG_WARN("failed to get table index infos", K(ret));
   } else {
-    for (int64_t i = 0; OB_SUCC(ret) && i < simple_index_infos.count(); ++i) {
+    for (int64_t i = 0; OB_SUCC(ret) && i < index_count; ++i) {
       StatTable stat_table;
       stat_table.database_id_ = data_param.db_id_;
-      stat_table.table_id_ = simple_index_infos.at(i).table_id_;
+      stat_table.table_id_ = index_tids[i];
       ObTableStatParam index_param;
       index_param.assign_common_property(data_param);
-      if (simple_index_infos.at(i).table_id_ == data_param.table_id_) {
+      if (index_tids[i] == data_param.table_id_) {
         //do nothing, remove primary table
       } else if (OB_FAIL(parse_table_part_info(ctx, stat_table, index_param))) {
         LOG_WARN("failed to parse table part info", K(ret));
@@ -2006,10 +2027,13 @@ int ObDbmsStats::lock_table_stats(sql::ObExecContext &ctx,
     stat_param.global_stat_param_.need_modify_ = true;
     stat_param.part_stat_param_.need_modify_ = true;
     stat_param.subpart_stat_param_.need_modify_ = true;
+    stat_param.no_invalidate_ = true;
     if (OB_FAIL(ObDbmsStatsLockUnlock::set_table_stats_lock(ctx, stat_param, true))) {
       LOG_WARN("failed to lock table stats", K(ret));
     } else if (OB_FAIL(lock_or_unlock_index_stats(ctx, stat_param, true))) {
       LOG_WARN("failed to lock index stats", K(ret));
+    } else if (OB_FAIL(update_stat_cache(ctx.get_my_session()->get_rpc_tenant_id(), stat_param))) {
+      LOG_WARN("failed to update stat cache", K(ret));
     } else {/*do nothing*/}
   }
   return ret;
@@ -2053,8 +2077,11 @@ int ObDbmsStats::lock_partition_stats(sql::ObExecContext &ctx,
     stat_param.global_stat_param_.need_modify_ = false;
     stat_param.part_stat_param_.need_modify_ = true;
     stat_param.subpart_stat_param_.need_modify_ = false;
+    stat_param.no_invalidate_ = true;
     if (OB_FAIL(ObDbmsStatsLockUnlock::set_table_stats_lock(ctx, stat_param, true))) {
       LOG_WARN("failed to lock table stats", K(ret));
+    } else if (OB_FAIL(update_stat_cache(ctx.get_my_session()->get_rpc_tenant_id(), stat_param))) {
+      LOG_WARN("failed to update stat cache", K(ret));
     } else {/*do nothing */}
   }
   return ret;
@@ -2111,13 +2138,17 @@ int ObDbmsStats::lock_schema_stats(sql::ObExecContext &ctx,
           stat_param.part_stat_param_.need_modify_ = true;
           stat_param.subpart_stat_param_.need_modify_ = true;
           stat_param.allocator_ = &tmp_alloc;//use the temp allocator free memory after stat lock
+          stat_param.no_invalidate_ = true;
           if (OB_FAIL(ObDbmsStatsLockUnlock::set_table_stats_lock(ctx, stat_param, true))) {
             LOG_WARN("failed to lock table stats", K(ret));
           } else if (OB_FAIL(lock_or_unlock_index_stats(ctx, stat_param, true))) {
             LOG_WARN("failed to lock index stats", K(ret));
+          } else if (OB_FAIL(update_stat_cache(ctx.get_my_session()->get_rpc_tenant_id(), stat_param))) {
+            LOG_WARN("failed to update stat cache", K(ret));
           } else {
             tmp_alloc.reset();
           }
+          ret = ret == OB_TABLE_NOT_EXIST ? OB_SUCCESS : ret;//skip table not exist in schema stats op.
         }
       }
     }
@@ -2130,17 +2161,22 @@ int ObDbmsStats::lock_or_unlock_index_stats(sql::ObExecContext &ctx,
                                             bool is_lock_stats)
 {
   int ret = OB_SUCCESS;
-  ObSEArray<ObAuxTableMetaInfo, 4> simple_index_infos;
-  if (OB_FAIL(get_table_index_infos(ctx, data_param.table_id_, simple_index_infos))) {
+  uint64_t index_tids[OB_MAX_INDEX_PER_TABLE + 1];
+  int64_t index_count = OB_MAX_INDEX_PER_TABLE + 1;
+  if (OB_FAIL(get_table_index_infos(ctx.get_virtual_table_ctx().schema_guard_,
+                                    ctx.get_my_session()->get_effective_tenant_id(),
+                                    data_param.table_id_,
+                                    index_tids,
+                                    index_count))) {
     LOG_WARN("failed to get table index infos", K(ret));
   } else {
-    for (int64_t i = 0; OB_SUCC(ret) && i < simple_index_infos.count(); ++i) {
+    for (int64_t i = 0; OB_SUCC(ret) && i < index_count; ++i) {
       StatTable stat_table;
       stat_table.database_id_ = data_param.db_id_;
-      stat_table.table_id_ = simple_index_infos.at(i).table_id_;
+      stat_table.table_id_ = index_tids[i];
       ObTableStatParam index_param;
       index_param.assign_common_property(data_param);
-      if (simple_index_infos.at(i).table_id_ == data_param.table_id_) {
+      if (index_tids[i] == data_param.table_id_) {
         //do nothing, remove primary table
       } else if (OB_FAIL(parse_table_part_info(ctx, stat_table, index_param))) {
         LOG_WARN("failed to parse table part info", K(ret));
@@ -2201,10 +2237,13 @@ int ObDbmsStats::unlock_table_stats(sql::ObExecContext &ctx,
     stat_param.global_stat_param_.need_modify_ = true;
     stat_param.part_stat_param_.need_modify_ = true;
     stat_param.subpart_stat_param_.need_modify_ = true;
+    stat_param.no_invalidate_ = true;
     if (OB_FAIL(ObDbmsStatsLockUnlock::set_table_stats_lock(ctx, stat_param, false))) {
       LOG_WARN("failed to lock table stats", K(ret));
     } else if (OB_FAIL(lock_or_unlock_index_stats(ctx, stat_param, false))) {
       LOG_WARN("failed to lock index stats", K(ret));
+    } else if (OB_FAIL(update_stat_cache(ctx.get_my_session()->get_rpc_tenant_id(), stat_param))) {
+      LOG_WARN("failed to update stat cache", K(ret));
     } else {/*do nothing*/}
   }
   return ret;
@@ -2248,8 +2287,11 @@ int ObDbmsStats::unlock_partition_stats(sql::ObExecContext &ctx,
     stat_param.global_stat_param_.need_modify_ = false;
     stat_param.part_stat_param_.need_modify_ = true;
     stat_param.subpart_stat_param_.need_modify_ = false;
+    stat_param.no_invalidate_ = true;
     if (OB_FAIL(ObDbmsStatsLockUnlock::set_table_stats_lock(ctx, stat_param, false))) {
       LOG_WARN("failed to lock table stats", K(ret));
+    } else if (OB_FAIL(update_stat_cache(ctx.get_my_session()->get_rpc_tenant_id(), stat_param))) {
+      LOG_WARN("failed to update stat cache", K(ret));
     } else {/*do nothing */}
   }
   return ret;
@@ -2306,14 +2348,18 @@ int ObDbmsStats::unlock_schema_stats(sql::ObExecContext &ctx,
           stat_param.part_stat_param_.need_modify_ = true;
           stat_param.subpart_stat_param_.need_modify_ = true;
           stat_param.allocator_ = &tmp_alloc;//use the temp allocator to free memory after stat unlock
+          stat_param.no_invalidate_ = true;
           if (OB_FAIL(ObDbmsStatsLockUnlock::set_table_stats_lock(ctx, stat_param, false))) {
             LOG_WARN("failed to lock table stats", K(ret));
           } else if (OB_FAIL(lock_or_unlock_index_stats(ctx, stat_param, false))) {
             LOG_WARN("failed to lock index stats", K(ret));
+          } else if (OB_FAIL(update_stat_cache(ctx.get_my_session()->get_rpc_tenant_id(), stat_param))) {
+            LOG_WARN("failed to update stat cache", K(ret));
           } else {
             tmp_alloc.reset();
           }
         }
+        ret = ret == OB_TABLE_NOT_EXIST ? OB_SUCCESS : ret;//skip table not exist in schema stats op.
       }
     }
   }
@@ -2515,8 +2561,8 @@ int ObDbmsStats::restore_schema_stats(sql::ObExecContext &ctx,
         LOG_WARN("failed to update stat cache", K(ret));
       } else {
         tmp_alloc.reset();
-        LOG_TRACE("Succeed to restore table stats", K(stat_param), K(specify_time));
       }
+      ret = ret == OB_TABLE_NOT_EXIST ? OB_SUCCESS : ret;//skip table not exist in schema stats op.
     }
   }
   return ret;
@@ -3203,6 +3249,7 @@ int ObDbmsStats::parse_table_part_info(ObExecContext &ctx,
     LOG_WARN("table schema is null", K(ret), K(table_schema), K(param.db_name_), K(param.tab_name_));
     LOG_USER_ERROR(OB_TABLE_NOT_EXIST, to_cstring(param.db_name_), to_cstring(param.tab_name_));
   } else if (OB_FAIL(get_table_part_infos(table_schema,
+                                          *param.allocator_,
                                           param.part_infos_,
                                           param.subpart_infos_))) {
     LOG_WARN("failed to get table part infos", K(ret));
@@ -3254,6 +3301,7 @@ int ObDbmsStats::parse_table_part_info(ObExecContext &ctx,
   } else if (OB_UNLIKELY(table_schema->is_view_table())) {
     ret = OB_TABLE_NOT_EXIST;
   } else if (OB_FAIL(get_table_part_infos(table_schema,
+                                          *param.allocator_,
                                           param.part_infos_,
                                           param.subpart_infos_))) {
     LOG_WARN("failed to get table part infos", K(ret));
@@ -3319,6 +3367,7 @@ int ObDbmsStats::parse_index_part_info(ObExecContext &ctx,
                                      param.data_table_name_))) {
     LOG_WARN("failed to write string", K(ret));
   } else if (OB_FAIL(get_table_part_infos(index_schema,
+                                          *param.allocator_,
                                           param.part_infos_,
                                           param.subpart_infos_))) {
     LOG_WARN("failed to get table part infos", K(ret));
@@ -3638,6 +3687,7 @@ int ObDbmsStats::parse_set_partition_name(ObExecContext &ctx,
     ret = OB_ERR_NOT_PARTITIONED;
     LOG_WARN("the target table is not partitioned", K(ret));
   } else if (OB_FAIL(get_table_part_infos(table_schema,
+                                          *param.allocator_,
                                           param.part_infos_,
                                           param.subpart_infos_))) {
     LOG_WARN("failed to get table part infos", K(ret));
@@ -4644,6 +4694,7 @@ int ObDbmsStats::check_is_valid_col(const ObString &src_str,
 }
 
 int ObDbmsStats::get_table_part_infos(const share::schema::ObTableSchema *table_schema,
+                                      ObIAllocator &allocator,
                                       ObIArray<PartInfo> &part_infos,
                                       ObIArray<PartInfo> &subpart_infos,
                                       OSGPartMap *part_map/*default NULL*/)
@@ -4658,6 +4709,7 @@ int ObDbmsStats::get_table_part_infos(const share::schema::ObTableSchema *table_
     /*do notthing*/
     LOG_TRACE("table is not part table", K(table_schema->get_part_level()));
   } else if (OB_FAIL(ObDbmsStatsUtils::get_part_infos(*table_schema,
+                                                      allocator,
                                                       part_infos,
                                                       subpart_infos,
                                                       part_ids,
@@ -4685,6 +4737,7 @@ int ObDbmsStats::get_part_ids_from_schema(const ObTableSchema *table_schema,
       ObSEArray<PartInfo, 4> dummy_subpart_infos;
       ObSEArray<int64_t, 4> part_ids;
       ObSEArray<int64_t, 4> subpart_ids;
+      ObArenaAllocator tmp_alloc("GetPartIds");
       if (OB_ISNULL(table_schema)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("get unexpected null", K(ret), K(table_schema));
@@ -4692,6 +4745,7 @@ int ObDbmsStats::get_part_ids_from_schema(const ObTableSchema *table_schema,
         /*do notthing*/
         LOG_TRACE("table is not part table", K(table_schema->get_part_level()));
       } else if (OB_FAIL(ObDbmsStatsUtils::get_part_infos(*table_schema,
+                                                          tmp_alloc,
                                                           dummy_part_infos,
                                                           dummy_subpart_infos,
                                                           part_ids,
@@ -5311,6 +5365,7 @@ int ObDbmsStats::gather_database_stats_job_proc(sql::ObExecContext &ctx,
   int64_t duration_time = -1;
   int64_t succeed_cnt = 0;
   bool no_auto_gather = (OB_E(EventTable::EN_LEADER_STORAGE_ESTIMATION) OB_SUCCESS) != OB_SUCCESS;
+  ObSQLSessionInfo::LockGuard query_lock_guard(ctx.get_my_session()->get_query_lock());
   if (OB_FAIL(check_statistic_table_writeable(ctx))) {
     ret = OB_SUCCESS;
     LOG_INFO("auto gather database statistics abort because of statistic table is unwriteable");
@@ -5593,13 +5648,14 @@ int ObDbmsStats::get_user_partition_table_stale_percent(
   int64_t inc_modified_count = 0;
   int64_t row_cnt = 0;
   ObSEArray<PartInfo, 4> partition_infos;
+  ObArenaAllocator tmp_alloc("GetPartStale", OB_MALLOC_NORMAL_BLOCK_SIZE, tenant_id);
   if (OB_UNLIKELY(!table_schema.is_user_table() || -1 != global_part_id)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected error", K(ret), K(table_schema.is_user_table()), K(global_part_id));
   } else if (stat_table.partition_stat_infos_.empty()) {
     // do not have any statistics
     stat_table.stale_percent_ = -1.0;
-  } else if (OB_FAIL(get_table_partition_infos(table_schema, partition_infos))) {
+  } else if (OB_FAIL(get_table_partition_infos(table_schema, tmp_alloc, partition_infos))) {
     LOG_WARN("failed to get table subpart infos", K(ret));
   } else if (OB_FAIL(ObBasicStatsEstimator::estimate_stale_partition(ctx,
                                                                      tenant_id,
@@ -5895,30 +5951,26 @@ bool ObDbmsStats::is_table_gather_global_stats(const int64_t global_id,
   return is_gather;
 }
 
-int ObDbmsStats::get_table_index_infos(sql::ObExecContext &ctx,
-                                       const int64_t table_id,
-                                       ObIArray<ObAuxTableMetaInfo> &index_infos)
+int ObDbmsStats::get_table_index_infos(share::schema::ObSchemaGetterGuard *schema_guard,
+                                       const uint64_t tenant_id,
+                                       const uint64_t table_id,
+                                       uint64_t *index_tid_arr,
+                                       int64_t &index_count)
 {
   int ret = OB_SUCCESS;
-  const share::schema::ObTableSchema *table_schema = NULL;
-  share::schema::ObSchemaGetterGuard *schema_guard = ctx.get_virtual_table_ctx().schema_guard_;
   if (OB_ISNULL(schema_guard)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected null", K(ret), K(schema_guard));
-  } else if (OB_FAIL(schema_guard->get_table_schema(
-                     ctx.get_my_session()->get_effective_tenant_id(),
-                     table_id,
-                     table_schema))) {
-    LOG_WARN("failed to get table schema", K(ret));
-  } else if (OB_ISNULL(table_schema)) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("get unexpected null", K(ret), K(table_schema));
-  } else if (share::is_oracle_mapping_real_virtual_table(table_schema->get_table_id())) {
+  } else if (share::is_oracle_mapping_real_virtual_table(table_id)) {
     // do not gather stat for oracle inner table index
-  } else if (OB_FAIL(table_schema->get_simple_index_infos(index_infos))) {
-    LOG_WARN("failed to get simple index infos", K(ret));
-  } else {
-    LOG_TRACE("Succeed to get table index infos", K(table_id), K(index_infos));
+  } else if (OB_FAIL(schema_guard->get_can_read_index_array(tenant_id,
+                                                            table_id,
+                                                            index_tid_arr,
+                                                            index_count,
+                                                            false, /*with_mv*/
+                                                            true, /*with_global_index*/
+                                                            false /*domain index*/))) {
+    LOG_WARN("failed to get can read index", K(ret));
   }
   return ret;
 }
@@ -5933,22 +5985,27 @@ int ObDbmsStats::get_index_schema(sql::ObExecContext &ctx,
   int ret = OB_SUCCESS;
   share::schema::ObSchemaGetterGuard *schema_guard = ctx.get_virtual_table_ctx().schema_guard_;
   index_schema = NULL;
-  ObSEArray<ObAuxTableMetaInfo, 4> simple_index_infos;
+  uint64_t index_tids[OB_MAX_INDEX_PER_TABLE + 1];
+  int64_t index_count = OB_MAX_INDEX_PER_TABLE + 1;
   if (OB_ISNULL(schema_guard)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected null", K(ret));
-  } else if (OB_FAIL(get_table_index_infos(ctx, data_table_id, simple_index_infos))) {
+  } else if (OB_FAIL(get_table_index_infos(ctx.get_virtual_table_ctx().schema_guard_,
+                                           ctx.get_my_session()->get_effective_tenant_id(),
+                                           data_table_id,
+                                           index_tids,
+                                           index_count))) {
     LOG_WARN("failed to get table index infos", K(ret));
   } else {
     bool found_it = false;
-    for (int64_t i = 0; OB_SUCC(ret) && !found_it && i < simple_index_infos.count(); ++i) {
+    for (int64_t i = 0; OB_SUCC(ret) && !found_it && i < index_count; ++i) {
       const share::schema::ObTableSchema *cur_index_schema = NULL;
       ObString cur_index_name;
-      if (simple_index_infos.at(i).table_id_ == data_table_id) {
+      if (index_tids[i] == data_table_id) {
         //do nothing, remove primary table
       } else if (OB_FAIL(schema_guard->get_table_schema(
                  ctx.get_my_session()->get_effective_tenant_id(),
-                 simple_index_infos.at(i).table_id_, cur_index_schema))) {
+                 index_tids[i], cur_index_schema))) {
         LOG_WARN("failed to get table schema", K(ret));
       } else if (OB_ISNULL(cur_index_schema) || OB_UNLIKELY(!cur_index_schema->is_index_table())) {
         ret = OB_ERR_UNEXPECTED;
@@ -6017,12 +6074,14 @@ int ObDbmsStats::set_param_global_part_id(ObExecContext &ctx,
 }
 
 int ObDbmsStats::get_table_partition_infos(const ObTableSchema &table_schema,
+                                           ObIAllocator &allocator,
                                            ObIArray<PartInfo> &partition_infos)
 {
   int ret = OB_SUCCESS;
   ObSEArray<PartInfo, 4> part_infos;
   ObSEArray<PartInfo, 4> subpart_infos;
   if (OB_FAIL(get_table_part_infos(&table_schema,
+                                   allocator,
                                    part_infos,
                                    subpart_infos))) {
     LOG_WARN("failed to get table part infos", K(ret));
@@ -6033,25 +6092,6 @@ int ObDbmsStats::get_table_partition_infos(const ObTableSchema &table_schema,
              OB_FAIL(partition_infos.assign(subpart_infos))) {
     LOG_WARN("failed to assign", K(ret));
   } else {/*do nothing*/}
-  return ret;
-}
-
-int ObDbmsStats::get_table_partition_map(const ObTableSchema &table_schema,
-                                         OSGPartMap &part_map)
-{
-  int ret = OB_SUCCESS;
-  if (PARTITION_LEVEL_TWO != table_schema.get_part_level()
-      && PARTITION_LEVEL_ONE != table_schema.get_part_level()) {
-  } else {
-    ObSEArray<PartInfo, 4> part_infos;
-    ObSEArray<PartInfo, 4> subpart_infos;
-    if (OB_FAIL(get_table_part_infos(&table_schema,
-                                    part_infos,
-                                    subpart_infos,
-                                    &part_map))) {
-      LOG_WARN("failed to get table part infos", K(ret));
-    }
-  }
   return ret;
 }
 
@@ -6211,19 +6251,20 @@ int ObDbmsStats::init_gather_task_info(ObExecContext &ctx,
   return ret;
 }
 
-//} else if (OB_FAIL(schema->has_all_column_group(has_all_column_group))) {
-//    LOG_WARN("failed to check has row store", K(ret));
-//  } else if (OB_FALSE_IT(has_normal_column_group = schema->is_normal_column_store_table())) {
-
 int ObDbmsStats::init_column_group_stat_param(const share::schema::ObTableSchema &table_schema,
                                               ObIArray<ObColumnGroupStatParam> &column_group_params)
 {
   int ret = OB_SUCCESS;
   ObSEArray<const ObColumnGroupSchema *, 8> column_group_metas;
   uint64_t data_version = 0;
+  bool is_column_store = false;
   if (OB_FAIL(GET_MIN_DATA_VERSION(table_schema.get_tenant_id(), data_version))) {
     LOG_WARN("fail to get tenant data version", KR(ret));
   } else if (data_version < DATA_VERSION_4_3_0_0) {
+    //do nothing
+  } else if (OB_FAIL(table_schema.get_is_column_store(is_column_store))) {
+    LOG_WARN("failed to get is column store", K(ret));
+  } else if (!is_column_store) {
     //do nothing
   } else if (OB_FAIL(table_schema.get_store_column_groups(column_group_metas))) { // get cg metas without empty default cg
     LOG_WARN("failed to get column group metas", K(ret));

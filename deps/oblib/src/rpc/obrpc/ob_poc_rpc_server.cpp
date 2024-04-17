@@ -39,6 +39,22 @@ bool __attribute__((weak)) enable_pkt_nio(bool start_as_client) {
 int64_t  __attribute__((weak)) get_max_rpc_packet_size() {
   return OB_MAX_RPC_PACKET_LENGTH;
 }
+void __attribute__((weak)) stream_rpc_register(const int64_t pkt_id, int64_t send_time_us)
+{
+  UNUSED(pkt_id);
+  UNUSED(send_time_us);
+  RPC_LOG_RET(WARN, OB_ERR_UNEXPECTED, "should not reach here");
+}
+void __attribute__((weak)) stream_rpc_unregister(const int64_t pkt_id)
+{
+  UNUSED(pkt_id);
+  RPC_LOG_RET(WARN, OB_ERR_UNEXPECTED, "should not reach here");
+}
+int __attribute__((weak)) stream_rpc_reverse_probe(const ObRpcReverseKeepaliveArg& reverse_keepalive_arg)
+{
+  UNUSED(reverse_keepalive_arg);
+  return OB_ERR_UNEXPECTED;
+}
 }; // end namespace obrpc
 }; // end namespace oceanbase
 
@@ -52,6 +68,7 @@ int ObPocServerHandleContext::create(int64_t resp_id, const char* buf, int64_t s
   int ret = OB_SUCCESS;
   ObPocServerHandleContext* ctx = NULL;
   ObRpcPacket tmp_pkt;
+  char rpc_timeguard_str[ObPocRpcServer::RPC_TIMEGUARD_STRING_SIZE] = {'\0'};
   ObTimeGuard timeguard("rpc_request_create", 200 * 1000);
   const int64_t alloc_payload_sz = sz;
   if (OB_FAIL(tmp_pkt.decode(buf, sz))) {
@@ -70,7 +87,8 @@ int ObPocServerHandleContext::create(int64_t resp_id, const char* buf, int64_t s
       if (OB_UNLIKELY(tmp_pkt.get_group_id() == OBCG_ELECTION)) {
         tenant_id = OB_SERVER_TENANT_ID;
       }
-      timeguard.click();
+      IGNORE_RETURN snprintf(rpc_timeguard_str, sizeof(rpc_timeguard_str), "sz=%ld,pcode=%x,id=%ld", sz, pcode, tenant_id);
+      timeguard.click(rpc_timeguard_str);
       ObRpcMemPool* pool = ObRpcMemPool::create(tenant_id, pcode_label, pool_size);
       void *temp = NULL;
 
@@ -105,6 +123,10 @@ int ObPocServerHandleContext::create(int64_t resp_id, const char* buf, int64_t s
           }
           int64_t receive_ts = ObTimeUtility::current_time();
           pkt->set_receive_ts(receive_ts);
+          int64_t pkt_id = pn_get_pkt_id(resp_id);
+          if (OB_LIKELY(pkt_id >= 0)) {
+            pkt->set_packet_id(pkt_id);
+          }
           pkt->set_content(packet_data, tmp_pkt.get_clen());
           req->set_server_handle_context(ctx);
           req->set_packet(pkt);
@@ -114,8 +136,9 @@ int ObPocServerHandleContext::create(int64_t resp_id, const char* buf, int64_t s
 
           const int64_t fly_ts = receive_ts - pkt->get_timestamp();
           if (fly_ts > oceanbase::common::OB_MAX_PACKET_FLY_TS && TC_REACH_TIME_INTERVAL(100 * 1000)) {
+            ObAddr peer = ctx->get_peer();
             RPC_LOG(WARN, "PNIO packet wait too much time between proxy and server_cb", "pcode", pkt->get_pcode(),
-                    "fly_ts", fly_ts, "send_timestamp", pkt->get_timestamp());
+                    "fly_ts", fly_ts, "send_timestamp", pkt->get_timestamp(), K(peer), K(sz));
           }
         }
       }
@@ -131,13 +154,21 @@ void ObPocServerHandleContext::resp(ObRpcPacket* pkt)
   char reserve_buf[2048]; // reserve stack memory for response packet buf
   char* buf = reserve_buf;
   int64_t sz = 0;
+  char rpc_timeguard_str[ObPocRpcServer::RPC_TIMEGUARD_STRING_SIZE] = {'\0'};
+  ObTimeGuard timeguard("rpc_resp", 10 * 1000);
   if (NULL == pkt) {
     // do nothing
   } else if (OB_FAIL(rpc_encode_ob_packet(pool_, pkt, buf, sz, sizeof(reserve_buf)))) {
     RPC_LOG(WARN, "rpc_encode_ob_packet fail", KP(pkt), K(sz));
     buf = NULL;
     sz = 0;
+  } else {
+    IGNORE_RETURN snprintf(rpc_timeguard_str, sizeof(rpc_timeguard_str), "sz=%ld,pcode=%x,id=%ld",
+                          sz,
+                          pkt->get_pcode(),
+                          pkt->get_tenant_id());
   }
+  timeguard.click(rpc_timeguard_str);
   if ((sys_err = pn_resp(resp_id_, buf, sz, resp_expired_abs_us_)) != 0) {
     RPC_LOG(WARN, "pn_resp fail", K(resp_id_), K(sys_err));
   }
@@ -186,13 +217,7 @@ void ObPocServerHandleContext::set_peer_unsafe()
 {
   struct sockaddr_storage sock_addr;
   if (0 == pn_get_peer(resp_id_, &sock_addr)) {
-    if (AF_INET == sock_addr.ss_family) {
-      struct sockaddr_in *sin = reinterpret_cast<struct sockaddr_in *>(&sock_addr);
-      peer_.set_ipv4_addr(ntohl(sin->sin_addr.s_addr), ntohs(sin->sin_port));
-    } else if (AF_INET6 == sock_addr.ss_family) {
-      struct sockaddr_in6 *sin6 = reinterpret_cast<struct sockaddr_in6 *>(&sock_addr);
-      peer_.set_ipv6_addr(&sin6->sin6_addr.s6_addr, ntohs(sin6->sin6_port));
-    }
+    peer_.from_sockaddr(&sock_addr);
   }
 }
 

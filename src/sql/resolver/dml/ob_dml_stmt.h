@@ -695,7 +695,8 @@ public:
   int iterate_joined_table_expr(JoinedTable *joined_table,
                                 ObStmtExprVisitor &visitor) const;
 
-  int update_stmt_table_id(const ObDMLStmt &other);
+  int update_stmt_table_id(ObIAllocator *allocator, const ObDMLStmt &other);
+  int adjust_duplicated_table_names(ObIAllocator &allocator, bool &adjusted);
   int set_table_item_qb_name();
   int adjust_qb_name(ObIAllocator *allocator,
                      const ObString &src_qb_name,
@@ -1083,6 +1084,7 @@ public:
                         const common::ObString seq_action, // NEXTVAL or CURRVAL
                         const uint64_t seq_id) const;
   int get_sequence_exprs(common::ObIArray<ObRawExpr *> &exprs) const;
+  int get_udf_exprs(common::ObIArray<ObRawExpr *> &exprs) const;
   int has_rand(bool &has_rand) const { return has_special_expr(CNT_RAND_FUNC, has_rand); }
   virtual int has_special_expr(const ObExprInfoFlag, bool &has) const;
   const TransposeItem *get_transpose_item() const { return transpose_item_; }
@@ -1179,7 +1181,9 @@ protected:
   int update_table_item_id(const ObDMLStmt &other,
                            const TableItem &old_item,
                            const bool has_bit_index,
-                           TableItem &new_item);
+                           TableItem &new_item,
+                           ObIAllocator *allocator);
+  int adjust_duplicated_table_name(ObIAllocator &allocator, TableItem &table_item, bool &adjusted);
 
 protected:
   /**

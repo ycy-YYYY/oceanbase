@@ -1523,6 +1523,7 @@ int ObTableSchema::assign(const ObTableSchema &src_schema)
       table_flags_ = src_schema.table_flags_;
       name_generated_type_ = src_schema.name_generated_type_;
       lob_inrow_threshold_ = src_schema.lob_inrow_threshold_;
+      auto_increment_cache_size_ = src_schema.auto_increment_cache_size_;
       is_column_store_supported_ = src_schema.is_column_store_supported_;
       max_used_column_group_id_ = src_schema.max_used_column_group_id_;
       mlog_tid_ = src_schema.mlog_tid_;
@@ -2872,7 +2873,7 @@ ObColumnSchemaV2* ObTableSchema::get_xml_hidden_column_schema(uint64_t column_id
 }
 
 int ObTableSchema::get_column_schema_in_same_col_group(uint64_t column_id, uint64_t udt_set_id,
-                                                       common::ObSEArray<ObColumnSchemaV2 *, 1> &column_group) const
+                                                       common::ObIArray<ObColumnSchemaV2 *> &column_group) const
 {
   int ret = OB_SUCCESS;
   for (int64_t i = 0; udt_set_id > 0 && OB_SUCC(ret) && i < column_cnt_; ++i) {
@@ -3337,6 +3338,7 @@ void ObTableSchema::reset()
   kv_attributes_.reset();
   name_generated_type_ = GENERATED_TYPE_UNKNOWN;
   lob_inrow_threshold_ = OB_DEFAULT_LOB_INROW_THRESHOLD;
+  auto_increment_cache_size_ = 0;
 
   is_column_store_supported_ = false;
   max_used_column_group_id_ = COLUMN_GROUP_START_ID;
@@ -4486,6 +4488,10 @@ int ObTableSchema::check_alter_column_type(const ObColumnSchemaV2 &src_column,
           is_offline = true;
         }
       }
+      if ((src_meta.is_signed_integer() && dst_meta.is_unsigned_integer())
+        || (src_meta.is_unsigned_integer() && dst_meta.is_signed_integer())) {
+          is_offline = true;
+      }
       if (!src_meta.is_lob_storage() && dst_meta.is_lob_storage()) {
         is_offline = true;
       }
@@ -4874,7 +4880,8 @@ int ObTableSchema::check_is_exactly_same_type(const ObColumnSchemaV2 &src_column
           is_same = true;
         }
       } else {
-        if (src_column.get_data_precision() == dst_column.get_data_precision() &&
+        if ((ob_is_int_tc(src_column.get_data_type()) ||
+            src_column.get_data_precision() == dst_column.get_data_precision()) &&
             src_column.get_data_scale() == dst_column.get_data_scale()) {
           is_same = true;
         }
@@ -6007,8 +6014,10 @@ bool ObTableSchema::has_generated_and_partkey_column() const
       if (generated_columns_.has_member(i)) {
         uint64_t generated_column_id = i + OB_APP_MIN_COLUMN_ID;
         const ObColumnSchemaV2 *generated_column = get_column_schema(generated_column_id);
-        if (generated_column->is_tbl_part_key_column()) {
-          result = true;
+        if (OB_NOT_NULL(generated_column)) {
+          if (generated_column->is_tbl_part_key_column()) {
+            result = true;
+          }
         }
       }
     }
@@ -6161,8 +6170,8 @@ int ObSimpleTableSchemaV2::get_index_name(const ObString &table_name, ObString &
     pos = strlen(OB_INDEX_PREFIX);
 
     while (NULL != table_name.ptr() &&
-        isdigit(*(table_name.ptr() + pos)) &&
-        pos < table_name.length()) {
+        pos < table_name.length() &&
+        isdigit(*(table_name.ptr() + pos))) {
       ++pos;
     }
     if (pos == table_name.length()) {
@@ -6359,7 +6368,8 @@ int64_t ObTableSchema::to_string(char *buf, const int64_t buf_len) const
     K_(max_used_column_group_id),
     K_(column_group_cnt),
     "column_group_array", ObArrayWrap<ObColumnGroupSchema* >(column_group_arr_, column_group_cnt_),
-    K_(mlog_tid));
+    K_(mlog_tid),
+    K_(auto_increment_cache_size));
   J_OBJ_END();
 
   return pos;
@@ -6639,6 +6649,7 @@ OB_DEF_SERIALIZE(ObTableSchema)
   }();
 
   OB_UNIS_ENCODE(mlog_tid_);
+  OB_UNIS_ENCODE(auto_increment_cache_size_);
   return ret;
 }
 
@@ -7067,6 +7078,7 @@ OB_DEF_DESERIALIZE(ObTableSchema)
   }();
 
   OB_UNIS_DECODE(mlog_tid_);
+  OB_UNIS_DECODE(auto_increment_cache_size_);
   return ret;
 }
 
@@ -7216,6 +7228,7 @@ OB_DEF_SERIALIZE_SIZE(ObTableSchema)
   OB_UNIS_ADD_LEN(is_column_store_supported_);
   OB_UNIS_ADD_LEN(max_used_column_group_id_);
   OB_UNIS_ADD_LEN(mlog_tid_);
+  OB_UNIS_ADD_LEN(auto_increment_cache_size_);
   return len;
 }
 
@@ -7984,7 +7997,12 @@ int ObColumnIterByPrevNextID::next(const ObColumnSchemaV2 *&column_schema)
     }
   } else {
     if (OB_ISNULL(last_column_schema_)) {
-      column_schema = get_first_column();
+      if (table_schema_.is_sys_view() && 0 == table_schema_.get_column_count()) {
+        is_end_ = true;
+        ret = OB_ITER_END;
+      } else {
+        column_schema = get_first_column();
+      }
     } else if (BORDER_COLUMN_ID == last_column_schema_->get_next_column_id()) {
       is_end_ = true;
       ret = OB_ITER_END;
@@ -8652,6 +8670,7 @@ int ObTableSchema::get_column_group_index(const share::schema::ObColumnParam &pa
       }
     } else {
       // TODO: check the following
+      // TODO: after check, also see ObStorageSchema::get_column_group_index
       // common::OB_HIDDEN_LOGICAL_ROWID_COLUMN_ID == column_id
       // common::OB_HIDDEN_GROUP_IDX_COLUMN_ID == column_id
       cg_idx = -1;
@@ -8671,9 +8690,9 @@ int ObTableSchema::get_column_group_index(const share::schema::ObColumnParam &pa
           ret = OB_ERR_UNEXPECTED;
           LOG_WARN("Unexpected column group type", K(ret), KPC(column_group_arr_[i]));
         }
-      } else if (1 < cg_column_cnt) {
+      } else if (1 < cg_column_cnt || column_group_arr_[i]->get_column_group_type() != ObColumnGroupType::SINGLE_COLUMN_GROUP) {
         iter_cg_idx++;
-        // ignore column group with more than one column
+        // ignore column group with more than one column or not each column group cg
       } else if (OB_ISNULL(cg_column_ids = column_group_arr_[i]->get_column_ids())) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("Unexpected error for null column ids", K(ret), KPC(column_group_arr_[i]));

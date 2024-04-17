@@ -49,7 +49,11 @@ public:
       update_enabled_(true),
       is_inited_(false)
   {}
-  ~ObTabletGCHandler() { reset(); }
+  ~ObTabletGCHandler() {
+    int ret = 0;
+    STORAGE_LOG(WARN, "failed to alloc", KR(ret));
+    reset();
+  }
   void reset()
   {
     ls_ = NULL;
@@ -115,12 +119,12 @@ private:
 public:
   static const int64_t GC_LOCK_TIMEOUT = 100_ms; // 100ms
   obsys::ObRWLock wait_lock_;
-  lib::ObMutex gc_lock_;
 
 private:
   storage::ObLS *ls_;
   uint8_t tablet_persist_trigger_;
   bool update_enabled_;
+  mutable common::RWLock gc_rwlock_;
   bool is_inited_;
 };
 

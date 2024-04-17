@@ -23,9 +23,7 @@
 #include "share/ob_lob_access_utils.h"
 #include "observer/mysql/obmp_stmt_prexecute.h"
 #include "src/pl/ob_pl_user_type.h"
-#ifdef OB_BUILD_ORACLE_XML
 #include "sql/engine/expr/ob_expr_xml_func_helper.h"
-#endif
 
 namespace oceanbase
 {
@@ -173,6 +171,11 @@ int ObSyncCmdDriver::response_result(ObMySQLResultSet &result)
   } else if (is_prexecute_) {
     if (OB_FAIL(response_query_header(result, false, false , // in prexecute , has_more_result and has_ps out is no matter, it will be recalc
                                       true))) {
+      // need close result set
+      int close_ret = OB_SUCCESS;
+      if (OB_SUCCESS != (close_ret = result.close())) {
+        LOG_WARN("close result failed", K(close_ret));
+      }
       LOG_WARN("prexecute response query head fail. ", K(ret));
     }
   }
@@ -335,10 +338,9 @@ int ObSyncCmdDriver::response_query_result(ObMySQLResultSet &result)
       } else if ((value.is_lob() || value.is_lob_locator() || value.is_json() || value.is_geometry())
                   && OB_FAIL(process_lob_locator_results(value, result))) {
         LOG_WARN("convert lob locator to longtext failed", K(ret));
-#ifdef OB_BUILD_ORACLE_XML
-      } else if (value.is_user_defined_sql_type() && OB_FAIL(ObXMLExprHelper::process_sql_udt_results(value, result))) {
+      } else if ((value.is_user_defined_sql_type() || value.is_collection_sql_type() || value.is_geometry()) &&
+                 OB_FAIL(ObXMLExprHelper::process_sql_udt_results(value, result))) {
         LOG_WARN("convert udt to client format failed", K(ret), K(value.get_udt_subschema_id()));
-#endif
       }
     }
 

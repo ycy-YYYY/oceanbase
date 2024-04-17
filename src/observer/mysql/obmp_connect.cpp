@@ -607,7 +607,7 @@ int ObMPConnect::load_privilege_info(ObSQLSessionInfo &session)
           } else if (OB_FAIL(ObSQLUtils::check_and_convert_db_name(
                       cs_type, perserve_lettercase, db_name))) {
             LOG_WARN("fail to check and convert database name", K(db_name), K(ret));
-          } else if (OB_FAIL(ObSQLUtils::cvt_db_name_to_org(schema_guard, &session, db_name))) {
+          } else if (OB_FAIL(ObSQLUtils::cvt_db_name_to_org(schema_guard, &session, db_name, NULL/*allocator*/))) {
             LOG_WARN("fail to convert db name to org");
           } else {
             login_info.db_ = db_name;
@@ -1407,14 +1407,25 @@ int ObMPConnect::get_tenant_id(ObSMConnection &conn, uint64_t &tenant_id)
       LOG_WARN("extract_tenant_id failed", K(ret), K_(tenant_name));
     }
   }
-  if (OB_SUCC(ret) && !is_sys_tenant(tenant_id)) {
+  if (OB_SUCC(ret)) {
     if (is_meta_tenant(tenant_id)) {
       ret = OB_NOT_SUPPORTED;
       LOG_WARN("can't login meta tenant", KR(ret), K_(tenant_name), K(tenant_id));
       LOG_USER_ERROR(OB_NOT_SUPPORTED, "login meta tenant");
+    } else if (OB_ISNULL(GCTX.schema_service_) || OB_ISNULL(GCTX.ob_service_)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("schema_service or ob_service is NULL", KR(ret), K(tenant_id));
     } else if (!GCTX.schema_service_->is_tenant_refreshed(tenant_id)) {
-      ret = OB_SERVER_IS_INIT;
-      LOG_WARN("tenant schema not refreshed yet", KR(ret), K(tenant_id));
+      bool is_empty = false;
+      if (is_sys_tenant(tenant_id)
+          && OB_FAIL(GCTX.ob_service_->check_server_empty(is_empty))) {
+        LOG_WARN("fail to check server is empty", KR(ret));
+      } else if (is_sys_tenant(tenant_id) && is_empty) {
+          //in bootstrap, we could use sys to login
+      } else {
+        ret = OB_SERVER_IS_INIT;
+        LOG_WARN("tenant schema not refreshed yet", KR(ret), K(tenant_id));
+      }
     }
   }
   return ret;
@@ -1964,7 +1975,7 @@ int ObMPConnect::verify_connection(const uint64_t tenant_id) const
         } else if (Worker::CompatMode::MYSQL == compat_mode) {
           check_max_sess = user_name_.compare(OB_SYS_USER_NAME) != 0;
         } else if (Worker::CompatMode::ORACLE == compat_mode) {
-          check_max_sess = user_name_.compare(OB_ORA_SYS_USER_NAME) != 0;
+          check_max_sess = user_name_.case_compare(OB_ORA_SYS_USER_NAME) != 0;
         }
       }
       if (OB_SUCC(ret) && check_max_sess) {
@@ -2269,4 +2280,3 @@ int ObMPConnect::set_client_version(ObSMConnection &conn)
   }
   return ret;
 }
-

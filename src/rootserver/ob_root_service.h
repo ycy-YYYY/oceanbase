@@ -423,9 +423,6 @@ public:
       const ObIArray<ObAddr> &servers,
       const ObZone &zone);
 
-  // not implemented rpc, helper function for rs rpc processor define.
-  int not_implement();
-
   int execute_bootstrap(const obrpc::ObBootstrapArg &arg);
 #ifdef OB_BUILD_TDE_SECURITY
   int check_sys_tenant_initial_master_key_valid();
@@ -817,6 +814,8 @@ public:
   int try_add_dep_infos_for_synonym_batch(const obrpc::ObTryAddDepInofsForSynonymBatchArg &arg);
 #ifdef OB_BUILD_TDE_SECURITY
   int handle_get_root_key(const obrpc::ObRootKeyArg &arg, obrpc::ObRootKeyResult &result);
+  int reload_master_key(const obrpc::ObReloadMasterKeyArg &arg,
+                        obrpc::ObReloadMasterKeyResult &result);
 #endif
 private:
 #ifdef OB_BUILD_TDE_SECURITY
@@ -905,10 +904,13 @@ private:
 
   int check_tx_share_memory_limit_(obrpc::ObAdminSetConfigItem &item);
   int check_memstore_limit_(obrpc::ObAdminSetConfigItem &item);
+  int check_tenant_memstore_limit_(obrpc::ObAdminSetConfigItem &item);
   int check_tx_data_memory_limit_(obrpc::ObAdminSetConfigItem &item);
   int check_mds_memory_limit_(obrpc::ObAdminSetConfigItem &item);
   int check_freeze_trigger_percentage_(obrpc::ObAdminSetConfigItem &item);
   int check_write_throttle_trigger_percentage(obrpc::ObAdminSetConfigItem &item);
+  int check_data_disk_write_limit_(obrpc::ObAdminSetConfigItem &item);
+  int check_data_disk_usage_limit_(obrpc::ObAdminSetConfigItem &item);
 private:
   static const int64_t OB_MAX_CLUSTER_REPLICA_COUNT = 10000000;
   static const int64_t OB_ROOT_SERVICE_START_FAIL_COUNT_UPPER_LIMIT = 5;

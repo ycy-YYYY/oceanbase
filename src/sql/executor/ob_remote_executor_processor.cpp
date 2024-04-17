@@ -105,10 +105,8 @@ int ObRemoteBaseExecuteP<T>::base_before_process(int64_t tenant_schema_version,
   if (OB_FAIL(ret)) {
     //do nothing
   } else if (sys_schema_version > sys_local_version) {
-    if (OB_FAIL(gctx_.schema_service_->async_refresh_schema(
-                OB_SYS_TENANT_ID, sys_schema_version))) {
-      LOG_WARN("fail to push back effective_tenant_id", K(ret),
-               K(sys_schema_version), K(sys_local_version));
+    if (OB_FAIL(try_refresh_schema_(OB_SYS_TENANT_ID, sys_schema_version, session_info->is_inner()))) {
+      LOG_WARN("fail to try refresh systenant schema", KR(ret), K(sys_schema_version), K(sys_local_version));
     }
   }
 
@@ -135,9 +133,9 @@ int ObRemoteBaseExecuteP<T>::base_before_process(int64_t tenant_schema_version,
       } else if (tenant_schema_version > tenant_local_version) {
         // The local schema version is behind. At this point,
         // you need to refresh the schema version and reacquire schema_guard
-        if (OB_FAIL(gctx_.schema_service_->async_refresh_schema(tenant_id, tenant_schema_version))) {
-          LOG_WARN("fail to push back effective_tenant_id", K(ret), K(tenant_schema_version),
-              K(tenant_id), K(tenant_local_version));
+        if (OB_FAIL(try_refresh_schema_(tenant_id, tenant_schema_version, session_info->is_inner()))) {
+          LOG_WARN("fail to try refresh tenant schema", KR(ret), K(tenant_id),
+                    K(tenant_schema_version), K(tenant_local_version));
         } else if (OB_FAIL(gctx_.schema_service_->get_tenant_schema_guard(
             tenant_id, schema_guard_, tenant_schema_version, sys_schema_version))) {
           LOG_WARN("fail to get schema guard", K(ret), K(tenant_schema_version), K(sys_schema_version));
@@ -310,7 +308,7 @@ int ObRemoteBaseExecuteP<T>::sync_send_result(ObExecContext &exec_ctx,
           } else {
             has_send_result_ = true;
             // override error code
-            if (OB_FAIL(ObRpcProcessor<T>::flush(THIS_WORKER.get_timeout_remain()))) {
+            if (OB_FAIL(ObRpcProcessor<T>::flush(THIS_WORKER.get_timeout_remain(), &ObRpcProcessor<T>::arg_.get_ctrl_server()))) {
               LOG_WARN("fail to flush", K(ret));
             } else {
               // 超过1个scanner的情况，每次发送都打印一条日志
@@ -567,7 +565,14 @@ void ObRemoteBaseExecuteP<T>::record_sql_audit_and_plan_stat(
       audit_record.seq_ = 0;  //don't use now
       audit_record.status_ =
           (OB_SUCCESS == ret || common::OB_ITER_END == ret) ? obmysql::REQUEST_SUCC : ret;
-      session->get_cur_sql_id(audit_record.sql_id_, OB_MAX_SQL_ID_LENGTH + 1);
+      if (OB_NOT_NULL(plan)) {
+        const ObString &sql_id = plan->get_sql_id_string();
+        int64_t length = sql_id.length();
+        MEMCPY(audit_record.sql_id_, sql_id.ptr(), std::min(length, OB_MAX_SQL_ID_LENGTH));
+        audit_record.sql_id_[OB_MAX_SQL_ID_LENGTH] = '\0';
+      } else {
+        session->get_cur_sql_id(audit_record.sql_id_, OB_MAX_SQL_ID_LENGTH + 1);
+      }
       audit_record.db_id_ = session->get_database_id();
       audit_record.execution_id_ = session->get_current_execution_id();
       audit_record.client_addr_ = session->get_client_addr();
@@ -650,6 +655,7 @@ int ObRemoteBaseExecuteP<T>::execute_with_sql(ObRemoteTask &task)
   // 设置诊断功能环境
   if (OB_SUCC(ret)) {
     ObSessionStatEstGuard stat_est_guard(session->get_effective_tenant_id(), session->get_sessid());
+    SQL_INFO_GUARD(task.get_remote_sql_info()->remote_sql_, session->get_cur_sql_id());
     // 初始化ObTask的执行环节
     //
     //
@@ -831,6 +837,43 @@ void ObRemoteBaseExecuteP<T>::base_cleanup()
   return;
 }
 
+template<typename T>
+int ObRemoteBaseExecuteP<T>::try_refresh_schema_(const uint64_t tenant_id,
+                                                 const int64_t schema_version,
+                                                 const bool is_inner_sql)
+{
+  int ret = OB_SUCCESS;
+  const int64_t timeout_remain = THIS_WORKER.get_timeout_remain();
+  if (OB_UNLIKELY(OB_INVALID_ID == tenant_id)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("arg is invalid", KR(ret), K(tenant_id));
+  } else if (OB_UNLIKELY(timeout_remain <= 0)) {
+    ret = OB_TIMEOUT;
+    LOG_WARN("THIS_WORKER is timeout", KR(ret), K(tenant_id));
+  } else if (OB_ISNULL(gctx_.schema_service_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("schema service is NULL", KR(ret), K(tenant_id));
+  } else {
+    const int64_t orig_timeout_ts = THIS_WORKER.get_timeout_ts();
+    const int64_t try_refresh_time = is_inner_sql ? timeout_remain : std::min(10 * 1000L, timeout_remain);
+    THIS_WORKER.set_timeout_ts(ObTimeUtility::current_time() + try_refresh_time);
+    if (OB_FAIL(gctx_.schema_service_->async_refresh_schema(
+                tenant_id, schema_version))) {
+      LOG_WARN("fail to refresh schema", KR(ret), K(tenant_id),
+                                         K(schema_version), K(try_refresh_time));
+    }
+    THIS_WORKER.set_timeout_ts(orig_timeout_ts);
+    if (OB_TIMEOUT == ret
+        && THIS_WORKER.is_timeout_ts_valid()
+        && !THIS_WORKER.is_timeout()) {
+      ret = OB_ERR_WAIT_REMOTE_SCHEMA_REFRESH;
+      LOG_WARN("fail to refresh schema in try refresh time", KR(ret), K(tenant_id),
+                K(schema_version), K(try_refresh_time));
+    }
+  }
+  return ret;
+}
+
 int ObRpcRemoteExecuteP::init()
 {
   int ret = OB_SUCCESS;
@@ -911,6 +954,7 @@ int ObRpcRemoteExecuteP::process()
     ObSessionStatEstGuard stat_est_guard(
         session->get_effective_tenant_id(),
         session->get_sessid());
+    SQL_INFO_GUARD(task.get_sql_string(), session->get_cur_sql_id());
     // 初始化ObTask的执行环节
     //
     //

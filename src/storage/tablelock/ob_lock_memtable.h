@@ -126,7 +126,7 @@ public:
 
   // =========== INHERITED FROM ObCommonCheckPoint ==========
   virtual share::SCN get_rec_scn();
-  virtual int flush(share::SCN recycle_scn, bool need_freeze = true);
+  virtual int flush(share::SCN recycle_scn, int64_t trace_id, bool need_freeze = true);
 
   virtual ObTabletID get_tablet_id() const;
 
@@ -203,6 +203,8 @@ private:
   int unregister_from_deadlock_detector_(const ObTableLockOp &lock_op);
 
   int check_tablet_write_allow_(const ObTableLockOp &lock_op);
+  int get_lock_wait_expire_ts_(const int64_t lock_wait_start_ts);
+  int check_and_set_tx_lock_timeout_(const memtable::ObMvccAccessCtx &acc_ctx);
 private:
   typedef common::SpinRWLock RWLock;
   typedef common::SpinRLockGuard RLockGuard;

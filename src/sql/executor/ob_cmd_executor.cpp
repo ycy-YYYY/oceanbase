@@ -511,10 +511,15 @@ int ObCmdExecutor::execute(ObExecContext &ctx, ObICmd &cmd)
         break;
       }
       case stmt::T_EXECUTE: {
-        // ps文本模式应该要返回结果，不能定义为cmd
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("ps text shoudle be handled as normal query, not cmd", K(ret));
-        // DEFINE_EXECUTE_CMD(ObExecuteStmt, ObExecuteExecutor);
+        // only call procedure run this logic, text ps mode execute call procedure,
+        // if procedure has out param, it should return result to argument
+        ObExecuteStmt &stmt = *(static_cast<ObExecuteStmt*>(&cmd));
+        if (stmt::T_CALL_PROCEDURE != stmt.get_prepare_type()) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("ps text shoudle be handled as normal query, not cmd", K(ret));
+        } else {
+          DEFINE_EXECUTE_CMD(ObExecuteStmt, ObExecuteExecutor);
+        }
         break;
       }
       case stmt::T_DEALLOCATE: {
@@ -1039,6 +1044,10 @@ int ObCmdExecutor::execute(ObExecContext &ctx, ObICmd &cmd)
       case stmt::T_CANCEL_CLONE: {
         DEFINE_EXECUTE_CMD(ObCancelCloneStmt, ObCancelCloneExecutor);
         break;
+       }
+      case stmt::T_TRANSFER_PARTITION: {
+        DEFINE_EXECUTE_CMD(ObTransferPartitionStmt, ObTransferPartitionExecutor);
+        break;
       }
       case stmt::T_CS_DISKMAINTAIN:
       case stmt::T_TABLET_CMD:
@@ -1062,7 +1071,8 @@ int ObCmdExecutor::execute(ObExecContext &ctx, ObICmd &cmd)
                      "cmd_type", cmd.get_cmd_type(),
                      "sql_text", ObHexEscapeSqlStr(ctx.get_sql_ctx()->is_sensitive_ ?
                                                    ObString(OB_MASKED_STR) : sql_text),
-                     "return_code", ret);
+                     "return_code", ret,
+                     "tenant_id", MTL_ID());
   }
 
   if (is_ddl_or_dcl_stmt) {

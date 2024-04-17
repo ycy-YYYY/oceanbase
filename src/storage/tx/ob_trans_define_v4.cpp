@@ -192,7 +192,9 @@ OB_SERIALIZE_MEMBER(ObTxReadSnapshot,
                     uncertain_bound_,
                     snapshot_lsid_,
                     parts_,
-                    snapshot_ls_role_);
+                    snapshot_ls_role_,
+                    committed_,
+                    snapshot_acquire_addr_);
 OB_SERIALIZE_MEMBER(ObTxPart, id_, addr_, epoch_, first_scn_, last_scn_);
 
 DEFINE_SERIALIZE(ObTxDesc::FLAG::FOR_FIXED_SER_VAL)
@@ -347,7 +349,7 @@ ObTxDesc::ObTxDesc()
     xa_tightly_couple_(true),
     xa_start_addr_(),
     isolation_(ObTxIsolationLevel::RC), // default is RC
-    access_mode_(ObTxAccessMode::RW),   // default is RW
+    access_mode_(ObTxAccessMode::INVL),   // default is INVL
     snapshot_version_(),
     snapshot_uncertain_bound_(0),
     snapshot_scn_(),
@@ -383,6 +385,7 @@ ObTxDesc::ObTxDesc()
     lock_(common::ObLatchIds::TX_DESC_LOCK),
     commit_cb_lock_(common::ObLatchIds::TX_DESC_COMMIT_LOCK),
     commit_cb_(NULL),
+    cb_tid_(-1),
     exec_info_reap_ts_(0),
     brpc_mask_set_(),
     rpc_cond_(),
@@ -428,6 +431,7 @@ int ObTxDesc::switch_to_idle()
   abort_cause_ = 0;
   can_elr_ = false;
   commit_cb_ = NULL;
+  cb_tid_ = -1;
   exec_info_reap_ts_ = 0;
   commit_task_.reset();
   state_ = State::IDLE;
@@ -534,6 +538,7 @@ void ObTxDesc::reset()
   can_elr_ = false;
 
   commit_cb_ = NULL;
+  cb_tid_ = -1;
   exec_info_reap_ts_ = 0;
   brpc_mask_set_.reset();
   rpc_cond_.reset();
@@ -925,15 +930,25 @@ bool ObTxDesc::execute_commit_cb()
         executed = true;
         cb = commit_cb_;
         commit_cb_ = NULL;
+        if (0 <= cb_tid_) {
+#ifdef ENABLE_DEBUG_LOG
+          ob_abort();
+#endif
+          TRANS_LOG(ERROR, "unexpected error happen, cb_tid_ should smaller than 0",
+                    KP(this), K(tx_id), KP(cb_tid_));
+        }
+        ATOMIC_STORE_REL(&cb_tid_, GETTID());
         // NOTE: it is required add trace event before callback,
         // because txDesc may be released after callback called
         REC_TRANS_TRACE_EXT(&tlog_, exec_commit_cb,
                             OB_ID(arg), (void*)cb,
                             OB_ID(ref), get_ref(),
                             OB_ID(thread_id), GETTID());
+        commit_cb_lock_.unlock();
         cb->callback(commit_out_);
+      } else {
+        commit_cb_lock_.unlock();
       }
-      commit_cb_lock_.unlock();
     }
     TRANS_LOG(TRACE, "execute_commit_cb", KP(this), K(tx_id), KP(cb), K(executed));
   }
@@ -1147,10 +1162,12 @@ ObTxSnapshot &ObTxSnapshot::operator=(const ObTxSnapshot &r)
 
 ObTxReadSnapshot::ObTxReadSnapshot()
   : valid_(false),
+    committed_(false),
     core_(),
     source_(SRC::INVL),
     snapshot_lsid_(),
     snapshot_ls_role_(common::ObRole::INVALID_ROLE),
+    snapshot_acquire_addr_(),
     uncertain_bound_(0),
     parts_()
 {}
@@ -1158,18 +1175,22 @@ ObTxReadSnapshot::ObTxReadSnapshot()
 ObTxReadSnapshot::~ObTxReadSnapshot()
 {
   valid_ = false;
+  committed_ = false;
   source_ = SRC::INVL;
   snapshot_ls_role_ = common::INVALID_ROLE;
+  snapshot_acquire_addr_.reset();
   uncertain_bound_ = 0;
 }
 
 void ObTxReadSnapshot::reset()
 {
   valid_ = false;
+  committed_ = false;
   core_.reset();
   source_ = SRC::INVL;
   snapshot_lsid_.reset();
   snapshot_ls_role_ = common::INVALID_ROLE;
+  snapshot_acquire_addr_.reset();
   uncertain_bound_ = 0;
   parts_.reset();
 }
@@ -1178,10 +1199,12 @@ int ObTxReadSnapshot::assign(const ObTxReadSnapshot &from)
 {
   int ret = OB_SUCCESS;
   valid_ = from.valid_;
+  committed_ = from.committed_;
   core_ = from.core_;
   source_ = from.source_;
   snapshot_lsid_ = from.snapshot_lsid_;
   snapshot_ls_role_ = from.snapshot_ls_role_;
+  snapshot_acquire_addr_ = from.snapshot_acquire_addr_;
   uncertain_bound_ = from.uncertain_bound_;
   if (OB_FAIL(parts_.assign(from.parts_))) {
    TRANS_LOG(WARN, "assign snapshot fail", K(ret), K(from));
@@ -1234,10 +1257,85 @@ void ObTxReadSnapshot::wait_consistency()
     }
   }
 }
-ObString ObTxReadSnapshot::get_source_name() const
+
+const char* ObTxReadSnapshot::get_source_name() const
 {
   static const char* const SRC_NAME[] = { "INVALID", "GTS", "LOCAL", "WEAK_READ", "USER_SPECIFIED", "NONE" };
-  return ObString(SRC_NAME[(int)source_]);
+  return SRC_NAME[(int)source_];
+}
+
+/*
+ * format snapshot info for sql audit display
+ * contains: src, ls_id, ls_role, parts
+ * 1. local select:
+ *   "src:LOCAL;ls_id:1001;ls_role:LEADER;parts:[1001,1002]"
+ * 2. glocal select, with no ls and ls_role: "src:GTS;parts[1001]"
+ * 3. insert: "NONE"
+ * 4. longer than 128 chars, with "..." in the end
+ *   "src:GLOBAL;ls_id:1001;ls_role:LEADER;parts:[1001,1002,102..."
+ */
+int ObTxReadSnapshot::format_source_for_display(char *buf, const int64_t buf_len) const
+{
+  int ret = OB_SUCCESS;
+  int64_t pos = 0;
+  if (OB_ISNULL(buf) || buf_len <= 0) {
+    ret = OB_INVALID_ARGUMENT;
+    TRANS_LOG(ERROR, "invaild arguments", K(ret), KPC(this), K(buf_len));
+  } else {
+    const char *snapshot_src = get_source_name();
+    const char *ls_role = role_to_string(snapshot_ls_role_);
+    uint64_t ls_id = snapshot_lsid_.id();
+    int n = 0;
+    bool need_fill = true;
+    if (SRC::NONE == source_) {
+      // insert has no stmt snapshot
+      need_fill = false;
+      n = snprintf(buf, buf_len, "NONE");
+    } else if (SRC::GLOBAL != source_) {
+      n = snprintf(buf, buf_len, "src:%s;ls_id:%ld;ls_role:%s;parts:[",
+                   snapshot_src, ls_id, ls_role);
+    } else {
+      // GLOBAL snapshot not display ls_id and ls_role
+      n = snprintf(buf, buf_len, "src:%s;parts:[", snapshot_src);
+    }
+    if (n < 0){
+      ret = OB_UNEXPECT_INTERNAL_ERROR;
+      TRANS_LOG(WARN, "fail to fill snapshot source", K(ret), KPC(this), K(n), K(pos), K(buf_len));
+    } else if(need_fill) {
+      pos += n;
+      bool buf_not_enough = false;
+      for (int i = 0; i < parts_.count(); i++) {
+        n = snprintf(buf + pos, buf_len - pos, "%ld,", parts_[i].left_.id());
+        if (n < 0) {
+          ret = OB_UNEXPECT_INTERNAL_ERROR;
+          TRANS_LOG(WARN, "fail to fill snapshot source", K(ret), KPC(this), K(n), K(pos), K(buf_len));
+        } else if (n > buf_len - pos) {
+          buf_not_enough = true;
+          break;
+        } else {
+          pos += n;
+        }
+      }
+      if (buf_not_enough) {
+        // buf full, parts fill not complete
+        int remain_cnt = buf_len - pos;
+        pos = remain_cnt < 4 ? buf_len - 4 : pos;
+        buf[pos] = '.';
+        buf[pos + 1] = '.';
+        buf[pos + 2] = '.';
+        buf[pos + 3] = '\0';
+      } else if(parts_.count() > 0) {
+        buf[pos - 1] = ']';
+      } else {
+        buf[pos] = ']';
+        buf[pos + 1] = '\0';
+      }
+    }
+  }
+  if (OB_FAIL(ret)) {
+    TRANS_LOG(WARN, "fail to generate snapshot source", KPC(this), K(pos), K(buf_len), K(ObString(buf)));
+  }
+  return ret;
 }
 
 ObTxExecResult::ObTxExecResult()
@@ -1550,7 +1648,7 @@ int ObTxDescMgr::get(const ObTransID &tx_id, ObTxDesc *&tx_desc)
   if (OB_SUCC(ret)) {
     ret = map_.get(tx_id, tx_desc);
   }
-  TRANS_LOG(TRACE, "txDescMgr.get trans", K(tx_id), KPC(tx_desc));
+  TRANS_LOG(TRACE, "txDescMgr.get trans", K(tx_id), KP(tx_desc));
   return ret;
 }
 

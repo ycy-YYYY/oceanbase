@@ -30,6 +30,8 @@
 #include "sql/engine/expr/ob_pl_expr_subquery.h"
 #include "share/config/ob_server_config.h"
 #include "sql/resolver/expr/ob_raw_expr_copier.h"
+#include "sql/engine/expr/ob_expr_sql_udt_construct.h"
+#include "sql/engine/expr/ob_expr_priv_attribute_access.h"
 
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
@@ -69,6 +71,8 @@ int ObRawExprFactory::create_raw_expr<ObSysFunRawExpr>(ObItemType expr_type, ObS
     GENERATE_CASE(T_FUN_PL_OBJECT_CONSTRUCT, ObObjectConstructRawExpr);
     GENERATE_CASE(T_FUN_PL_GET_CURSOR_ATTR, ObPLGetCursorAttrRawExpr);
     GENERATE_CASE(T_FUN_PL_SQLCODE_SQLERRM, ObPLSQLCodeSQLErrmRawExpr);
+    GENERATE_CASE(T_FUN_SYS_PRIV_SQL_UDT_CONSTRUCT, ObUDTConstructorRawExpr);
+    GENERATE_CASE(T_FUN_SYS_PRIV_SQL_UDT_ATTR_ACCESS, ObUDTAttributeAccessRawExpr);
     GENERATE_DEFAULT();
   }
   return ret;
@@ -91,6 +95,22 @@ int ObRawExprFactory::create_raw_expr<ObOpRawExpr>(ObItemType expr_type, ObOpRaw
 
 #undef GENERATE_CASE
 #undef GENERATE_DEFAULT
+
+void ObQualifiedName::format_qualified_name()
+{
+  if (access_idents_.count() == 1) {
+    col_name_ = access_idents_.at(0).access_name_;
+  }
+  if (access_idents_.count() == 2) {
+    tbl_name_ = access_idents_.at(0).access_name_;
+    col_name_ = access_idents_.at(1).access_name_;
+  }
+  if (access_idents_.count() == 3) {
+    database_name_ = access_idents_.at(0).access_name_;
+    tbl_name_ = access_idents_.at(1).access_name_;
+    col_name_ = access_idents_.at(2).access_name_;
+  }
+}
 
 void ObQualifiedName::format_qualified_name(ObNameCaseMode mode)
 {
@@ -122,6 +142,13 @@ int ObQualifiedName::replace_access_ident_params(ObRawExpr *from, ObRawExpr *to)
     OZ (access_idents_.at(i).replace_params(from, to));
   }
   return ret;
+}
+
+int ObObjAccessIdent::check_param_num() const
+{
+  return (ObRawExpr::EXPR_SYS_FUNC == sys_func_expr_->get_expr_class())
+      ? static_cast<ObSysFunRawExpr*>(sys_func_expr_)->check_param_num()
+        : OB_SUCCESS;
 }
 
 int ObObjAccessIdent::extract_params(int64_t level, common::ObIArray<ObRawExpr*> &params) const
@@ -398,7 +425,9 @@ int ObRawExpr::deduce_type(const ObSQLSessionInfo *session_info,
   ObRawExprDeduceType expr_deducer(session_info, solidify_session_vars, local_vars, local_var_id);
   expr_deducer.set_expr_factory(expr_factory_);
   if (OB_FAIL(expr_deducer.deduce(*this))) {
-    if (session_info->is_varparams_sql_prepare()) {
+    if (session_info->is_varparams_sql_prepare() &&
+        OB_ERR_INVALID_COLUMN_NUM != ret &&
+        OB_ERR_TOO_MANY_VALUES != ret) {
       ret = OB_SUCCESS;
       LOG_TRACE("ps prepare phase ignores type deduce error");
     } else {
@@ -610,6 +639,7 @@ ObGeoType ObRawExpr::get_geo_expr_result_type() const
         return geo_type;
       }
       case T_FUN_SYS_POINT:
+      case T_FUN_SYS_ST_CENTROID:
         return ObGeoType::POINT;
       case T_FUN_SYS_LINESTRING:
         return ObGeoType::LINESTRING;
@@ -787,10 +817,23 @@ int ObRawExpr::is_const_inherit_expr(bool &is_const_inherit,
       || T_FUN_NORMAL_UDF == type_
       || T_FUN_SYS_REMOVE_CONST == type_
       || T_FUN_SYS_WRAPPER_INNER == type_
+      || T_FUN_SYS_VALUES == type_
+      || T_OP_GET_PACKAGE_VAR == type_
+      || T_OP_GET_SUBPROGRAM_VAR == type_
+      || T_FUN_SYS_JSON_VALUE == type_
+      || T_FUN_SYS_JSON_QUERY == type_
+      || (T_FUN_SYS_JSON_EXISTS == type_ && lib::is_oracle_mode())
+      || T_FUN_SYS_JSON_EQUAL == type_
+      || T_FUN_SYS_IS_JSON == type_
+      || (T_FUN_SYS_JSON_MERGE_PATCH == type_ && lib::is_oracle_mode())
+      || T_FUN_SYS_JSON_OBJECT == type_
+      || IS_LABEL_SE_POLICY_FUNC(type_)
       || (T_FUN_SYS_LAST_INSERT_ID == type_ && get_param_count() > 0)
       || T_FUN_SYS_TO_BLOB == type_
       || (T_FUN_SYS_SYSDATE == type_ && lib::is_mysql_mode())
       || (param_need_replace ? is_not_calculable_expr() : cnt_not_calculable_expr())
+      || T_FUN_LABEL_SE_SESSION_LABEL == type_
+      || T_FUN_LABEL_SE_SESSION_ROW_LABEL == type_
       || (T_FUN_UDF == type_
           && !static_cast<const ObUDFRawExpr*>(this)->is_deterministic())) {
      is_const_inherit = false;
@@ -834,6 +877,8 @@ int ObRawExpr::is_non_pure_sys_func_expr(bool &is_non_pure) const
           || T_FUN_SYS_USERENV == type_
           || T_FUN_SYS_REGEXP_REPLACE == type_
           || T_FUN_GET_TEMP_TABLE_SESSID == type_
+          || T_FUN_LABEL_SE_SESSION_LABEL == type_
+          || T_FUN_LABEL_SE_SESSION_ROW_LABEL == type_
           || T_FUN_SYS_USER_CAN_ACCESS_OBJ == type_) {
       is_non_pure = true;
     } else if (T_FUN_SYS_TO_DATE == type_ || T_FUN_SYS_TO_TIMESTAMP == type_ ||
@@ -887,7 +932,8 @@ int ObRawExpr::is_non_pure_sys_func_expr(bool &is_non_pure) const
           || T_FUN_SYS_LAST_INSERT_ID == type_
           || T_FUN_SYS_ROW_COUNT == type_
           || T_FUN_SYS_FOUND_ROWS == type_
-          || T_FUN_SYS_CURRENT_USER_PRIV == type_) {
+          || T_FUN_SYS_CURRENT_USER_PRIV == type_
+          || T_FUN_SYS_TRANSACTION_ID == type_) {
       is_non_pure = true;
     }
   }
@@ -1591,7 +1637,9 @@ bool ObQueryRefRawExpr::inner_same_as(
   bool bool_ret = false;
   if (get_expr_type() == expr.get_expr_type()) {
     const ObQueryRefRawExpr &u_expr = static_cast<const ObQueryRefRawExpr &>(expr);
-    if (check_context != NULL && check_context->override_query_compare_) {
+    if (is_set_ != u_expr.is_set_ || is_multiset_ != u_expr.is_multiset_) {
+      /* bool bool_ret = false; */
+    } else if (check_context != NULL && check_context->override_query_compare_) {
       bool_ret = check_context->compare_query(*this, u_expr);
     } else {
       // very tricky, check the definition of ref_stmt_ and get_ref_stmt()
@@ -2338,6 +2386,27 @@ void ObOpRawExpr::clear_child()
   exprs_.reset();
 }
 
+int ObOpRawExpr::get_subquery_comparison_flag() const
+{
+  enum {
+    INVALID = 0, // not subquery comparison
+    NONE = 1,
+    ALL = 2,
+    ANY = 3
+  } comparison_flag;
+  comparison_flag = INVALID;
+  if (IS_SUBQUERY_COMPARISON_OP(get_expr_type())) {
+    if (has_flag(IS_WITH_ALL)) {
+      comparison_flag = ALL;
+    } else if (has_flag(IS_WITH_ANY)) {
+      comparison_flag = ANY;
+    } else {
+      comparison_flag = NONE;
+    }
+  }
+  return comparison_flag;
+}
+
 bool ObOpRawExpr::inner_same_as(
     const ObRawExpr &expr,
     ObExprEqualCheckContext *check_context) const
@@ -2373,6 +2442,12 @@ bool ObOpRawExpr::inner_same_as(
                || (T_OP_GT == get_expr_type() && T_OP_LT == expr.get_expr_type())) {
       cmp_type = REVERSE_CMP;
     } else {
+      need_cmp = false;
+    }
+  } else if (IS_SUBQUERY_COMPARISON_OP(get_expr_type())) {
+    const ObOpRawExpr &tmp = static_cast<const ObOpRawExpr &>(expr);
+    if (tmp.get_expr_type() != get_expr_type() ||
+        tmp.get_subquery_comparison_flag() != get_subquery_comparison_flag()) {
       need_cmp = false;
     }
   } else if (expr.get_expr_type() != get_expr_type()) {
@@ -4156,14 +4231,31 @@ int ObSysFunRawExpr::get_name_internal(char *buf, const int64_t buf_len, int64_t
     if (T_FUN_SYS_AUTOINC_NEXTVAL == get_expr_type() &&
         OB_FAIL(get_autoinc_nextval_name(buf, buf_len, pos))) {
       LOG_WARN("fail to get_autoinc_nextval_name", K(ret));
-    } else if (OB_FAIL(BUF_PRINTF("%.*s(", get_func_name().length(), get_func_name().ptr()))) {
+    } else if (OB_FAIL(BUF_PRINTF("%.*s", get_func_name().length(), get_func_name().ptr()))) {
       LOG_WARN("fail to BUF_PRINTF", K(ret));
+    } else {
+      if (is_valid_id(get_dblink_id())) {
+        if (get_dblink_name().empty()) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("dblink name is empty", K(ret), KPC(this));
+        } else if (OB_FAIL(BUF_PRINTF("@%.*s", get_dblink_name().length(), get_dblink_name().ptr()))) {
+          LOG_WARN("failed to print dblink name", K(ret), K(get_dblink_name()));
+        }
+      }
+      if (OB_SUCC(ret) && OB_FAIL(BUF_PRINTF("("))) {
+        LOG_WARN("fail to BUF_PRINTF", K(ret));
+      }
+    }
+    if (OB_FAIL(ret)) {
     } else if (T_FUN_COLUMN_CONV == get_expr_type()) {
       if (OB_FAIL(get_column_conv_name(buf, buf_len, pos, type))) {
         LOG_WARN("fail to get_column_conv_name", K(ret));
       }
     } else if (T_FUN_SYS_PART_ID == get_expr_type()) {
       //ignore the print of T_FUN_SYS_PART_ID expr
+    } else if (T_FUN_SYS_INNER_ROW_CMP_VALUE == get_expr_type()) {
+      CK(3 == get_param_count());
+      OZ(get_param_expr(2)->get_name(buf, buf_len, pos, type));
     } else {
       int64_t i = 0;
       if (get_param_count() > 1) {
@@ -6468,6 +6560,26 @@ int ObRawExprFactory::create_raw_expr(ObRawExpr::ExprClass expr_class,
       } else {
         dest = dest_scse;
       }
+    } else if (T_FUN_SYS_PRIV_SQL_UDT_CONSTRUCT == expr_type) {
+      ObUDTConstructorRawExpr *dest_udt_expr = nullptr;
+      if (OB_FAIL(create_raw_expr(expr_type, dest_udt_expr))) {
+        LOG_WARN("failed to allocate raw expr", K(dest_udt_expr), K(ret));
+      } else if (OB_ISNULL(dest_udt_expr)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("expr is NULL", K(dest_udt_expr), K(ret));
+      } else {
+        dest = dest_udt_expr;
+      }
+    } else if (T_FUN_SYS_PRIV_SQL_UDT_ATTR_ACCESS == expr_type) {
+      ObUDTAttributeAccessRawExpr *dest_udt_attr_expr = nullptr;
+      if (OB_FAIL(create_raw_expr(expr_type, dest_udt_attr_expr))) {
+        LOG_WARN("failed to allocate raw expr", K(dest_udt_attr_expr), K(ret));
+      } else if (OB_ISNULL(dest_udt_attr_expr)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("expr is NULL", K(dest_udt_attr_expr), K(ret));
+      } else {
+        dest = dest_udt_attr_expr;
+      }
     } else {
       ObSysFunRawExpr *dest_sys = NULL;
       if (OB_FAIL(create_raw_expr(expr_type, dest_sys))) {
@@ -6567,6 +6679,147 @@ int ObRawExprFactory::create_raw_expr(ObRawExpr::ExprClass expr_class,
   }
   }
   return ret;
+}
+
+int ObUDTConstructorRawExpr::get_schema_object_version(share::schema::ObSchemaObjVersion &obj_version)
+{
+  int ret = OB_SUCCESS;
+  CK (object_schema_version_ != OB_INVALID_VERSION);
+  CK (udt_id_ != common::OB_INVALID_ID);
+  OX (obj_version.object_id_ = udt_id_);
+  OX (obj_version.object_type_ = share::schema::DEPENDENCY_TYPE);
+  OX (obj_version.version_ = object_schema_version_);
+
+  return ret;
+}
+
+int ObUDTConstructorRawExpr::set_access_names(
+  const common::ObIArray<ObObjAccessIdent> &access_idents)
+{
+  int ret = OB_SUCCESS;
+  for (int64_t i = 0; OB_SUCC(ret) && i < access_idents.count(); ++i) {
+    OZ (access_names_.push_back(access_idents.at(i).access_name_));
+  }
+  return ret;
+}
+
+int ObUDTConstructorRawExpr::assign(const ObRawExpr &other)
+{
+  int ret = OB_SUCCESS;
+  if (OB_LIKELY(this != &other)) {
+    if (OB_UNLIKELY(get_expr_class() != other.get_expr_class() ||
+                    get_expr_type() != other.get_expr_type())) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("invalid input expr", K(ret), K(other.get_expr_type()));
+    } else if (OB_FAIL(ObSysFunRawExpr::assign(other))) {
+      LOG_WARN("failed to assign expr", K(ret));
+    } else {
+      const ObUDTConstructorRawExpr &tmp =
+          static_cast<const ObUDTConstructorRawExpr &>(other);
+      udt_id_ = tmp.udt_id_;
+      root_udt_id_ = tmp.root_udt_id_;
+      attr_pos_ = tmp.attr_pos_;
+      object_schema_version_ = tmp.object_schema_version_;
+      if (OB_FAIL(access_names_.assign(tmp.access_names_))) {
+        LOG_WARN("failed to assgin access names", K(ret));
+      }
+    }
+  }
+  return ret;
+}
+
+int ObUDTConstructorRawExpr::inner_deep_copy(ObIRawExprCopier &copier)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(ObSysFunRawExpr::inner_deep_copy(copier))) {
+    LOG_WARN("failed to copy expr attributes", K(ret));
+  } else if (copier.deep_copy_attributes()) {
+    CK (OB_NOT_NULL(inner_alloc_));
+    for (int64_t i = 0; OB_SUCC(ret) && i < access_names_.count(); ++i) {
+      OZ (ob_write_string(*inner_alloc_, access_names_.at(i), access_names_.at(i)));
+    }
+  }
+  return ret;
+}
+
+ObExprOperator *ObUDTConstructorRawExpr::get_op()
+{
+  int ret = OB_SUCCESS;
+  ObExprOperator *expr_op = NULL;
+  ObExprUdtConstruct *object_op = NULL;
+  if (T_FUN_SYS_PRIV_SQL_UDT_CONSTRUCT == get_expr_type()) {
+    free_op();
+    if (OB_ISNULL(expr_op = ObOpRawExpr::get_op())) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_ERROR("make object construct operator failed", K(ret));
+    }
+    CK (OB_NOT_NULL(object_op = static_cast<ObExprUdtConstruct *>(expr_op)));
+    OX (object_op->set_udt_id(udt_id_));
+    OX (object_op->set_root_udt_id(root_udt_id_));
+    OX (object_op->set_attribute_pos(attr_pos_));
+  }
+  return OB_SUCCESS == ret ? expr_op : NULL;
+}
+
+
+int ObUDTAttributeAccessRawExpr::get_schema_object_version(share::schema::ObSchemaObjVersion &obj_version)
+{
+  int ret = OB_SUCCESS;
+  CK (object_schema_version_ != OB_INVALID_VERSION);
+  CK (udt_id_ != common::OB_INVALID_ID);
+  OX (obj_version.object_id_ = udt_id_);
+  OX (obj_version.object_type_ = share::schema::DEPENDENCY_TYPE);
+  OX (obj_version.version_ = object_schema_version_);
+
+  return ret;
+}
+
+int ObUDTAttributeAccessRawExpr::assign(const ObRawExpr &other)
+{
+  int ret = OB_SUCCESS;
+  if (OB_LIKELY(this != &other)) {
+    if (OB_UNLIKELY(get_expr_class() != other.get_expr_class() ||
+                    get_expr_type() != other.get_expr_type())) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("invalid input expr", K(ret), K(other.get_expr_type()));
+    } else if (OB_FAIL(ObSysFunRawExpr::assign(other))) {
+      LOG_WARN("failed to assign expr", K(ret));
+    } else {
+      const ObUDTAttributeAccessRawExpr &tmp =
+          static_cast<const ObUDTAttributeAccessRawExpr &>(other);
+      udt_id_ = tmp.udt_id_;
+      object_schema_version_ = tmp.object_schema_version_;
+      attr_type_ = tmp.attr_type_;
+    }
+  }
+  return ret;
+}
+
+int ObUDTAttributeAccessRawExpr::inner_deep_copy(ObIRawExprCopier &copier)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(ObSysFunRawExpr::inner_deep_copy(copier))) {
+    LOG_WARN("failed to copy expr attributes", K(ret));
+  }
+  return ret;
+}
+
+ObExprOperator *ObUDTAttributeAccessRawExpr::get_op()
+{
+  int ret = OB_SUCCESS;
+  ObExprOperator *expr_op = NULL;
+  ObExprUDTAttributeAccess *object_op = NULL;
+  if (T_FUN_SYS_PRIV_SQL_UDT_ATTR_ACCESS == get_expr_type()) {
+    free_op();
+    if (OB_ISNULL(expr_op = ObOpRawExpr::get_op())) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_ERROR("make object construct operator failed", K(ret));
+    }
+    CK (OB_NOT_NULL(object_op = static_cast<ObExprUDTAttributeAccess *>(expr_op)));
+    object_op->set_attribute_type(attr_type_);
+    object_op->set_udt_id(udt_id_);
+  }
+  return OB_SUCCESS == ret ? expr_op : NULL;
 }
 
 }//namespace sql

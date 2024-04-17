@@ -18,13 +18,14 @@
 #include "sql/resolver/dml/ob_select_stmt.h" // resolve select clause
 #include "sql/resolver/dml/ob_dml_stmt.h" // PartExprItem
 #include "sql/ob_sql_context.h"
-#include "sql/ob_select_stmt_printer.h"
+#include "sql/printer/ob_select_stmt_printer.h"
 #include "sql/session/ob_sql_session_info.h"
 #include "sql/resolver/ddl/ob_create_table_resolver.h"
 #include "lib/json/ob_json_print_utils.h"  // for SJ
 #include "lib/hash/ob_hashset.h"
 #include "storage/mview/ob_mview_sched_job_utils.h"
 #include "sql/resolver/mv/ob_mv_checker.h"
+#include "observer/virtual_table/ob_table_columns.h"
 
 namespace oceanbase
 {
@@ -304,7 +305,9 @@ int ObCreateViewResolver::resolve(const ParseNode &parse_tree)
 
     if (is_materialized_view) { //container table is only for mv
       if (OB_SUCC(ret)) {
-        if (OB_FAIL(resolve_table_options(parse_tree.children_[TABLE_OPTION_NODE], false))) {
+        if (OB_FAIL(ObResolverUtils::check_schema_valid_for_mview(table_schema))) {
+          LOG_WARN("failed to check schema valid for mview", KR(ret), K(table_schema));
+        } else if (OB_FAIL(resolve_table_options(parse_tree.children_[TABLE_OPTION_NODE], false))) {
           LOG_WARN("fail to resolve table options", KR(ret));
         }
       }
@@ -1084,7 +1087,7 @@ int ObCreateViewResolver::resolve_mv_refresh_info(ParseNode *refresh_info_node,
           ParseNode *start_date = refresh_interval_node->children_[0];
           ParseNode *next_date = refresh_interval_node->children_[1];
           int64_t current_time = ObTimeUtility::current_time() / 1000000L * 1000000L; // ignore micro seconds
-          int64_t start_time = current_time;
+          int64_t start_time = OB_INVALID_TIMESTAMP;
 
           if (OB_NOT_NULL(start_date)
               && (T_MV_REFRESH_START_EXPR == start_date->type_)
@@ -1102,26 +1105,30 @@ int ObCreateViewResolver::resolve_mv_refresh_info(ParseNode *refresh_info_node,
             }
           }
 
-          if (OB_SUCC(ret)) {
-            refresh_info.start_time_.set_timestamp(start_time);
-          }
-
           if (OB_SUCC(ret) && OB_NOT_NULL(next_date)) {
-            int64_t next_time = 0;
+            int64_t next_time = OB_INVALID_TIMESTAMP;
             if (OB_FAIL(ObMViewSchedJobUtils::resolve_date_expr_to_timestamp(params_,
                 *session_info_, *next_date, *allocator_, next_time))) {
               LOG_WARN("fail to resolve date expr to timestamp", KR(ret));
-            } else if (next_time <= current_time) {
+            } else if (next_time < current_time) {
               ret = OB_ERR_TIME_EARLIER_THAN_SYSDATE;
               LOG_WARN("the parameter next date must evaluate to a time in the future",
                   KR(ret), K(current_time), K(next_time));
               LOG_USER_ERROR(OB_ERR_TIME_EARLIER_THAN_SYSDATE, "next date");
-            } else {
+            } else if (OB_INVALID_TIMESTAMP == start_time) {
+              start_time = next_time;
+            }
+
+            if (OB_SUCC(ret)) {
               ObString next_date_str(next_date->str_len_, next_date->str_value_);
               if (OB_FAIL(ob_write_string(*allocator_, next_date_str, refresh_info.next_time_expr_))) {
                 LOG_WARN("fail to write string", KR(ret));
               }
             }
+          }
+
+          if (OB_SUCC(ret)) {
+            refresh_info.start_time_.set_timestamp(start_time);
           }
         }
       }
@@ -1217,6 +1224,7 @@ int ObCreateViewResolver::add_column_infos(const uint64_t tenant_id,
   ObColumnSchemaV2 column;
   int64_t cur_column_id = OB_APP_MIN_COLUMN_ID;
   uint64_t data_version = 0;
+  share::schema::ObSchemaGetterGuard schema_guard;
   if (OB_FAIL(GET_MIN_DATA_VERSION(tenant_id, data_version))) {
     LOG_WARN("failed to get data version", K(ret));
   } else if (data_version >= DATA_VERSION_4_1_0_0) {
@@ -1276,6 +1284,7 @@ int ObCreateViewResolver::fill_column_meta_infos(const ObRawExpr &expr,
   column.set_collation_type(expr.get_collation_type());
   column.set_accuracy(expr.get_accuracy());
   column.set_zero_fill(expr.get_result_type().has_result_flag(ZEROFILL_FLAG));
+  column.set_nullable(expr.get_result_type().is_not_null_for_read() ? false : true);
   if (OB_FAIL(ret)) {
   } else if (column.is_enum_or_set() && OB_FAIL(column.set_extended_type_info(expr.get_enum_set_values()))) {
     LOG_WARN("set enum or set info failed", K(ret), K(expr));
@@ -1315,6 +1324,31 @@ int ObCreateViewResolver::resolve_column_default_value(const sql::ObSelectStmt *
     if (OB_FAIL(column_schema.set_extended_type_info(select_item.expr_->get_enum_set_values()))) {
       LOG_WARN("failed to set extended type info", K(ret));
     }
+  }
+  return ret;
+}
+
+int ObCreateViewResolver::resolve_columns_nullable_value(const sql::ObSelectStmt *select_stmt,
+                                                         const sql::SelectItem &select_item,
+                                                         ObColumnSchemaV2 &column_schema,
+                                                         ObIAllocator &alloc,
+                                                         ObSQLSessionInfo &session_info,
+                                                         share::schema::ObSchemaGetterGuard *schema_guard)
+{
+  int ret = OB_SUCCESS;
+  observer::ObTableColumns::ColumnAttributes column_attributes;
+  if (OB_FAIL(observer::ObTableColumns::deduce_column_attributes(is_oracle_mode(),
+                                                                 select_stmt,
+                                                                 select_item,
+                                                                 schema_guard,
+                                                                 &session_info,
+                                                                 NULL,
+                                                                 0,
+                                                                 column_attributes,
+                                                                 true))) {
+    LOG_WARN("failed to resolve nullable value", K(ret));
+  } else {
+    column_schema.set_nullable(column_attributes.null_ == "YES");
   }
   return ret;
 }

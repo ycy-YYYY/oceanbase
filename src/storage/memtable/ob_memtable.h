@@ -29,6 +29,7 @@
 #include "storage/checkpoint/ob_freeze_checkpoint.h"
 #include "storage/compaction/ob_medium_compaction_mgr.h"
 #include "storage/tx_storage/ob_ls_handle.h" //ObLSHandle
+#include "storage/checkpoint/ob_checkpoint_diagnose.h"
 
 namespace oceanbase
 {
@@ -189,6 +190,71 @@ class ObMemtable : public ObIMemtable, public storage::checkpoint::ObFreezeCheck
 public:
   using ObMvccRowAndWriteResults = common::ObSEArray<ObMvccRowAndWriteResult, 16>;
   typedef share::ObMemstoreAllocator::AllocHandle ObSingleMemstoreAllocator;
+
+#define DEF_REPORT_CHEKCPOINT_DIAGNOSE_INFO(function, update_function)                    \
+struct function                                                                           \
+{                                                                                         \
+public:                                                                                   \
+  function() {}                                                                           \
+  function(const function&) = delete;                                                     \
+  function& operator=(const function&) = delete;                                          \
+  void operator()(const checkpoint::ObCheckpointDiagnoseParam& param) const               \
+  {                                                                                       \
+    checkpoint::ObCheckpointDiagnoseMgr *cdm = MTL(checkpoint::ObCheckpointDiagnoseMgr*); \
+    if (OB_NOT_NULL(cdm)) {                                                               \
+      cdm->update_function(param);                                                        \
+    }                                                                                     \
+  }                                                                                       \
+};
+DEF_REPORT_CHEKCPOINT_DIAGNOSE_INFO(UpdateStartGCTimeForMemtable, update_start_gc_time_for_memtable)
+DEF_REPORT_CHEKCPOINT_DIAGNOSE_INFO(AddCheckpointDiagnoseInfoForMemtable, add_diagnose_info<checkpoint::ObMemtableDiagnoseInfo>)
+
+struct UpdateFreezeInfo
+{
+public:
+  UpdateFreezeInfo(ObMemtable &memtable) : memtable_(memtable) {}
+  UpdateFreezeInfo& operator=(const UpdateFreezeInfo&) = delete;
+  void operator()(const checkpoint::ObCheckpointDiagnoseParam& param) const
+  {
+    checkpoint::ObCheckpointDiagnoseMgr *cdm = MTL(checkpoint::ObCheckpointDiagnoseMgr*);
+    if (OB_NOT_NULL(cdm)) {
+      cdm->update_freeze_info(param, memtable_.get_rec_scn(),
+       memtable_.get_start_scn(), memtable_.get_end_scn(), memtable_.get_btree_alloc_memory());
+    }
+  }
+private:
+  ObMemtable &memtable_;
+};
+
+struct UpdateMergeInfoForMemtable
+{
+public:
+  UpdateMergeInfoForMemtable(int64_t merge_start_time,
+    int64_t merge_finish_time,
+    int64_t occupy_size,
+    int64_t concurrent_cnt)
+    : merge_start_time_(merge_start_time),
+      merge_finish_time_(merge_finish_time),
+      occupy_size_(occupy_size),
+      concurrent_cnt_(concurrent_cnt)
+  {}
+  UpdateMergeInfoForMemtable& operator=(const UpdateMergeInfoForMemtable&) = delete;
+  void operator()(const checkpoint::ObCheckpointDiagnoseParam& param) const
+  {
+    checkpoint::ObCheckpointDiagnoseMgr *cdm = MTL(checkpoint::ObCheckpointDiagnoseMgr*);
+    if (OB_NOT_NULL(cdm)) {
+      cdm->update_merge_info_for_memtable(param, merge_start_time_, merge_finish_time_,
+          occupy_size_, concurrent_cnt_);
+    }
+  }
+private:
+  int64_t merge_start_time_;
+  int64_t merge_finish_time_;
+  int64_t occupy_size_;
+  int64_t concurrent_cnt_;
+};
+
+public:
   ObMemtable();
   virtual ~ObMemtable();
 public:
@@ -367,7 +433,6 @@ public:
   virtual bool is_inner_tablet() const { return key_.tablet_id_.is_inner_tablet(); }
   ObTabletID get_tablet_id() const { return key_.tablet_id_; }
   int set_snapshot_version(const share::SCN snapshot_version);
-  int64_t get_memtable_state() const { return state_; }
   int64_t get_freeze_state() const { return freeze_state_; }
   int64_t get_protection_clock() const { return local_allocator_.get_protection_clock(); }
   int64_t get_retire_clock() const { return local_allocator_.get_retire_clock(); }
@@ -481,6 +546,9 @@ public:
   blocksstable::ObDatumRange &m_get_real_range(blocksstable::ObDatumRange &real_range,
                                         const blocksstable::ObDatumRange &range, const bool is_reverse) const;
   int get_tx_table_guard(storage::ObTxTableGuard &tx_table_guard);
+  int set_migration_clog_checkpoint_scn(const share::SCN &clog_checkpoint_scn);
+  share::SCN get_migration_clog_checkpoint_scn() { return migration_clog_checkpoint_scn_.atomic_get(); }
+  int resolve_right_boundary_for_migration();
   void unset_logging_blocked_for_active_memtable();
   void resolve_left_boundary_for_active_memtable();
   void set_allow_freeze(const bool allow_freeze);
@@ -502,11 +570,43 @@ public:
   int dump2text(const char *fname);
   // TODO(handora.qc) ready_for_flush interface adjustment
   bool is_can_flush() { return ObMemtableFreezeState::READY_FOR_FLUSH == freeze_state_ && share::SCN::max_scn() != get_end_scn(); }
-  INHERIT_TO_STRING_KV("ObITable", ObITable, KP(this), K_(timestamp), K_(state),
+  virtual int finish_freeze();
+
+  virtual int64_t dec_ref()
+  {
+    int64_t ref_cnt = ObITable::dec_ref();
+    if (0 == ref_cnt) {
+      report_memtable_diagnose_info(UpdateStartGCTimeForMemtable());
+    }
+    return ref_cnt;
+  }
+
+  template<class OP>
+  void report_memtable_diagnose_info(const OP &op)
+  {
+    int ret = OB_SUCCESS;
+    // logstream freeze
+    if (!get_is_tablet_freeze()) {
+      share::ObLSID ls_id;
+      if (OB_FAIL(get_ls_id(ls_id))) {
+        TRANS_LOG(WARN, "failed to get ls id", KPC(this));
+      } else {
+        checkpoint::ObCheckpointDiagnoseParam param(ls_id.id(), get_freeze_clock(), get_tablet_id(), (void*)this);
+        op(param);
+      }
+    }
+    // batch tablet freeze
+    else if (checkpoint::INVALID_TRACE_ID != get_trace_id()) {
+      checkpoint::ObCheckpointDiagnoseParam param(trace_id_, get_tablet_id(), (void*)this);
+      op(param);
+    }
+  }
+
+  INHERIT_TO_STRING_KV("ObITable", ObITable, KP(this), K_(timestamp),
                        K_(freeze_clock), K_(max_schema_version), K_(max_data_schema_version), K_(max_column_cnt),
                        K_(write_ref_cnt), K_(local_allocator), K_(unsubmitted_cnt),
                        K_(logging_blocked), K_(unset_active_memtable_logging_blocked), K_(resolved_active_memtable_left_boundary),
-                       K_(contain_hotspot_row), K_(max_end_scn), K_(rec_scn), K_(snapshot_version),
+                       K_(contain_hotspot_row), K_(max_end_scn), K_(rec_scn), K_(snapshot_version), K_(migration_clog_checkpoint_scn),
                        K_(is_tablet_freeze), K_(contain_hotspot_row),
                        K_(read_barrier), K_(is_flushed), K_(freeze_state), K_(allow_freeze),
                        K_(mt_stat_.frozen_time), K_(mt_stat_.ready_for_flush_time),
@@ -648,9 +748,9 @@ private:
   share::SCN freeze_scn_;
   share::SCN max_end_scn_;
   share::SCN rec_scn_;
-  int64_t state_;
   int64_t freeze_state_;
   int64_t timestamp_;
+  share::SCN migration_clog_checkpoint_scn_;
   bool is_tablet_freeze_;
   bool is_flushed_;
   bool read_barrier_ CACHE_ALIGNED;

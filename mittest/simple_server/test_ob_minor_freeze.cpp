@@ -89,14 +89,14 @@ namespace checkpoint
 } // namespace storage
 namespace transaction
 {
-int ObPartTransCtx::submit_redo_log_for_freeze()
+int ObPartTransCtx::submit_redo_log_for_freeze(const uint32_t freeze_clock)
 {
   int ret = OB_SUCCESS;
   int64_t sleep_time = rand() % SLEEP_TIME;
   ob_usleep(sleep_time);
   CtxLockGuard guard(lock_);
   bool submitted = false;
-  ret = submit_redo_log_for_freeze_(submitted);
+  ret = submit_redo_log_for_freeze_(submitted, freeze_clock);
   if (sleep_time > 50 && sleep_time < 90) {
     ret = OB_TX_NOLOGCB;
   } else if (sleep_time >= 90) {
@@ -406,7 +406,7 @@ void ObMinorFreezeTest::batch_tablet_freeze()
 
   const int64_t start = ObTimeUtility::current_time();
   while (ObTimeUtility::current_time() - start <= freeze_duration_) {
-    ASSERT_EQ(OB_SUCCESS, ls_handles_.at(0).get_ls()->batch_tablet_freeze(tablet_ids_, (i % 2 == 0) ? true : false));
+    ASSERT_EQ(OB_SUCCESS, ls_handles_.at(0).get_ls()->batch_tablet_freeze(0, tablet_ids_, (i % 2 == 0) ? true : false));
     i = i + 1;
   }
 }

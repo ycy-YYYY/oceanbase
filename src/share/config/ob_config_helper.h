@@ -119,6 +119,7 @@ public:
 private:
   DISALLOW_COPY_AND_ASSIGN(ObConfigMemstoreLimitChecker);
 };
+
 class ObConfigTxDataLimitChecker
 {
 public:
@@ -201,6 +202,17 @@ private:
   DISALLOW_COPY_AND_ASSIGN(ObConfigCompressFuncChecker);
 };
 
+class ObConfigPerfCompressFuncChecker
+  : public ObConfigChecker
+{
+public:
+  ObConfigPerfCompressFuncChecker() {}
+  virtual ~ObConfigPerfCompressFuncChecker() {}
+  bool check(const ObConfigItem &t) const;
+private:
+  DISALLOW_COPY_AND_ASSIGN(ObConfigPerfCompressFuncChecker);
+};
+
 class ObConfigResourceLimitSpecChecker
   : public ObConfigChecker
 {
@@ -210,6 +222,17 @@ public:
   bool check(const ObConfigItem &t) const;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObConfigResourceLimitSpecChecker);
+};
+
+class ObConfigTempStoreFormatChecker
+  : public ObConfigChecker
+{
+public:
+  ObConfigTempStoreFormatChecker() {}
+  virtual ~ObConfigTempStoreFormatChecker() {}
+  bool check(const ObConfigItem &t) const;
+private:
+  DISALLOW_COPY_AND_ASSIGN(ObConfigTempStoreFormatChecker);
 };
 
 class ObConfigPxBFGroupSizeChecker
@@ -728,6 +751,26 @@ public:
   bool check(const ObConfigItem &t) const;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObConfigTableStoreFormatChecker);
+};
+
+class ObConfigMigrationChooseSourceChecker
+  : public ObConfigChecker
+{
+public:
+  ObConfigMigrationChooseSourceChecker() {}
+  virtual ~ObConfigMigrationChooseSourceChecker() {}
+  bool check(const ObConfigItem &t) const;
+private:
+  DISALLOW_COPY_AND_ASSIGN(ObConfigMigrationChooseSourceChecker);
+};
+
+class ObConfigArchiveLagTargetChecker {
+public:
+  ObConfigArchiveLagTargetChecker(){}
+  virtual ~ObConfigArchiveLagTargetChecker(){}
+  static bool check(const uint64_t tenant_id, const obrpc::ObAdminSetConfigItem &t);
+private:
+  DISALLOW_COPY_AND_ASSIGN(ObConfigArchiveLagTargetChecker);
 };
 
 typedef __ObConfigContainer<ObConfigStringKey,

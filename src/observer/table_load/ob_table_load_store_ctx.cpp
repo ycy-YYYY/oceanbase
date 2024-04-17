@@ -44,7 +44,7 @@ using namespace share;
 
 ObTableLoadStoreCtx::ObTableLoadStoreCtx(ObTableLoadTableCtx *ctx)
   : ctx_(ctx),
-    allocator_("TLD_StoreCtx", OB_MALLOC_NORMAL_BLOCK_SIZE, ctx->param_.tenant_id_),
+    allocator_("TLD_StoreCtx"),
     task_scheduler_(nullptr),
     merger_(nullptr),
     insert_table_ctx_(nullptr),
@@ -60,6 +60,10 @@ ObTableLoadStoreCtx::ObTableLoadStoreCtx(ObTableLoadTableCtx *ctx)
     enable_heart_beat_check_(false),
     is_inited_(false)
 {
+  allocator_.set_tenant_id(MTL_ID());
+  ls_partition_ids_.set_tenant_id(MTL_ID());
+  target_ls_partition_ids_.set_tenant_id(MTL_ID());
+  committed_trans_store_array_.set_tenant_id(MTL_ID());
 }
 
 ObTableLoadStoreCtx::~ObTableLoadStoreCtx()
@@ -324,7 +328,7 @@ int ObTableLoadStoreCtx::advance_status(ObTableLoadStatusType status)
     // advance status
     else {
       status_ = status;
-      table_load_status_to_string(status_, ctx_->job_stat_->store.status_);
+      table_load_status_to_string(status_, ctx_->job_stat_->store_.status_);
       LOG_INFO("LOAD DATA STORE advance status", K(status));
     }
   }
@@ -344,7 +348,7 @@ int ObTableLoadStoreCtx::set_status_error(int error_code)
     } else {
       status_ = ObTableLoadStatusType::ERROR;
       error_code_ = error_code;
-      table_load_status_to_string(status_, ctx_->job_stat_->store.status_);
+      table_load_status_to_string(status_, ctx_->job_stat_->store_.status_);
       LOG_INFO("LOAD DATA STORE status error", KR(error_code));
     }
   }
@@ -359,7 +363,7 @@ int ObTableLoadStoreCtx::set_status_abort()
     LOG_INFO("LOAD DATA STORE already abort");
   } else {
     status_ = ObTableLoadStatusType::ABORT;
-    table_load_status_to_string(status_, ctx_->job_stat_->store.status_);
+    table_load_status_to_string(status_, ctx_->job_stat_->store_.status_);
     LOG_INFO("LOAD DATA STORE status abort");
   }
   return ret;

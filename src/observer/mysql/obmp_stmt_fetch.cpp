@@ -117,7 +117,7 @@ int ObMPStmtFetch::before_process()
               pos += len;
             } else {
               ret = OB_ERR_FETCH_OUT_SEQUENCE;
-              LOG_ERROR("cursor not found", K(cursor_id_), K(ret));
+              LOG_WARN("cursor not found", K(cursor_id_), K(ret));
             }
             if (session != NULL) {
               revert_session(session);
@@ -167,7 +167,7 @@ int ObMPStmtFetch::do_process(ObSQLSessionInfo &session,
   ObPLCursorInfo *cursor = session.get_cursor(cursor_id_);
   if (OB_ISNULL(cursor)) {
     ret = OB_ERR_FETCH_OUT_SEQUENCE;
-    LOG_ERROR("cursor not found", K(cursor_id_), K(ret));
+    LOG_WARN("cursor not found", K(cursor_id_), K(ret));
     //如果发生fetch过程中找不到cursor的情况，无论什么原因立刻断连接，由应用程序进行容错
     //disconnect();
   } else {
@@ -472,6 +472,12 @@ int ObMPStmtFetch::response_result(pl::ObPLCursorInfo &cursor,
           }
           ObPLExecCtx pl_ctx(cursor.get_allocator(), exec_ctx, &params,
                             NULL/*result*/, &ret, NULL/*func*/, true);
+          ObSchemaGetterGuard schema_guard;
+          if (OB_SUCC(ret) && need_fetch) {
+            if (OB_FAIL(gctx_.schema_service_->get_tenant_schema_guard(session.get_effective_tenant_id(), schema_guard))) {
+              LOG_WARN("get tenant schema guard failed ", K(ret), K(session.get_effective_tenant_id()));
+            }
+          }
           while (OB_SUCC(ret) && need_fetch && row_num < fetch_limit
                   && OB_SUCC(sql::ObSPIService::dbms_cursor_fetch(&pl_ctx,
                                                   static_cast<pl::ObDbmsCursorInfo&>(cursor)))) {
@@ -491,7 +497,7 @@ int ObMPStmtFetch::response_result(pl::ObPLCursorInfo &cursor,
               OZ (response_row(session, row, fields, column_flag_, cursor_id_,
                                 0 == row_num ? true : false, cursor.is_packed()));
             } else {
-              OZ (response_row(session, row, fields, cursor.is_packed()));
+              OZ (response_row(session, row, fields, cursor.is_packed(), exec_ctx, cursor.is_ps_cursor(), &schema_guard));
             }
             if (OB_SUCC(ret)) {
               ++row_num;
@@ -507,7 +513,7 @@ int ObMPStmtFetch::response_result(pl::ObPLCursorInfo &cursor,
           if (OB_ITER_END == ret || OB_READ_NOTHING == ret) {
             ret = OB_SUCCESS;
             // need_fetch 为 true 并且 得到了 OB_ITER_END 错误码，说明正常找到了最后一行，要设置last_row
-            if (need_fetch) {
+            if (need_fetch || !cursor.is_scrollable()) {
               last_row = true;
             }
           }
@@ -784,7 +790,7 @@ int ObMPStmtFetch::response_row(ObSQLSessionInfo &session,
 {
   int ret = OB_SUCCESS;
   common::ObNewRow row;
-  ObPieceCache *piece_cache = static_cast<ObPieceCache*>(session.get_piece_cache(true));
+  ObPieceCache *piece_cache = session.get_piece_cache(true);
   if (OB_ISNULL(piece_cache)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("piece cache is null.", K(ret), K(stmt_id));

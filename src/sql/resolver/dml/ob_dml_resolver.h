@@ -220,13 +220,20 @@ public:
                                        ColumnItem *&col_item);
   // dot notation
   int expand_column_in_json_object_star(ParseNode *node);
+  int pre_process_mvt_agg(ParseNode &node);
+  int pre_process_dot_notation(ParseNode &node);
   int pre_process_json_expr(ParseNode &node);
   int print_json_path(ParseNode *&tmp_path, ObJsonBuffer &res_str);
   int check_depth_obj_access_ref(ParseNode *node, int8_t &depth, bool &exist_fun, ObJsonBuffer &sql_str, bool obj_check = true);  // obj_check : whether need check dot notaion
   int check_first_node_name(const ObString &node_name, bool &check_res);
   int transform_dot_notation2_json_query(ParseNode &node, const ObString &sql_str);
   int transform_dot_notation2_json_value(ParseNode &node, const ObString &sql_str);
-  int check_column_json_type(ParseNode *tab_col, bool &is_json_col, bool &is_json_type, int8_t only_is_json = 1);
+  int transform_geo_dot_notation_attr(ParseNode &node, const ObString &sql_str, const ObColumnRefRawExpr &col_expr);
+  int transform_udt_attrbute_name(const ObString &sql_str, ObIAllocator &allocator, ObString &attr_name);
+  int create_col_ref_node(ParseNode *table_node, const ObString &column_name, ParseNode *&new_node);
+  int create_int_val_node(ParseNode *table_node, const uint64_t value, ParseNode *&new_node);
+  int create_char_node(const ObString &value, ParseNode *&new_node);
+  int check_column_json_type(ParseNode *tab_col, bool &is_json_cst, bool &is_json_type, ObColumnRefRawExpr *&column_expr, int8_t only_is_json = 1);
   int check_size_obj_access_ref(ParseNode *node);
   /* json object resolve star */
   int get_target_column_list(ObSEArray<ColumnItem, 4> &target_list, ObString &tab_name, bool all_tab,
@@ -310,11 +317,13 @@ public:
                                        share::schema::ObSchemaType schema_type,
                                        uint64_t object_id,
                                        uint64_t database_id,
-                                       uint64_t dep_obj_id);
+                                       uint64_t dep_obj_id,
+                                       bool is_db_expilicit = false);
   int add_object_versions_to_dependency(share::schema::ObDependencyTableType table_type,
                                        share::schema::ObSchemaType schema_type,
                                        const ObIArray<uint64_t> &object_ids,
-                                       const ObIArray<uint64_t> &db_ids);
+                                       const ObIArray<uint64_t> &db_ids,
+                                       bool is_db_expilicit = false);
   ObDMLStmt *get_stmt();
   void set_upper_insert_resolver(ObInsertResolver *insert_resolver) {
     upper_insert_resolver_ = insert_resolver; }
@@ -328,6 +337,8 @@ protected:
   int check_expr_param(const ObRawExpr &expr);
   int check_col_param_on_expr(ObRawExpr *expr);
   int resolve_columns_field_list_first(ObRawExpr *&expr, ObArray<ObQualifiedName> &columns, ObSelectStmt* sel_stmt);
+  int replace_col_ref_prefix(ObQualifiedName &col_ref, uint64_t idx, ObQualifiedName &q_name, bool &try_success);
+  int replace_col_ref_prefix(ObQualifiedName &q_name);
   int resolve_columns(ObRawExpr *&expr, common::ObArray<ObQualifiedName> &columns);
   int resolve_qualified_identifier(ObQualifiedName &q_name,
                                    ObIArray<ObQualifiedName> &columns,
@@ -599,7 +610,7 @@ protected:
                                            common::ObString &table_name,
                                            common::ObString &database_name,
                                            bool is_reverse_link);
-  int add_synonym_obj_id(const ObSynonymChecker &synonym_checker, bool error_with_exist);
+  int add_synonym_obj_id(const ObSynonymChecker &synonym_checker, bool is_db_expilicit);
 
   /*
    *
@@ -623,11 +634,11 @@ protected:
   int resolve_generated_column_expr_temp(TableItem *table_item);
   int find_generated_column_expr(ObRawExpr *&expr, bool &is_found);
   int deduce_generated_exprs(common::ObIArray<ObRawExpr*> &exprs);
-  int collect_schema_version(ObRawExpr *expr);
   int resolve_external_name(ObQualifiedName &q_name,
                             ObIArray<ObQualifiedName> &columns,
                             ObIArray<ObRawExpr*> &real_exprs,
                             ObRawExpr *&expr);
+  int check_disable_parallel_state(ObRawExpr *expr);
   int resolve_geo_mbr_column();
   int build_prefix_index_compare_expr(ObRawExpr &column_expr,
                                       ObRawExpr *prefix_expr,
@@ -862,6 +873,8 @@ private:
   int resolve_global_hint(const ParseNode &hint_node,
                           ObGlobalHint &global_hint,
                           bool &resolved_hint);
+  int resolve_dblink_hint(const ParseNode &hint_node,
+                          ObGlobalHint &global_hint);
   int resolve_transform_hint(const ParseNode &hint_node,
                              bool &resolved_hint,
                              ObIArray<ObHint*> &trans_hints);
@@ -878,6 +891,7 @@ private:
   int resolve_pq_map_hint(const ParseNode &hint_node, ObOptHint *&opt_hint);
   int resolve_pq_distribute_hint(const ParseNode &hint_node, ObOptHint *&opt_hint);
   int resolve_pq_set_hint(const ParseNode &hint_node, ObOptHint *&opt_hint);
+  int resolve_pq_subquery_hint(const ParseNode &hint_node, ObOptHint *&opt_hint);
   int resolve_join_filter_hint(const ParseNode &join_node, ObOptHint *&opt_hint);
   int resolve_aggregation_hint(const ParseNode &hint_node, ObOptHint *&hint);
   int resolve_normal_transform_hint(const ParseNode &hint_node, ObTransHint *&hint);
@@ -916,6 +930,8 @@ private:
 
   int resolve_table_check_constraint_items(const TableItem *table_item,
                                            const ObTableSchema *table_schema);
+  int resolve_table_constraint_items(const TableItem *table_item,
+                                           const ObTableSchema *table_schema);
   int find_table_index_infos(const ObString &index_name,
                              const TableItem *table_item,
                              bool &find_it,
@@ -932,11 +948,16 @@ private:
   int resolve_values_table_item(const ParseNode &table_node, TableItem *&table_item);
   int resolve_table_values_for_select(const ParseNode &table_node,
                                       ObIArray<ObRawExpr*> &table_values,
+                                      ObIArray<ObExprResType> &res_types,
                                       int64_t &column_cnt);
   int resolve_table_values_for_insert(const ParseNode &table_node,
                                       ObIArray<ObRawExpr*> &table_values,
+                                      ObIArray<ObExprResType> &res_types,
                                       int64_t &column_cnt);
-  int gen_values_table_column_items(const int64_t column_cnt, TableItem &table_item);
+
+  int gen_values_table_column_items(const int64_t column_cnt,
+                                    const ObIArray<ObExprResType> &res_types,
+                                    TableItem &table_item);
   int get_values_res_types(const ObIArray<ObExprResType> &cur_values_types,
                            ObIArray<ObExprResType> &res_types);
   int try_add_cast_to_values(const ObIArray<ObExprResType> &res_types,

@@ -242,14 +242,18 @@ int ObTableCkmItems::build_column_ckm_sum_array(
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("checksum items or tablet pairs are empty", KR(ret), K_(ckm_items), K_(tablet_pairs));
   } else if (!ckm_sum_array_.empty()) {
-    // inited before
+    LOG_INFO("use cached ckm array", KR(ret), K_(row_count), K_(ckm_sum_array), K(compaction_scn));
   } else {
+    row_count_ = 0;
+    ckm_sum_array_.reuse();
+
     const int64_t column_checksums_cnt = ckm_items_.at(0).column_meta_.column_checksums_.count();
     uint64_t pre_tablet_id = OB_INVALID_ID;
     if (OB_FAIL(ckm_sum_array_.reserve(column_checksums_cnt))) {
       LOG_WARN("failed to reserve tablet column checksum array", KR(ret));
     }
     // items are order by tablet_id
+    int64_t pair_idx = 0;
     for (int64_t i = 0; OB_SUCC(ret) && (i < items_cnt); ++i) {
       const ObTabletReplicaChecksumItem &cur_item = ckm_items_.at(i);
       LOG_TRACE("build_column_ckm_sum_array", KR(ret), K(i), K(cur_item), K(compaction_scn), K(row_cnt));
@@ -271,7 +275,15 @@ int ObTableCkmItems::build_column_ckm_sum_array(
           } // end of for
           row_count_ += cur_item.row_count_;
         }
-        pre_tablet_id = cur_item.tablet_id_.id();
+
+        if (OB_FAIL(ret)) {
+        } else if (OB_UNLIKELY(cur_item.tablet_id_.id() != pre_tablet_id // meet new tablet
+            && (pair_idx >= tablet_pairs_.count() || tablet_pairs_.at(pair_idx++).get_tablet_id() != cur_item.tablet_id_))) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("tablet pair and ckm items are mismatch", KR(ret), K(i), K(cur_item), K(tablet_pairs_), K(pair_idx));
+        } else {
+          pre_tablet_id = cur_item.tablet_id_.id();
+        }
       } else {
         ret = OB_ITEM_NOT_MATCH;
         LOG_WARN("compaction scn mismtach", KR(ret), K(cur_item), K(compaction_scn));
@@ -280,12 +292,16 @@ int ObTableCkmItems::build_column_ckm_sum_array(
   }
   if (OB_SUCC(ret)) {
     row_cnt = row_count_;
+  } else {
+    row_count_ = 0;
+    ckm_sum_array_.reuse();
   }
   return ret;
 }
 
-#define RECORD_CKM_ERROR_INFO(tablet_array_idx) \
+#define RECORD_CKM_ERROR_INFO(tablet_array_idx, is_global_index) \
   ckm_error_info.tenant_id_ = data_ckm.tenant_id_; \
+  ckm_error_info.is_global_index_ = is_global_index; \
   ckm_error_info.frozen_scn_ = compaction_scn; \
   ckm_error_info.data_table_id_ = data_table_schema->get_table_id(); \
   ckm_error_info.index_table_id_ = index_table_schema->get_table_id(); \
@@ -334,7 +350,7 @@ int ObTableCkmItems::validate_column_ckm_sum(
     }
   }
   if (OB_CHECKSUM_ERROR == ret) {
-    RECORD_CKM_ERROR_INFO(OB_INVALID_INDEX /*array_idx*/);
+    RECORD_CKM_ERROR_INFO(OB_INVALID_INDEX /*array_idx*/, true/*is_global_index*/);
     LOG_ERROR("failed to compare column checksum", KR(ret), K(ckm_error_info),
       K(data_ckm.ckm_items_), K(index_ckm.ckm_items_));
     if (OB_TMP_FAIL(ObColumnChecksumErrorOperator::insert_column_checksum_err_info(sql_proxy, data_ckm.tenant_id_,
@@ -436,7 +452,7 @@ int ObTableCkmItems::validate_tablet_column_ckm(
         }
 #endif
         if (OB_CHECKSUM_ERROR == ret) {
-          RECORD_CKM_ERROR_INFO(idx);
+          RECORD_CKM_ERROR_INFO(idx, false/*is_global_index*/);
           LOG_ERROR("failed to compare column checksum", KR(ret), K(ckm_error_info),
             "data_tablet", data_ckm.tablet_pairs_.at(idx), "data_row_cnt", data_replica_ckm.row_count_, K(data_replica_ckm),
             "index_tablet", index_ckm.tablet_pairs_.at(idx), "index_row_cnt", index_replica_ckm.row_count_, K(index_replica_ckm),
@@ -522,11 +538,12 @@ void ObTableCkmItems::reset()
 {
   is_inited_ = false;
   table_id_ = 0;
+  row_count_ = 0;
+  table_schema_ = NULL;
   tablet_pairs_.reset();
   ckm_items_.reset();
   sort_col_id_array_.reset();
   ckm_sum_array_.reset();
-  row_count_ = 0;
 }
 
 } // namespace compaction

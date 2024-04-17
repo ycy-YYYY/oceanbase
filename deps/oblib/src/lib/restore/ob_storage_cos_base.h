@@ -95,6 +95,7 @@ private:
 protected:
   bool is_opened_;
   ObCosWrapperHandle handle_;
+  ObStorageChecksumType checksum_type_;
 
 private:
   DISALLOW_COPY_AND_ASSIGN(ObStorageCosBase);
@@ -161,16 +162,17 @@ private:
 
 // part size is in [1MB, 5GB], exclude the last part
 // max part num 10000
-class ObStorageCosMultiPartWriter: public ObStorageCosBase, public ObIStorageWriter
+class ObStorageCosMultiPartWriter: public ObStorageCosBase, public ObIStorageMultiPartWriter
 {
 public:
   ObStorageCosMultiPartWriter();
   virtual ~ObStorageCosMultiPartWriter();
   int open(const common::ObString &uri, common::ObObjectStorageInfo *storage_info);
-  int write(const char *buf,const int64_t size);
+  int write(const char *buf, const int64_t size);
   int pwrite(const char *buf, const int64_t size, const int64_t offset);
+  virtual int complete() override;
+  virtual int abort() override;
   int close();
-  int cleanup();
   int64_t get_length() const { return file_length_; }
   virtual bool is_opened() const { return is_opened_; }
 

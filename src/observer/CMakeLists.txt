@@ -38,6 +38,7 @@ ob_set_subtarget(ob_server common
   ob_uniq_task_queue.cpp
   ob_startup_accel_task_handler.cpp
   ob_srv_rpc_handler.cpp
+  ob_check_params.cpp
 )
 
 ob_set_subtarget(ob_server common_mixed
@@ -103,6 +104,7 @@ ob_set_subtarget(ob_server net
   net/ob_ingress_bw_alloc_service.cpp
   net/ob_net_endpoint_ingress_rpc_proccessor.cpp
   net/ob_net_endpoint_ingress_rpc_struct.cpp
+  net/ob_rpc_reverse_keepalive.cpp
 )
 
 ob_set_subtarget(ob_server omt
@@ -402,6 +404,10 @@ ob_set_subtarget(ob_server virtual_table
   virtual_table/ob_all_virtual_cgroup_config.cpp
   virtual_table/ob_virtual_flt_config.cpp
   virtual_table/ob_all_virtual_kv_connection.cpp
+  virtual_table/ob_all_virtual_activity_metrics.cpp
+  virtual_table/ob_all_virtual_checkpoint_diagnose_info.cpp
+  virtual_table/ob_all_virtual_checkpoint_diagnose_memtable_info.cpp
+  virtual_table/ob_all_virtual_nic_info.cpp
 )
 
 ob_server_add_target(ob_server)

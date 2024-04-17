@@ -167,8 +167,6 @@ int TestOpEngine::prepare_io(const string & test_data_name_suffix)
     LOG_WARN("add device channel failed", K(ret));
   } else if (OB_FAIL(ObIOManager::get_instance().start())) {
     LOG_WARN("fail to start io manager", K(ret));
-  } else if (OB_FAIL(ObIOManager::get_instance().add_tenant_io_manager(OB_SYS_TENANT_ID, io_config))) {
-    LOG_WARN("add tenant io config failed", K(ret));
   } else if (OB_FAIL(OB_SERVER_BLOCK_MGR.init(THE_IO_DEVICE, storage_env_.default_block_size_))) {
     STORAGE_LOG(WARN, "init block manager fail", K(ret));
   } else if (OB_FAIL(FileDirectoryUtils::create_full_path(file_dir))) {
@@ -486,6 +484,7 @@ int TestOpEngine::generate_physical_plan(ObLogPlan *log_plan, ObPhysicalPlan &ph
     // So we need set here to support rich_format
     ObCodeGenerator code_gen(false /*use_jit*/, CLUSTER_VERSION_4_3_0_0, &(pctx->get_datum_param_store()));
     log_plan->get_optimizer_context().get_session_info()->sys_vars_cache_.set_enable_rich_vector_format(enable_rich_format);
+    log_plan->get_optimizer_context().get_session_info()->init_use_rich_format();
     phy_plan.set_use_rich_format(enable_rich_format);
 
     if (OB_FAIL(do_code_generate(*log_plan, code_gen, phy_plan))) {

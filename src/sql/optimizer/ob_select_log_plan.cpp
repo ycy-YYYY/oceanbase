@@ -92,7 +92,7 @@ int ObSelectLogPlan::candi_allocate_group_by()
              OB_FAIL(append(candi_subquery_exprs, stmt->get_rollup_exprs())) ||
              OB_FAIL(append(candi_subquery_exprs, stmt->get_aggr_items()))) {
     LOG_WARN("failed to append exprs", K(ret));
-  } else if (OB_FAIL(candi_allocate_subplan_filter_for_exprs(candi_subquery_exprs))) {
+  } else if (OB_FAIL(candi_allocate_subplan_filter(candi_subquery_exprs))) {
     LOG_WARN("failed to allocate subplan filter for exprs", K(ret));
   } else if (stmt->is_scala_group_by()) {
     if (OB_FAIL(ObOptimizerUtil::classify_subquery_exprs(stmt->get_having_exprs(),
@@ -1391,7 +1391,7 @@ int ObSelectLogPlan::candi_allocate_distinct()
     LOG_WARN("get unexpected null", K(ret));
   } else if (OB_FAIL(get_distinct_exprs(best_plan, reduce_exprs, distinct_exprs))) {
     LOG_WARN("failed to get select columns", K(ret));
-  } else if (OB_FAIL(candi_allocate_subplan_filter_for_exprs(distinct_exprs))) {
+  } else if (OB_FAIL(candi_allocate_subplan_filter(distinct_exprs))) {
         LOG_WARN("failed to allocate subplan filter for exprs", K(ret));
   } else if (distinct_exprs.empty()) {
     // if all the distinct exprs are const, we add limit operator instead of distinct operator
@@ -1774,6 +1774,7 @@ int ObSelectLogPlan::generate_raw_plan_for_set()
     ObSEArray<ObRawExpr *, 8> child_remain_filters;
     const ObSelectStmt *child_stmt = NULL;
     ObSelectLogPlan *child_plan = NULL;
+    ObSelectLogPlan *nonrecursive_plan = NULL;
     for (int64 i = 0; OB_SUCC(ret) && i < child_size; ++i) {
       child_input_filters.reuse();
       child_rename_filters.reuse();
@@ -1800,10 +1801,13 @@ int ObSelectLogPlan::generate_raw_plan_for_set()
         LOG_WARN("get remain filters failed", K(ret));
       } else if (OB_FAIL(generate_child_plan_for_set(child_stmt, child_plan,
                                                      child_rename_filters, i,
-                                                     select_stmt->is_set_distinct()))) {
+                                                     select_stmt->is_set_distinct(),
+                                                     nonrecursive_plan))) {
         LOG_WARN("failed to generate left subquery plan", K(ret));
       } else if (OB_FAIL(child_plans.push_back(child_plan))) {
         LOG_WARN("failed to push back", K(ret));
+      } else if (0 == i && select_stmt->is_recursive_union()) {
+        nonrecursive_plan = child_plan;
       }
     }
   }
@@ -2406,14 +2410,14 @@ int ObSelectLogPlan::check_sharding_inherit_from_access_all(ObLogicalOperator* o
       is_inherit_from_access_all = true;
     }
   }
-  if (OB_SUCC(ret) &&
-      !is_inherit_from_access_all &&
-      op->get_inherit_sharding_index() != -1) {
-    int64_t idx = op->get_inherit_sharding_index();
-    if (idx < 0 || idx >= op->get_num_of_child()) {
+  for (int64_t i = 0; OB_SUCC(ret) && !is_inherit_from_access_all && i < op->get_num_of_child(); ++i) {
+    ObLogicalOperator *child = op->get_child(i);
+    if (OB_ISNULL(child)) {
       ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("unexpect inherit sharding index", K(ret));
-    } else if (OB_FAIL(SMART_CALL(check_sharding_inherit_from_access_all(op->get_child(idx),
+      LOG_WARN("unexpect null child", K(ret), K(i));
+    } else if (LOG_EXCHANGE == child->get_type()) {
+      //do nothing
+    } else if (OB_FAIL(SMART_CALL(check_sharding_inherit_from_access_all(child,
                                                                          is_inherit_from_access_all)))) {
       LOG_WARN("failed to check sharding inherit from bc2host", K(ret));
     }
@@ -3973,7 +3977,18 @@ int ObSelectLogPlan::allocate_distinct_set_as_top(ObLogicalOperator *left_child,
     set_op->assign_set_op(select_stmt->get_set_op());
     set_op->set_algo_type(set_method);
     set_op->set_distributed_algo(dist_set_method);
-    if (OB_FAIL(set_op->compute_property())) {
+    for (int64_t i = 0; OB_SUCC(ret) && i < set_op->get_num_of_child(); i ++) {
+      const OptTableMeta *table_meta = get_update_table_metas().get_table_meta_by_table_id(i);
+      double child_ndv = 0;
+      if (OB_NOT_NULL(table_meta)) {
+        child_ndv = table_meta->get_distinct_rows();
+      }
+      if (OB_FAIL(set_op->add_child_ndv(child_ndv))) {
+        LOG_WARN("failed to add child ndv", K(ret));
+      }
+    }
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(set_op->compute_property())) {
       LOG_WARN("failed to compute property", K(ret));
     } else {
       top = set_op;
@@ -4240,46 +4255,18 @@ int ObSelectLogPlan::generate_normal_raw_plan()
 int ObSelectLogPlan::generate_dblink_raw_plan()
 {
   int ret = OB_SUCCESS;
-  ObQueryCtx *query_ctx = NULL;
   // dblink_info hint
   int64_t tx_id = -1;
-  int64_t tm_sessid = -1;
+  uint32_t tm_sessid = 0;
+  bool xa_trans_stop_check_lock = false;
   uint64_t dblink_id = OB_INVALID_ID;
   const ObSelectStmt *stmt = get_stmt();
   ObLogicalOperator *top = NULL;
   if (OB_ISNULL(stmt)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected null ptr", K(ret));
-  } else if (NULL == (query_ctx = stmt->get_query_ctx())) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("get unexpected null", K(ret));
-  } else if (FALSE_IT(dblink_id = stmt->get_dblink_id())) {
-  } else if (0 == dblink_id) { //dblink id = 0 means @!/@xxxx!
-    ObSQLSessionInfo *session = get_optimizer_context().get_session_info();
-    oceanbase::sql::ObReverseLink *reverse_dblink_info = NULL;
-    if (NULL == session) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("get unexpected null", K(ret), KP(session));
-    } else if (OB_FAIL(session->get_dblink_context().get_reverse_link(reverse_dblink_info))) {
-      LOG_WARN("failed to get reverse link info from session", K(ret), K(session->get_sessid()));
-    } else if (NULL == reverse_dblink_info) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("get unexpected null", K(ret));
-    } else {
-      // set dblink_info, to unparse a link sql with dblink_info hint
-      query_ctx->get_query_hint_for_update().get_global_hint().merge_dblink_info_hint(
-                                                    reverse_dblink_info->get_tx_id(),
-                                                    reverse_dblink_info->get_tm_sessid());
-      LOG_DEBUG("set tx_id_ and tm_sessid to stmt",
-                                                    K(reverse_dblink_info->get_tx_id()),
-                                                    K(reverse_dblink_info->get_tm_sessid()));
-    }
   } else {
-    // save dblink_info hint
-    tx_id = query_ctx->get_query_hint_for_update().get_global_hint().get_dblink_tx_id_hint();
-    tm_sessid = query_ctx->get_query_hint_for_update().get_global_hint().get_dblink_tm_sessid_hint();
-    // reset dblink hint, to unparse a link sql without dblink_info hint
-    query_ctx->get_query_hint_for_update().get_global_hint().reset_dblink_info_hint();
+    dblink_id = stmt->get_dblink_id();
   }
   if (OB_FAIL(ret)) {
     //do nothing
@@ -4304,13 +4291,6 @@ int ObSelectLogPlan::generate_dblink_raw_plan()
   } else {
     top->mark_is_plan_root();
     top->get_plan()->set_plan_root(top);
-    if (0 == dblink_id) {
-      // reset dblink info, to avoid affecting the next execution flow
-      query_ctx->get_query_hint_for_update().get_global_hint().reset_dblink_info_hint();
-    } else {
-      // restore dblink_info hint, ensure that the next execution process can get the correct dblink_info
-      query_ctx->get_query_hint_for_update().get_global_hint().merge_dblink_info_hint(tx_id, tm_sessid);
-    }
     LOG_TRACE("succeed to allocate loglinkscan", K(dblink_id));
   }
   return ret;
@@ -4545,8 +4525,11 @@ int ObSelectLogPlan::allocate_plan_top()
 
     // allocate root exchange
     if (OB_SUCC(ret) && is_final_root_plan()) {
-      // allocate material if there is for update.
-      if (optimizer_context_.has_for_update() && OB_FAIL(candi_allocate_for_update_material())) {
+      // allocate material if there is for update without skip locked.
+      // FOR UPDATE SKIP LOCKED does not need SQL-level retry, hence we don't need a MATERIAL to
+      // block the output.
+      if (optimizer_context_.has_no_skip_for_update()
+          && OB_FAIL(candi_allocate_for_update_material())) {
         LOG_WARN("failed to allocate material", K(ret));
         //allocate temp-table transformation if needed.
       } else if (!get_optimizer_context().get_temp_table_infos().empty() &&
@@ -4631,13 +4614,8 @@ int ObSelectLogPlan::candi_allocate_subplan_filter_for_select_item()
     LOG_WARN("null stmt", K(select_stmt), K(ret));
   } else if (OB_FAIL(select_stmt->get_select_exprs(select_exprs))) {
     LOG_WARN("failed to get select exprs", K(ret));
-  } else if (OB_FAIL(ObOptimizerUtil::get_subquery_exprs(select_exprs,
-                                                         subquery_exprs))) {
-    LOG_WARN("failed to get subquery exprs", K(ret));
-  } else if (subquery_exprs.empty()) {
-    /*do nothing*/
-  } else if (OB_FAIL(candi_allocate_subplan_filter(subquery_exprs))) {
-    LOG_WARN("failed to allocate subplan filter for select item", K(ret));
+  } else if (OB_FAIL(candi_allocate_subplan_filter(select_exprs))) {
+    LOG_WARN("failed to candi allocate subplan filter for exprs", K(ret));
   } else {
     LOG_TRACE("succeed to allocate subplan filter for select item", K(select_stmt->get_stmt_id()));
   }
@@ -4648,7 +4626,8 @@ int ObSelectLogPlan::generate_child_plan_for_set(const ObDMLStmt *sub_stmt,
                                                  ObSelectLogPlan *&sub_plan,
                                                  ObIArray<ObRawExpr*> &pushdown_filters,
                                                  const uint64_t child_offset,
-                                                 const bool is_set_distinct)
+                                                 const bool is_set_distinct,
+                                                 ObSelectLogPlan *nonrecursive_plan)
 {
   int ret = OB_SUCCESS;
   sub_plan = NULL;
@@ -4662,7 +4641,8 @@ int ObSelectLogPlan::generate_child_plan_for_set(const ObDMLStmt *sub_stmt,
                                                                          *sub_stmt)))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_ERROR("Failed to create logical plan", K(sub_plan), K(ret));
-  } else if (FALSE_IT(sub_plan->set_is_parent_set_distinct(is_set_distinct))) {
+  } else if (FALSE_IT(sub_plan->set_is_parent_set_distinct(is_set_distinct)) ||
+             FALSE_IT(sub_plan->set_nonrecursive_plan_for_fake_cte(nonrecursive_plan))) {
     // do nothing
   } else if (OB_FAIL(sub_plan->add_pushdown_filters(pushdown_filters))) {
     LOG_WARN("failed to add pushdown filters", K(ret));
@@ -4748,7 +4728,7 @@ int ObSelectLogPlan::candi_allocate_window_function()
     LOG_WARN("unexpected params", K(ret), K(stmt), K(stmt->has_window_function()));
   } else if (OB_FAIL(append(candi_subquery_exprs, stmt->get_window_func_exprs()))) {
     LOG_WARN("failed to append exprs", K(ret));
-  } else if (OB_FAIL(candi_allocate_subplan_filter_for_exprs(candi_subquery_exprs))) {
+  } else if (OB_FAIL(candi_allocate_subplan_filter(candi_subquery_exprs))) {
     LOG_WARN("failed to do allocate subplan filter", K(ret));
   } else if (OB_FAIL(candi_allocate_window_function_with_hint(stmt->get_window_func_exprs(),
                                                               stmt->get_qualify_filters(),
@@ -6686,9 +6666,9 @@ int ObSelectLogPlan::init_wf_topn_option(WinFuncOpHelper &win_func_helper, bool 
   }
   if (OB_FAIL(ret) || !win_func_helper.enable_topn_) {
     //do nothing
-  } else if (check_wf_part_topn_supported(winfunc_exprs,
-                                          win_func_helper.partition_exprs_,
-                                          win_func_helper.enable_topn_)) {
+  } else if (OB_FAIL(check_wf_part_topn_supported(winfunc_exprs,
+                                                  win_func_helper.partition_exprs_,
+                                                  win_func_helper.enable_topn_))) {
     LOG_WARN("check partition topn supported failed", K(ret));
   } else if (win_func_helper.enable_topn_) {
     for (int64_t i = 0; OB_SUCC(ret) && NULL == win_func_helper.topn_const_ && i < filter_exprs.count(); ++i) {
@@ -6728,8 +6708,7 @@ int ObSelectLogPlan::init_wf_topn_option(WinFuncOpHelper &win_func_helper, bool 
     }
   }
   if (OB_SUCC(ret)
-      && NULL != win_func_helper.topn_const_
-      && !ob_is_integer_type(win_func_helper.topn_const_->get_result_type().get_type())) {
+      && NULL != win_func_helper.topn_const_) {
     //cast topn expr to int
     ObRawExpr *topn_with_cast = NULL;
     ObRawExpr *topn_without_cast = NULL;
@@ -7699,11 +7678,11 @@ int ObSelectLogPlan::adjust_est_cost_info_for_column_store_plan(ObLogTableScan *
   } else if (OB_FAIL(table_scan->get_est_cost_info()->access_columns_.assign(used_column_ids))) {
     LOG_WARN("failed to assign column ids", K(ret));
   }
-  for (int64_t i = table_scan->get_est_cost_info()->column_group_infos_.count()-1; OB_SUCC(ret) && i >= 0; --i) {
-    ObCostColumnGroupInfo &info = table_scan->get_est_cost_info()->column_group_infos_.at(i);
+  for (int64_t i = table_scan->get_est_cost_info()->index_scan_column_group_infos_.count()-1; OB_SUCC(ret) && i >= 0; --i) {
+    ObCostColumnGroupInfo &info = table_scan->get_est_cost_info()->index_scan_column_group_infos_.at(i);
     if (ObOptimizerUtil::find_item(used_column_ids, info.column_id_)) {
       //do nothing
-    } else if (OB_FAIL(table_scan->get_est_cost_info()->column_group_infos_.remove(i))) {
+    } else if (OB_FAIL(table_scan->get_est_cost_info()->index_scan_column_group_infos_.remove(i))) {
       LOG_WARN("failed to remove column group info", K(ret));
     }
   }

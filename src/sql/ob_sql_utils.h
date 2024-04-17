@@ -128,11 +128,13 @@ public:
   ObSqlPrinter(const ObStmt *stmt,
                ObSchemaGetterGuard *schema_guard,
                ObObjPrintParams print_params,
-               const ParamStore *param_store) :
+               const ParamStore *param_store,
+               const ObSQLSessionInfo *session) :
     stmt_(stmt),
     schema_guard_(schema_guard),
     print_params_(print_params),
-    param_store_(param_store)
+    param_store_(param_store),
+    session_(session)
     {}
   virtual int inner_print(char *buf, int64_t buf_len, int64_t &res_len) override;
 
@@ -141,6 +143,7 @@ protected:
   ObSchemaGetterGuard *schema_guard_;
   ObObjPrintParams print_params_;
   const ParamStore *param_store_;
+  const ObSQLSessionInfo *session_;
 };
 
 class ObSQLUtils
@@ -328,7 +331,8 @@ public:
                                        common::ObString &name);
   static int cvt_db_name_to_org(share::schema::ObSchemaGetterGuard &schema_guard,
                                 const ObSQLSessionInfo *session,
-                                common::ObString &name);
+                                common::ObString &name,
+                                ObIAllocator *allocator);
   static int check_and_convert_table_name(const common::ObCollationType cs_type,
                                           const bool preserve_lettercase,
                                           common::ObString &name,
@@ -425,14 +429,16 @@ public:
   static int reconstruct_sql(ObIAllocator &allocator, const ObStmt *stmt, ObString &sql,
                              ObSchemaGetterGuard *schema_guard,
                              ObObjPrintParams print_params = ObObjPrintParams(),
-                             const ParamStore *param_store = NULL);
+                             const ParamStore *param_store = NULL,
+                             const ObSQLSessionInfo *session = NULL);
   static int print_sql(char *buf,
                        int64_t buf_len,
                        int64_t &pos,
                        const ObStmt *stmt,
                        ObSchemaGetterGuard *schema_guard,
                        ObObjPrintParams print_params,
-                       const ParamStore *param_store = NULL);
+                       const ParamStore *param_store = NULL,
+                       const ObSQLSessionInfo *session = NULL);
 
   static int wrap_expr_ctx(const stmt::StmtType &stmt_type,
                            ObExecContext &exec_ctx,
@@ -485,7 +491,8 @@ public:
                                  int64_t range_key_count,
                                  uint64_t table_id,
                                  ObEvalCtx &eval_ctx,
-                                 common::ObNewRange &partition_range);
+                                 common::ObNewRange &partition_range,
+                                 ObArenaAllocator &allocator);
 
   static int revise_hash_part_object(common::ObObj &obj,
                                      const ObNewRow &row,
@@ -655,6 +662,9 @@ public:
                                   bool reset_column_infos,
                                   common::ObIAllocator &alloc,
                                   sql::ObSQLSessionInfo &session_info);
+  static int check_sys_view_changed(const share::schema::ObTableSchema &old_view_schema,
+                                    const share::schema::ObTableSchema &new_view_schema,
+                                    bool &changed);
   static int find_synonym_ref_obj(const ObString &database_name,
                                   const ObString &object_name,
                                   const uint64_t tenant_id,
@@ -670,6 +680,7 @@ public:
                                   share::schema::ObObjectType &obj_type,
                                   uint64_t &schema_version);
   static bool check_need_disconnect_parser_err(const int ret_code);
+  static bool check_json_expr(ObItemType type);
 
   static int print_identifier_require_quotes(ObCollationType collation_type,
                                              const ObString &ident,
@@ -697,6 +708,28 @@ public:
                               const bool check_for_path_char, const int64_t max_ident_len);
 private:
   static bool check_mysql50_prefix(common::ObString &db_name);
+  static bool part_expr_has_virtual_column(const ObExpr *part_expr);
+  static int get_range_for_vector(
+                                  ObObj *start_row_key,
+                                  ObObj *end_row_key,
+                                  int64_t range_key_count,
+                                  uint64_t table_id,
+                                  common::ObNewRange &part_range);
+  static int get_partition_range_common(
+                                    ObObj *function_obj,
+                                    const share::schema::ObPartitionFuncType part_type,
+                                    const ObExpr *part_expr,
+                                    ObEvalCtx &eval_ctx);
+  static int get_range_for_scalar(ObObj *start_row_key,
+                                  ObObj *end_row_key,
+                                  ObObj *function_obj,
+                                  const share::schema::ObPartitionFuncType part_type,
+                                  const ObExpr *part_expr,
+                                  int64_t range_key_count,
+                                  uint64_t table_id,
+                                  ObEvalCtx &eval_ctx,
+                                  common::ObNewRange &part_range,
+                                  ObArenaAllocator &allocator);
   struct SessionInfoCtx
   {
     common::ObCollationType collation_type_;

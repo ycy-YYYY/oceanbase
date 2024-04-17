@@ -225,7 +225,8 @@ private:
   int register_table_lock_cb_(
       ObLockMemtable *memtable,
       ObMemCtxLockOpLinkNode *lock_op,
-      ObOBJLockCallback *&cb);
+      ObOBJLockCallback *&cb,
+      const share::SCN replay_scn = share::SCN::invalid_scn());
 protected:
   DISALLOW_COPY_AND_ASSIGN(ObIMvccCtx);
   int alloc_type_;
@@ -248,8 +249,15 @@ public:
     : exclusive_(exclusive),
       ctx_(NULL),
       memtable_(NULL),
-      write_seq_no_()
+      write_ret_(NULL),
+      write_seq_no_(),
+      try_flush_redo_(true)
   {}
+  ObMvccWriteGuard(const int &ret, const bool exclusive = false)
+    : ObMvccWriteGuard(exclusive)
+  {
+    write_ret_ = &ret;
+  }
   ~ObMvccWriteGuard();
   void set_memtable(ObMemtable *memtable) {
     memtable_ = memtable;
@@ -268,7 +276,9 @@ private:
   const bool exclusive_;  // if true multiple write_auth will be serialized
   ObMemtableCtx *ctx_;
   ObMemtable *memtable_;
+  const int *write_ret_;        // used to sense write result is ok or fail
   transaction::ObTxSEQ write_seq_no_;
+  bool try_flush_redo_;
 };
 }
 }

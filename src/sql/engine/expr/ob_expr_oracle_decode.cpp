@@ -65,6 +65,15 @@ int ObExprOracleDecode::calc_result_typeN(ObExprResType &type,
     } else if (lib::is_oracle_mode() && types_stack[CALC_TYPE_INDEX].get_type() == ObUserDefinedSQLType) {
       ret = OB_ERR_NO_ORDER_MAP_SQL;
       LOG_WARN("cannot ORDER objects without MAP or ORDER method", K(ret));
+    } else if (lib::is_oracle_mode()
+               && (types_stack[CALC_TYPE_INDEX].get_type() == ObGeometryType || types_stack[0].get_type() == ObGeometryType)) {
+      if (types_stack[CALC_TYPE_INDEX].get_type() == types_stack[0].get_type()) {
+        ret = OB_ERR_COMPARE_VARRAY_LOB_ATTR;
+        LOG_WARN("Incorrect cmp type with geometry arguments", K(ret));
+      } else {
+        ret = OB_ERR_INVALID_TYPE_FOR_OP;
+        LOG_WARN("invalid type of parameter", K(ret), K(types_stack[0]), K(types_stack[1]));
+      }
     }
     for (int64_t i = 1; OB_SUCC(ret) && i < param_num; i += 2) {
       if (has_default && i == param_num - 1) {
@@ -234,7 +243,14 @@ int ObExprOracleDecode::calc_result_typeN(ObExprResType &type,
     }
   }
   if (OB_SUCC(ret)) {
-    ObObjType result_type = enumset_calc_types_[OBJ_TYPE_TO_CLASS[type.get_type()]];
+    ObObjType result_type = ObMaxType;
+    if(OBJ_TYPE_TO_CLASS[type.get_type()] == ObExtendTC) {
+      result_type = ObExtendType;
+    }
+    else {
+      // 这里针对calc的转换是不是可以直接用在result上？？
+      result_type = enumset_calc_types_[OBJ_TYPE_TO_CLASS[type.get_type()]];
+    }
     if (OB_UNLIKELY(ObMaxType == result_type)) {
       ret = OB_ERR_UNEXPECTED;
       SQL_ENG_LOG(WARN, "invalid type of parameter ", K(type), K(ret));
@@ -349,6 +365,10 @@ int ObExprOracleDecode::calc_result_typeN(ObExprResType &type,
       } else {
         type.set_length(len);
       }
+    }
+    if(ob_is_extend(type.get_type())) {
+      type.set_extend_type(types_stack[RESULT_TYPE_INDEX].get_extend_type());
+      type.set_accuracy(types_stack[RESULT_TYPE_INDEX].get_accuracy().get_accuracy());
     }
   }
   if (OB_SUCC(ret)) {

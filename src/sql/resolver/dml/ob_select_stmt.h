@@ -342,7 +342,7 @@ public:
                           ObStmtExprVisitor &visitor);
   int iterate_rollup_items(ObIArray<ObRollupItem> &rollup_items, ObStmtExprVisitor &visitor);
   int iterate_cube_items(ObIArray<ObCubeItem> &cube_items, ObStmtExprVisitor &visitor);
-  int update_stmt_table_id(const ObSelectStmt &other);
+  int update_stmt_table_id(ObIAllocator *allocator, const ObSelectStmt &other);
   int64_t get_select_item_size() const { return select_items_.count(); }
   int64_t get_group_expr_size() const { return group_exprs_.count(); }
   int64_t get_rollup_expr_size() const { return rollup_exprs_.count(); }
@@ -511,6 +511,7 @@ public:
   }
   int add_having_expr(ObRawExpr *expr) { return having_exprs_.push_back(expr); }
   bool has_for_update() const;
+  bool is_skip_locked() const;
   common::ObIArray<ObColumnRefRawExpr*> &get_for_update_columns() { return for_update_columns_; }
   const common::ObIArray<ObColumnRefRawExpr *> &get_for_update_columns() const { return for_update_columns_; }
   bool contain_ab_param() const { return contain_ab_param_; }

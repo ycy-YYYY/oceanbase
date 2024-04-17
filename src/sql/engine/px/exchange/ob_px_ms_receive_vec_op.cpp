@@ -154,7 +154,7 @@ int ObPxMSReceiveVecOp::inner_open()
         ret = OB_ALLOCATE_MEMORY_FAILED;
         LOG_WARN("failed to alloc memory for selector", K(ret));
       } else if (OB_ISNULL(stored_compact_rows_ = static_cast<const ObCompactRow **>(
-                      ctx_.get_allocator().alloc(spec_.max_batch_size_ * sizeof(ObCompactRow))))) {
+                      ctx_.get_allocator().alloc(spec_.max_batch_size_ * sizeof(ObCompactRow *))))) {
         ret = OB_ALLOCATE_MEMORY_FAILED;
         LOG_WARN("failed to alloc memory for stored compact rows", K(ret));
       } else {
@@ -675,7 +675,7 @@ int ObPxMSReceiveVecOp::inner_get_next_row()
 int ObPxMSReceiveVecOp::inner_get_next_batch(const int64_t max_row_cnt)
 {
   int ret = OB_SUCCESS;
-  do_clear_datum_eval_flag();
+  clear_evaluated_flag();
   clear_dynamic_const_parent_flag();
   // 从channel sets 读取数据，并向上迭代
   const ObPxReceiveSpec &spec = static_cast<const ObPxReceiveSpec &>(get_spec());
@@ -939,8 +939,6 @@ int ObPxMSReceiveVecOp::get_all_rows_from_channels(ObPhysicalPlanCtx *phy_plan_c
                                      const_cast<ObCompactRow **>(stored_compact_rows_)))) {
                     LOG_WARN("temp row store add batch failed", K(ret));
                   } else {
-                    last_store_row = stored_compact_rows_[0];
-                    last_store_row_array.at(got_channel_idx) = last_store_row;
                     start_idx = cur_idx;
                   }
                 }
@@ -974,7 +972,7 @@ int ObPxMSReceiveVecOp::get_all_rows_from_channels(ObPhysicalPlanCtx *phy_plan_c
                                      const_cast<ObCompactRow **>(stored_compact_rows_)))) {
                 LOG_WARN("temp row store add batch failed", K(ret));
               } else {
-                last_store_row = stored_compact_rows_[0];
+                last_store_row = stored_compact_rows_[cur_idx - start_idx - 1];
                 last_store_row_array.at(got_channel_idx) = last_store_row;
               }
             }

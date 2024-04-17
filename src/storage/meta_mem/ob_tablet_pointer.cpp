@@ -523,6 +523,11 @@ void ObTabletPointer::set_tablet_status_written()
   mds_table_handler_.set_tablet_status_written();
 }
 
+void ObTabletPointer::reset_tablet_status_written()
+{
+  mds_table_handler_.reset_tablet_status_written();
+}
+
 bool ObTabletPointer::is_tablet_status_written() const
 {
   return mds_table_handler_.is_tablet_status_written();
@@ -537,6 +542,7 @@ int ObTabletPointer::release_memtable_and_mds_table_for_ls_offline(const ObTable
 {
   int ret = OB_SUCCESS;
   mds::MdsTableHandle mds_table;
+  reset_tablet_status_written();
   if (tablet_id.is_ls_inner_tablet()) {
     LOG_INFO("skip inner tablet", K(tablet_id));
   } else if (OB_FAIL(protected_memtable_mgr_handle_.reset())) {
@@ -647,7 +653,7 @@ int ObTabletPointer::release_obj(ObTablet *&t)
     ret = OB_ERR_UNEXPECTED;
     STORAGE_LOG(WARN, "object pool or allocator is nullptr", K(ret), K(obj_));
   } else if (nullptr == t->get_allocator()) {
-    obj_.t3m_->release_tablet(t);
+    obj_.t3m_->release_tablet_from_pool(t, true/*give_back_tablet_into_pool*/);
     t = nullptr;
   } else {
     t->~ObTablet();

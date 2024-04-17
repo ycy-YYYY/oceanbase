@@ -316,7 +316,7 @@ int ObTxFinishTransfer::do_tx_transfer_doing_(const ObTransferTaskID &task_id, c
       }
     }
   }
-  if (OB_TMP_FAIL(record_server_event_(ret, is_ready, tmp_round))) {
+  if (OB_TMP_FAIL(record_server_event_(ret, is_ready, tmp_round, start_scn))) {
     LOG_WARN("failed to record server event", K(tmp_ret), K(ret), K(is_ready));
   }
   return ret;
@@ -838,6 +838,7 @@ int ObTxFinishTransfer::build_tx_finish_transfer_in_info_(const share::ObLSID &s
     transfer_in_info.src_ls_id_ = src_ls_id;
     transfer_in_info.dest_ls_id_ = dest_ls_id;
     transfer_in_info.start_scn_ = start_scn;
+    transfer_in_info.data_version_ = DEFAULT_MIN_DATA_VERSION;
     if (OB_FAIL(transfer_in_info.tablet_list_.assign(tablet_list))) {
       LOG_WARN("failed to assign tablet list", K(ret), K(tablet_list));
     }
@@ -858,6 +859,7 @@ int ObTxFinishTransfer::build_tx_finish_transfer_out_info_(const share::ObLSID &
     transfer_out_info.src_ls_id_ = src_ls_id;
     transfer_out_info.dest_ls_id_ = dest_ls_id;
     transfer_out_info.finish_scn_ = finish_scn;
+    transfer_out_info.data_version_ = DEFAULT_MIN_DATA_VERSION;
     if (OB_FAIL(transfer_out_info.tablet_list_.assign(tablet_list))) {
       LOG_WARN("failed to assign tablet list", K(ret), K(tablet_list));
     }
@@ -1050,12 +1052,15 @@ int ObTxFinishTransfer::select_transfer_task_for_update_(const ObTransferTaskID 
 int ObTxFinishTransfer::record_server_event_(
     const int32_t result,
     const bool is_ready,
-    const int64_t round) const
+    const int64_t round,
+    const share::SCN &start_scn) const
 {
   int ret = OB_SUCCESS;
   ObSqlString extra_info_str;
   const share::ObTransferStatus doing_status(ObTransferStatus::DOING);
   const share::ObTransferStatus finish_status(ObTransferStatus::COMPLETED);
+  const int64_t start_scn_ts = start_scn.is_valid() ? start_scn.convert_to_ts() : 0;
+  const int64_t elapsed_us_from_start_scn = start_scn.is_valid() ? ObTimeUtility::current_time() - start_scn_ts : 0;
   if (OB_SUCCESS == result) {
     if (is_ready) {
       if (OB_FAIL(extra_info_str.append_fmt("msg:\"transfer doing success\";"))) {
@@ -1070,6 +1075,8 @@ int ObTxFinishTransfer::record_server_event_(
   if (OB_SUCC(ret)) {
     if (OB_FAIL(extra_info_str.append_fmt("round:%ld;", round))) {
       LOG_WARN("fail to printf retry time", K(ret));
+    } else if (elapsed_us_from_start_scn > 0 && OB_FAIL(extra_info_str.append_fmt("elapsed_us_from_start_scn:%ld;", elapsed_us_from_start_scn))) {
+      LOG_WARN("fail to printf retry time", K(ret));
     } else {
       if (OB_SUCCESS == result && is_ready) {
         if (OB_FAIL(write_server_event_(result, extra_info_str, finish_status))) {
@@ -1079,6 +1086,9 @@ int ObTxFinishTransfer::record_server_event_(
         if (REACH_TENANT_TIME_INTERVAL(10 * 1000 * 1000)) {
           if (OB_FAIL(write_server_event_(result, extra_info_str, doing_status))) {
             LOG_WARN("fail to write server event", K(ret), K(result), K(extra_info_str));
+          } else if (elapsed_us_from_start_scn > TASK_EXECUTE_LONG_WARNING_THRESHOLD) {
+            LOG_ERROR("transfer task stuck at doing stage for too long, may be wait log replay or transfer backfill too slow",
+                K(start_scn), K(elapsed_us_from_start_scn), K_(task_id));
           }
         }
       }
@@ -1100,5 +1110,6 @@ int ObTxFinishTransfer::write_server_event_(const int32_t result, const ObSqlStr
       extra_info.ptr());
   return ret;
 }
+
 }  // namespace storage
 }  // namespace oceanbase

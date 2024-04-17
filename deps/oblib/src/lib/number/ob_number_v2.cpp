@@ -3058,6 +3058,7 @@ const char *ObNumber::format() const
   if (OB_ISNULL(buffers)) {
     buffer = nullptr;
   } else if(OB_UNLIKELY(OB_SUCCESS != format(buffer, BUFFER_SIZE, length, -1))) {
+    buffer = nullptr;
     LOG_ERROR_RET(OB_ERROR, "fail to format buffer");
   } else {
     buffer[length] = '\0';
@@ -3539,7 +3540,11 @@ int ObNumber::to_sci_str_(ObString &num_str, char *buf,
           }
           buf[digit_start_pos] = '1';
           buf[digit_start_pos + 1] = '.';
-          ++pow_size;
+          if ('-' == pow_str[1]) {
+            --pow_size;
+          } else {
+            ++pow_size;
+          }
         }
       }
     }

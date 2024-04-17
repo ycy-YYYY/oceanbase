@@ -247,6 +247,7 @@ SubObjectMgr *ObjectMgr::create_sub_mgr()
   auto *obj = root_mgr.alloc_object(sizeof(SubObjectMgr), attr);
   root_mgr.unlock();
   if (OB_NOT_NULL(obj)) {
+    obj->ignore_version_ = true;
     SANITY_UNPOISON(obj->data_, obj->alloc_bytes_);
     sub_mgr = new (obj->data_) SubObjectMgr(ta_,
                                             enable_no_log_,
@@ -331,7 +332,7 @@ bool ObjectMgr::check_has_unfree()
   return has_unfree;
 }
 
-bool ObjectMgr::check_has_unfree(char *first_label)
+bool ObjectMgr::check_has_unfree(char *first_label, char *first_bt)
 {
   bool has_unfree = false;
   for (uint64_t idx = 0; idx < ATOMIC_LOAD(&sub_cnt_) && !has_unfree; idx++) {
@@ -341,7 +342,7 @@ bool ObjectMgr::check_has_unfree(char *first_label)
     } else {
       sub_mgr->lock();
       DEFER(sub_mgr->unlock());
-      has_unfree = sub_mgr->check_has_unfree(first_label);
+      has_unfree = sub_mgr->check_has_unfree(first_label, first_bt);
     }
   }
   return has_unfree;

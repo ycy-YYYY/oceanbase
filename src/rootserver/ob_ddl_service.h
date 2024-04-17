@@ -72,6 +72,7 @@ class ObTableSchema;
 class ObMultiVersionSchemaService;
 class ObNeedPriv;
 class ObSchemaMgr;
+class ObMViewInfo;
 }
 }
 
@@ -352,6 +353,7 @@ public:
       share::schema::AlterColumnSchema &alter_column_schema,
       ObIArray<ObString> &gen_col_expr_arr,
       share::schema::ObSchemaGetterGuard &schema_guard,
+      uint64_t &curr_udt_set_id,
       ObDDLOperator *ddl_operator,
       common::ObMySQLTransaction *trans);
   int add_column_to_column_group(
@@ -940,15 +942,19 @@ int check_table_udt_id_is_exist(share::schema::ObSchemaGetterGuard &schema_guard
   //----Functions for managing udt----
   virtual int create_udt(share::schema::ObUDTTypeInfo &routine_info,
                          const share::schema::ObUDTTypeInfo *old_routine_info,
-                         bool replace,
                          ObIArray<share::schema::ObRoutineInfo> &public_routine_infos,
                          share::schema::ObErrorInfo &error_info,
                          share::schema::ObSchemaGetterGuard &schema_guard,
                          common::ObIArray<share::schema::ObDependencyInfo> &dep_infos,
-                         const common::ObString *ddl_stmt_str);
+                         const common::ObString *ddl_stmt_str,
+                         bool need_replace,
+                         bool exist_valid_udt,
+                         bool specify_force);
   virtual int drop_udt(const share::schema::ObUDTTypeInfo &routine_info,
                        share::schema::ObSchemaGetterGuard &schema_guard,
-                       const common::ObString *ddl_stmt_str);
+                       const common::ObString *ddl_stmt_str,
+                       bool specify_force,
+                       bool exist_valid_udt);
   //----End of functions for managing routine----
 
   //----Functions for managing package----
@@ -1176,7 +1182,10 @@ int check_table_udt_id_is_exist(share::schema::ObSchemaGetterGuard &schema_guard
                    const ObTabletIDArray &tablet_ids);
   // lock table, unlock when ddl trans end
   int lock_table(ObMySQLTransaction &trans,
-                 const share::schema::ObTableSchema &table_schema);
+                 const ObSimpleTableSchemaV2 &table_schema);
+  // lock mview object, unlock when ddl trans end
+  // Must before locking the container table
+  int lock_mview(ObMySQLTransaction &trans, const ObSimpleTableSchemaV2 &table_schema);
   int recompile_view(const ObTableSchema &view_schema, const bool reset_view_column_infos, ObDDLSQLTransaction &trans);
   int recompile_all_views_batch(const uint64_t tenant_id, const common::ObIArray<uint64_t > &view_ids);
   int try_add_dep_info_for_all_synonyms_batch(const uint64_t tenant_id, const common::ObIArray<uint64_t> &synonym_ids);
@@ -2006,10 +2015,8 @@ private:
       common::ObMySQLTransaction &trans,
       bool &is_add_lob);
   int lock_tables_of_database(const share::schema::ObDatabaseSchema &database_schema,
-                              share::schema::ObSchemaGetterGuard &schema_guard,
                               ObMySQLTransaction &trans);
   int lock_tables_in_recyclebin(const share::schema::ObDatabaseSchema &database_schema,
-                                share::schema::ObSchemaGetterGuard &schema_guard,
                                 ObMySQLTransaction &trans);
 
 public:
@@ -2069,7 +2076,6 @@ public:
 #endif
 private:
   int adjust_cg_for_offline(ObTableSchema &new_table_schema);
-  int alter_default_column_group(share::schema::ObTableSchema &new_table_schema);
   int add_column_group(const obrpc::ObAlterTableArg &alter_table_arg,
                        const share::schema::ObTableSchema &ori_table_schema,
                        share::schema::ObTableSchema &new_table_schema);
@@ -2077,7 +2083,6 @@ private:
   int drop_column_group(const obrpc::ObAlterTableArg &alter_table_arg,
                         const share::schema::ObTableSchema &ori_table_schema,
                         share::schema::ObTableSchema &new_table_schema);
-  int alter_rowkey_column_group(share::schema::ObTableSchema &table_schema);
   int handle_security_audit_for_stmt(const obrpc::ObSecurityAuditArg &arg,
                                      share::schema::ObSAuditSchema &audit_schema);
   int handle_security_audit_for_object(const obrpc::ObSecurityAuditArg &arg,
@@ -2700,6 +2705,7 @@ private:
                                         const ObIArray<ObDependencyInfo> *dep_infos,
                                         common::ObIAllocator &allocator,
                                         const uint64_t tenant_data_version,
+                                        const share::schema::ObMViewInfo &mview_info,
                                         ObDDLTaskRecord &task_record);
 
   bool need_modify_dep_obj_status(const obrpc::ObAlterTableArg &alter_table_arg) const;

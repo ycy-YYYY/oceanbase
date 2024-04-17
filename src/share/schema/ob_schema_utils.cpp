@@ -25,6 +25,7 @@
 #include "sql/resolver/expr/ob_raw_expr_util.h"
 #include "sql/session/ob_sql_session_info.h"
 #include "observer/ob_server_struct.h"
+#include "sql/engine/cmd/ob_ddl_executor_util.h"
 namespace oceanbase
 {
 using namespace common;
@@ -506,6 +507,7 @@ int ObSchemaUtils::construct_inner_table_schemas(
 
 int ObSchemaUtils::try_check_parallel_ddl_schema_in_sync(
     const ObTimeoutCtx &ctx,
+    sql::ObSQLSessionInfo *session,
     const uint64_t tenant_id,
     const int64_t schema_version)
 {
@@ -517,19 +519,27 @@ int ObSchemaUtils::try_check_parallel_ddl_schema_in_sync(
   if (tenant_config.is_valid()) {
     consensus_timeout = tenant_config->_wait_interval_after_parallel_ddl;
   }
-  if (OB_UNLIKELY(OB_INVALID_TENANT_ID == tenant_id
+  if (OB_ISNULL(session) || OB_UNLIKELY(OB_INVALID_TENANT_ID == tenant_id
       || schema_version <= 0
       || consensus_timeout < 0)) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid arg", KR(ret), K(tenant_id), K(schema_version), K(consensus_timeout));
+    LOG_WARN("invalid arg", KR(ret), KP(session), K(tenant_id), K(schema_version), K(consensus_timeout));
   } else if (OB_ISNULL(schema_service = GCTX.schema_service_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("schema_service is null", KR(ret));
   }
+  bool is_dropped = false;
   while (OB_SUCC(ret) && ctx.get_timeout() > 0) {
     int64_t refreshed_schema_version = OB_INVALID_VERSION;
     int64_t consensus_schema_version = OB_INVALID_VERSION;
-    if (OB_FAIL(schema_service->get_tenant_refreshed_schema_version(tenant_id, refreshed_schema_version))) {
+    if (OB_FAIL(schema_service->check_if_tenant_has_been_dropped(tenant_id, is_dropped))) {
+      LOG_WARN("fail to check if tenant has been dropped", KR(ret), K(tenant_id));
+    } else if (OB_UNLIKELY(is_dropped)) {
+      ret = OB_TENANT_HAS_BEEN_DROPPED;
+      LOG_WARN("tenant has been dropped", KR(ret), K(tenant_id));
+    } else if (OB_FAIL(ObDDLExecutorUtil::handle_session_exception(*session))) {
+      LOG_WARN("fail to handle session exception", KR(ret));
+    } else if (OB_FAIL(schema_service->get_tenant_refreshed_schema_version(tenant_id, refreshed_schema_version))) {
       LOG_WARN("get refreshed schema_version fail", KR(ret), K(tenant_id));
     } else if (OB_FAIL(schema_service->get_tenant_broadcast_consensus_version(tenant_id, consensus_schema_version))) {
       LOG_WARN("get consensus schema_version fail", KR(ret), K(tenant_id));
@@ -663,6 +673,194 @@ int ObSchemaUtils::batch_get_latest_table_schemas(
   return ret;
 }
 
+int ObSchemaUtils::alter_rowkey_column_group(share::schema::ObTableSchema &table_schema)
+{
+  int ret = OB_SUCCESS;
+  bool is_each_cg_exist = false;
+  bool is_all_cg_exist = false;
+  ObColumnGroupSchema *rowkey_cg = nullptr;
+  /* scan all column column group*/
+
+  /*get rowkey_cg*/
+  if (OB_FAIL(table_schema.get_column_group_by_name(OB_ROWKEY_COLUMN_GROUP_NAME, rowkey_cg))) {
+    if (OB_HASH_NOT_EXIST == ret) {
+      ret = OB_SUCCESS;
+      rowkey_cg = nullptr;
+    } else {
+      LOG_WARN("Fail to get rowkey column group", K(ret), K(table_schema));
+    }
+  }
+
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(table_schema.is_column_group_exist(OB_ALL_COLUMN_GROUP_NAME, is_all_cg_exist))) {
+      LOG_WARN("Fail to check whetehre all column group exist", K(ret));
+    } else if (OB_FAIL(table_schema.is_column_group_exist(OB_EACH_COLUMN_GROUP_NAME, is_each_cg_exist))) {
+      LOG_WARN("Fail to check whether each column group exist", K(ret));
+    }
+  }
+
+
+  if (OB_SUCC(ret)) {
+    /* only when only each exist, rowkey_cg is needed*/
+    if (is_each_cg_exist && (!is_all_cg_exist)) {
+      if (OB_ISNULL(rowkey_cg)) {
+        ObColumnGroupSchema new_rowkey_cg;
+        ObArray<uint64_t> rowkey_ids;
+        uint64_t rowkey_cg_id =  table_schema.get_max_used_column_group_id() + 1;
+        ObTableSchema::const_column_iterator iter_begin = table_schema.column_begin();
+        ObTableSchema::const_column_iterator iter_end = table_schema.column_end();
+        for (; OB_SUCC(ret) && iter_begin != iter_end; ++iter_begin) {
+          ObColumnSchemaV2 *column = (*iter_begin);
+          if (OB_ISNULL(column)) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("column schema should not be null", K(ret));
+          } else if (column->is_rowkey_column()) {
+            if (OB_FAIL(rowkey_ids.push_back(column->get_column_id()))) {
+              LOG_WARN("fail to push back value", K(ret));
+            }
+          }
+        }
+
+        if (OB_FAIL(ret)) {
+        } else if (OB_FAIL(ObSchemaUtils::build_column_group(
+                               table_schema, table_schema.get_tenant_id(),ObColumnGroupType::ROWKEY_COLUMN_GROUP,
+                               OB_ROWKEY_COLUMN_GROUP_NAME, rowkey_ids, rowkey_cg_id, new_rowkey_cg))) {
+          LOG_WARN("fail to build rowkey column group", K(ret));
+        } else if (OB_FAIL(table_schema.add_column_group(new_rowkey_cg))) {
+          LOG_WARN("fail to add rowkey column group to table_schema", K(ret));
+        }
+      } else {
+        /*rowkey cg exist skip*/
+      }
+    } else {
+      /*other situation, rowkey column group should not exist*/
+      if (OB_NOT_NULL(rowkey_cg)) {
+        if (OB_FAIL(table_schema.remove_column_group(rowkey_cg->get_column_group_id()))){
+          LOG_WARN("fail to remove rowkey cg", K(ret));
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+/* check all column group add add not exi*/
+int ObSchemaUtils::alter_default_column_group(share::schema::ObTableSchema &new_table_schema)
+{
+  int ret = OB_SUCCESS;
+  ObColumnGroupSchema* default_cg = nullptr;
+  hash::ObHashSet<uint64_t> cg_column_ids;
+  ObArray<ObColumnGroupSchema*> column_groups;
+  bool is_all_cg_exist = false;
+  ObColumnGroupSchema* all_column_group = nullptr;
+  column_groups.reset();
+  if (!new_table_schema.is_column_store_supported()) {
+    /* skip */
+  } else {
+    if (new_table_schema.get_column_group_count() < 1) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_WARN("there is no column group in the table schema", K(ret), K(new_table_schema));
+    } else if (OB_FAIL(cg_column_ids.create(new_table_schema.get_column_count()))) {
+      LOG_WARN("fail to create hashmap", K(ret));
+    }
+
+    ObTableSchema::const_column_group_iterator iter_begin = new_table_schema.column_group_begin();
+    ObTableSchema::const_column_group_iterator iter_end = new_table_schema.column_group_end();
+
+    for (; OB_SUCC(ret) && iter_begin != iter_end; iter_begin++) {
+      const ObColumnGroupSchema *column_group = *iter_begin;
+      if (OB_ISNULL(column_group)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("column group should not be null", K(ret), K(new_table_schema));
+      } else if (column_group->get_column_group_type() != ObColumnGroupType::DEFAULT_COLUMN_GROUP) {
+        for (int64_t col_index = 0;
+          OB_SUCC(ret) && col_index < column_group->get_column_id_count();
+          col_index++) {
+          if (OB_FAIL(cg_column_ids.set_refactored((column_group->get_column_ids())[col_index],
+                                                1 /*overwrite*/))) {
+            LOG_WARN("fail to add column id", K(ret));
+          }
+        }
+      }
+    }
+    if (OB_SUCC(ret)) {
+      if (OB_FAIL(new_table_schema.get_column_group_by_name(OB_DEFAULT_COLUMN_GROUP_NAME, default_cg))) {
+        LOG_WARN("fail to get all columns in column groups", K(ret), K(new_table_schema));
+      } else {
+        default_cg->remove_all_cols();
+        ObArray<int64_t> col_ids;
+        /*schema may not be ready not use default func*/
+        ObTableSchema::const_column_iterator iter_begin = new_table_schema.column_begin();
+        ObTableSchema::const_column_iterator iter_end = new_table_schema.column_end();
+        for (;OB_SUCC(ret) && iter_begin != iter_end; ++iter_begin) {
+          ObColumnSchemaV2 *column = (*iter_begin);
+          if (OB_ISNULL(column)) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("column schema should not be null", K(ret));
+          } else if (column->is_virtual_generated_column()) {
+            /* skip virtual column*/
+          } else if (OB_FAIL(col_ids.push_back(column->get_column_id()))) {
+            LOG_WARN("fail to push back value", K(ret));
+          }
+        }
+
+        for (int64_t i = 0; OB_SUCC(ret) && i < col_ids.count(); i++) {
+          int hash_ret = cg_column_ids.exist_refactored(col_ids[i]);
+          if (hash_ret != OB_HASH_EXIST && hash_ret != OB_HASH_NOT_EXIST) {
+            ret = hash_ret;
+            LOG_WARN("fail to check key exist", K(ret));
+          } else if (OB_HASH_EXIST == hash_ret) {
+            /*skip, column exist in other column group don't need to be added*/
+          } else if (OB_HASH_NOT_EXIST == hash_ret) {
+            if (OB_FAIL(default_cg->add_column_id(col_ids[i]))) {
+              LOG_WARN("fail to add column to default cg", KPC(default_cg), K(col_ids[i]), K(new_table_schema));
+            }
+          }
+        }
+
+        /*default cg check, used when only support all/each column group*/
+        if (OB_SUCC(ret) && default_cg->get_column_id_count() != 0 && default_cg->get_column_id_count() != col_ids.count()) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("default column group have invalid column id count", K(ret), KPC(default_cg));
+        }
+      }
+    }
+  }
+
+  return ret;
+}
+
+
+/*build and add each column group*/
+int ObSchemaUtils::build_add_each_column_group(const share::schema::ObTableSchema &table_schema,
+                                                 share::schema::ObTableSchema &dst_table_schema)
+{
+  int ret = OB_SUCCESS;
+  ObColumnGroupSchema column_group_schema;
+  ObTableSchema::const_column_iterator iter_begin = table_schema.column_begin();
+  ObTableSchema::const_column_iterator iter_end = table_schema.column_end();
+  for (;OB_SUCC(ret) && iter_begin != iter_end; ++iter_begin) {
+    column_group_schema.reset();
+    ObColumnSchemaV2 *column = (*iter_begin);
+    uint64_t cg_id = dst_table_schema.get_max_used_column_group_id() + 1;
+    if (OB_ISNULL(column)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("column schema should not be null", K(ret));
+    } else if (column->is_virtual_generated_column()) {
+        /* skip virtual column*/
+    } else if (OB_FAIL(ObSchemaUtils::build_single_column_group(
+                                   table_schema, column, dst_table_schema.get_tenant_id(),
+                                   cg_id, column_group_schema))) {
+        LOG_WARN("fail to build single column group", K(ret));
+    } else if (column_group_schema.is_valid()) {
+      if (OB_FAIL(dst_table_schema.add_column_group(column_group_schema))) {
+        LOG_WARN("fail to add single column group to table schema", K(ret), K(column_group_schema));
+      }
+    }
+  }
+  return ret;
+}
+
 int ObSchemaUtils::build_single_column_group(
     const share::schema::ObTableSchema &table_schema,
     share::schema::ObColumnSchemaV2 *column_schema,
@@ -713,8 +911,23 @@ int ObSchemaUtils::build_all_column_group(
              K(ret), K(table_schema), K(column_group_id));
   } else{
     ObArray<uint64_t> column_ids;
-    if (OB_FAIL(table_schema.get_all_column_ids(column_ids))) {
-      LOG_WARN("fail to get all column id in table schema", K(ret));
+
+    ObTableSchema::const_column_iterator iter_begin = table_schema.column_begin();
+    ObTableSchema::const_column_iterator iter_end = table_schema.column_end();
+    for (; OB_SUCC(ret) && iter_begin != iter_end; ++iter_begin) {
+      column_group_schema.reset();
+      ObColumnSchemaV2 *column = (*iter_begin);
+      if (OB_ISNULL(column)) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("column schema should not be null", K(ret));
+      } else if (column->is_virtual_generated_column()) {
+          /* skip virtual column*/
+      } else if (OB_FAIL(column_ids.push_back(column->get_column_id()))) {
+        LOG_WARN("fail to push back value", K(ret));
+      }
+    }
+
+    if (OB_FAIL(ret)) {
     } else {
       const ObString cg_name = OB_ALL_COLUMN_GROUP_NAME;
       if (column_ids.count() <= 0) {

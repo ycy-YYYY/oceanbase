@@ -166,6 +166,15 @@ public:
                                   int64_t &leader_idx,
                                   const bool with_mock_election,
                                   PalfHandleImplGuard &leader);
+  int create_paxos_group_with_arb(const int64_t id,
+                                  palf::PalfLocationCacheCb *loc_cb,
+                                  ObMemberList member_list,
+                                  int64_t member_cnt,
+                                  ObMember arb_member,
+                                  int64_t &arb_replica_idx,
+                                  int64_t &leader_idx,
+                                  const bool with_mock_election,
+                                  PalfHandleImplGuard &leader);
   int create_paxos_group_with_mock_election(const int64_t id,
                                             int64_t &leader_idx,
                                             PalfHandleImplGuard &leader);
@@ -237,6 +246,7 @@ public:
   virtual int advance_base_info(const int64_t id, const PalfBaseInfo &base_info);
   virtual int get_palf_env(const int64_t server_idx, PalfEnv *&palf_env);
   virtual int wait_until_has_committed(PalfHandleImplGuard &leader, const LSN &lsn);
+  virtual int wait_lsn_until_slide(const LSN &lsn, PalfHandleImplGuard &guard);
   virtual int wait_lsn_until_flushed(const LSN &lsn, PalfHandleImplGuard &guard);
   //wait until all log task pushed into queue of LogIOWorker
   virtual int wait_lsn_until_submitted(const LSN &lsn, PalfHandleImplGuard &guard);

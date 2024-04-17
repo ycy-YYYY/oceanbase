@@ -50,7 +50,8 @@ ObPhysicalCopyCtx::ObPhysicalCopyCtx()
     restore_macro_block_id_mgr_(nullptr),
     need_sort_macro_meta_(true),
     need_check_seq_(false),
-    ls_rebuild_seq_(-1)
+    ls_rebuild_seq_(-1),
+    table_key_()
 {
 }
 
@@ -63,7 +64,8 @@ bool ObPhysicalCopyCtx::is_valid() const
   bool bool_ret = false;
   bool_ret = tenant_id_ != OB_INVALID_ID && ls_id_.is_valid() && tablet_id_.is_valid()
       && OB_NOT_NULL(bandwidth_throttle_) && OB_NOT_NULL(svr_rpc_proxy_) && OB_NOT_NULL(ha_dag_)
-      && OB_NOT_NULL(sstable_index_builder_) && ((need_check_seq_ && ls_rebuild_seq_ >= 0) || !need_check_seq_);
+      && OB_NOT_NULL(sstable_index_builder_) && ((need_check_seq_ && ls_rebuild_seq_ >= 0) || !need_check_seq_)
+      && table_key_.is_valid();
   if (bool_ret) {
     if (!is_leader_restore_) {
       bool_ret = src_info_.is_valid();
@@ -93,6 +95,7 @@ void ObPhysicalCopyCtx::reset()
   need_sort_macro_meta_ = true;
   need_check_seq_ = false;
   ls_rebuild_seq_ = -1;
+  table_key_.reset();
 }
 
 /******************ObPhysicalCopyTaskInitParam*********************/
@@ -330,7 +333,7 @@ int ObPhysicalCopyTask::fetch_macro_block_(
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("unexpected task_idx_", K(ret), K(task_idx_));
     } else if (OB_FAIL(index_block_rebuilder.init(
-            *copy_ctx_->sstable_index_builder_, copy_ctx_->need_sort_macro_meta_, &task_idx_))) {
+            *copy_ctx_->sstable_index_builder_, copy_ctx_->need_sort_macro_meta_, &task_idx_, copy_ctx_->table_key_.is_ddl_merge_sstable()))) {
       LOG_WARN("failed to init index block rebuilder", K(ret), K(copy_table_key_));
     } else if (OB_FAIL(get_macro_block_reader_(reader))) {
       LOG_WARN("fail to get macro block reader", K(ret));
@@ -670,6 +673,7 @@ int ObSSTableCopyFinishTask::init(
     copy_ctx_.need_sort_macro_meta_ = init_param.need_sort_macro_meta_;
     copy_ctx_.need_check_seq_ = init_param.need_check_seq_;
     copy_ctx_.ls_rebuild_seq_ = init_param.ls_rebuild_seq_;
+    copy_ctx_.table_key_ = init_param.sstable_param_->table_key_;
     macro_range_info_index_ = 0;
     ls_ = init_param.ls_;
     sstable_param_ = init_param.sstable_param_;
@@ -821,10 +825,18 @@ int ObSSTableCopyFinishTask::prepare_data_store_desc_(
   } else {
     const uint16_t cg_idx = sstable_param->table_key_.get_column_group_id();
     const ObStorageColumnGroupSchema *cg_schema = nullptr;
+    ObStorageColumnGroupSchema mocked_row_store_cg;
     if (sstable_param->table_key_.is_cg_sstable()) {
       if (OB_UNLIKELY(cg_idx < 0 || cg_idx >= storage_schema->get_column_group_count())) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("get unexpected cg idx", K(ret), K(cg_idx), KPC(storage_schema));
+      } else if (ALL_CG_TYPE == sstable_param->co_base_type_ && cg_schema->is_rowkey_column_group()) {
+        // ALL_CG_TYPE means major is row store (no cgs), cg_schema means table is created with column store.
+        if (OB_FAIL(storage_schema->mock_row_store_cg(mocked_row_store_cg))) {
+          LOG_WARN("failed to mock row store column group schema", K(ret));
+        } else {
+          cg_schema = &mocked_row_store_cg;
+        }
       } else {
         cg_schema = &storage_schema->get_column_groups().at(cg_idx);
       }
@@ -979,12 +991,10 @@ int ObSSTableCopyFinishTask::create_empty_sstable_()
     } else if (OB_FAIL(tablet->load_storage_schema(tmp_allocator, storage_schema_ptr))) {
       LOG_WARN("failed to load storage_schema", K(ret), KPC(tablet));
     } else if (FALSE_IT(param.column_group_cnt_ = sstable_param_->column_group_cnt_)) {
-    } else if (FALSE_IT(param.is_empty_co_table_ = param.table_key_.is_ddl_sstable() ? false : true)) {
+    } else if (FALSE_IT(param.is_co_table_without_cgs_ = param.table_key_.is_ddl_sstable() ? false : true)) {
     } else if (FALSE_IT(param.full_column_cnt_ = sstable_param_->full_column_cnt_)) {
       LOG_WARN("failed to get_stored_column_count_in_sstable", K(ret), KPC(storage_schema_ptr));
-    } else if (FALSE_IT(param.co_base_type_ = storage_schema_ptr->has_all_column_group()
-                                            ? ObCOSSTableBaseType::ALL_CG_TYPE
-                                            : ObCOSSTableBaseType::ROWKEY_CG_TYPE)) {
+    } else if (FALSE_IT(param.co_base_type_ = sstable_param_->co_base_type_)) {
     } else if (OB_FAIL(ObTabletCreateDeleteHelper::create_sstable<ObCOSSTableV2>(param,
             tablet_copy_finish_task_->get_allocator(), table_handle))) {
       LOG_WARN("failed to create co sstable", K(ret), K(param), K(copy_ctx_));
@@ -1037,6 +1047,7 @@ int ObSSTableCopyFinishTask::create_sstable_with_index_builder_()
         } else if (FALSE_IT(param.column_group_cnt_ = sstable_param_->column_group_cnt_)) {
         } else if (FALSE_IT(param.full_column_cnt_ = sstable_param_->full_column_cnt_)) {
         } else if (FALSE_IT(param.co_base_type_ = sstable_param_->co_base_type_)) {
+        } else if (FALSE_IT(param.is_co_table_without_cgs_ = sstable_param_->is_empty_cg_sstables_)) {
         } else if (OB_FAIL(ObTabletCreateDeleteHelper::create_sstable<ObCOSSTableV2>(param,
               tablet_copy_finish_task_->get_allocator(), table_handle))) {
           LOG_WARN("failed to create co sstable", K(ret), K(copy_ctx_), KPC(sstable_param_));
@@ -1060,7 +1071,6 @@ int ObSSTableCopyFinishTask::build_create_sstable_param_(
     const blocksstable::ObSSTableMergeRes &res,
     ObTabletCreateSSTableParam &param)
 {
-  //TODO(lingchuan) this param maker ObTablet class will be better to be safeguard
   int ret = OB_SUCCESS;
   if (!is_inited_) {
     ret = OB_INVALID_ARGUMENT;
@@ -1068,48 +1078,8 @@ int ObSSTableCopyFinishTask::build_create_sstable_param_(
   } else if (OB_UNLIKELY(OB_ISNULL(tablet) || !res.is_valid())) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("build create sstable param get invalid argument", K(ret), KP(tablet), K(res));
-  } else {
-    param.table_key_ = sstable_param_->table_key_;
-    param.sstable_logic_seq_ = sstable_param_->basic_meta_.sstable_logic_seq_;
-    param.schema_version_ = sstable_param_->basic_meta_.schema_version_;
-    param.table_mode_ = sstable_param_->basic_meta_.table_mode_;
-    param.index_type_ = static_cast<share::schema::ObIndexType>(sstable_param_->basic_meta_.index_type_);
-    param.create_snapshot_version_ = sstable_param_->basic_meta_.create_snapshot_version_;
-    param.progressive_merge_round_ = sstable_param_->basic_meta_.progressive_merge_round_;
-    param.progressive_merge_step_ = sstable_param_->basic_meta_.progressive_merge_step_;
-    param.latest_row_store_type_ = sstable_param_->basic_meta_.latest_row_store_type_;
-
-    ObSSTableMergeRes::fill_addr_and_data(res.root_desc_,
-        param.root_block_addr_, param.root_block_data_);
-    ObSSTableMergeRes::fill_addr_and_data(res.data_root_desc_,
-        param.data_block_macro_meta_addr_, param.data_block_macro_meta_);
-    param.is_meta_root_ = res.data_root_desc_.is_meta_root_;
-    param.root_row_store_type_ = res.root_row_store_type_;
-    param.data_index_tree_height_ = res.root_desc_.height_;
-    param.index_blocks_cnt_ = res.index_blocks_cnt_;
-    param.data_blocks_cnt_ = res.data_blocks_cnt_;
-    param.micro_block_cnt_ = res.micro_block_cnt_;
-    param.use_old_macro_block_count_ = res.use_old_macro_block_count_;
-    param.row_count_ = res.row_count_;
-    param.column_cnt_ = res.data_column_cnt_;
-    param.data_checksum_ = res.data_checksum_;
-    param.occupy_size_ = res.occupy_size_;
-    param.original_size_ = res.original_size_;
-    param.max_merged_trans_version_ = res.max_merged_trans_version_;
-    param.contain_uncommitted_row_ = res.contain_uncommitted_row_;
-    param.compressor_type_ = res.compressor_type_;
-    param.encrypt_id_ = res.encrypt_id_;
-    param.master_key_id_ = res.master_key_id_;
-    param.nested_size_ = res.nested_size_;
-    param.nested_offset_ = res.nested_offset_;
-    param.data_block_ids_ = res.data_block_ids_;
-    param.other_block_ids_ = res.other_block_ids_;
-    param.rowkey_column_cnt_ = sstable_param_->basic_meta_.rowkey_column_count_;
-    param.ddl_scn_ = sstable_param_->basic_meta_.ddl_scn_;
-    MEMCPY(param.encrypt_key_, res.encrypt_key_, share::OB_MAX_TABLESPACE_ENCRYPT_KEY_LENGTH);
-    if (OB_FAIL(param.column_checksums_.assign(sstable_param_->column_checksums_))) {
-      LOG_WARN("fail to fill column checksum", K(ret), KPC_(sstable_param));
-    }
+  } else if (OB_FAIL(param.init_for_ha(*sstable_param_, res))) {
+    LOG_WARN("fail to init create sstable param", K(ret), KPC(sstable_param_), K(res));
   }
   return ret;
 }
@@ -1117,7 +1087,6 @@ int ObSSTableCopyFinishTask::build_create_sstable_param_(
 int ObSSTableCopyFinishTask::build_create_sstable_param_(
     ObTabletCreateSSTableParam &param)
 {
-  //TODO(lingchuan) this param maker ObTablet class will be better to be safeguard
   //using sstable meta to create sstable
   int ret = OB_SUCCESS;
   if (!is_inited_) {
@@ -1126,41 +1095,8 @@ int ObSSTableCopyFinishTask::build_create_sstable_param_(
   } else if (0 != sstable_param_->basic_meta_.data_macro_block_count_) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("sstable param has data macro block, can not build sstable from basic meta", K(ret), KPC(sstable_param_));
-  } else {
-    param.table_key_ = sstable_param_->table_key_;
-    param.sstable_logic_seq_ = sstable_param_->basic_meta_.sstable_logic_seq_;
-    param.schema_version_ = sstable_param_->basic_meta_.schema_version_;
-    param.create_snapshot_version_ = sstable_param_->basic_meta_.create_snapshot_version_;
-    param.table_mode_ = sstable_param_->basic_meta_.table_mode_;
-    param.index_type_ = static_cast<share::schema::ObIndexType>(sstable_param_->basic_meta_.index_type_);
-    param.progressive_merge_round_ = sstable_param_->basic_meta_.progressive_merge_round_;
-    param.progressive_merge_step_ = sstable_param_->basic_meta_.progressive_merge_step_;
-    param.is_ready_for_read_ = true;
-    param.root_row_store_type_ = sstable_param_->basic_meta_.root_row_store_type_;
-    param.latest_row_store_type_ = sstable_param_->basic_meta_.latest_row_store_type_;
-    param.index_blocks_cnt_ = sstable_param_->basic_meta_.index_macro_block_count_;
-    param.data_blocks_cnt_ = sstable_param_->basic_meta_.data_macro_block_count_;
-    param.micro_block_cnt_ = sstable_param_->basic_meta_.data_micro_block_count_;
-    param.use_old_macro_block_count_ = sstable_param_->basic_meta_.use_old_macro_block_count_;
-    param.row_count_ = sstable_param_->basic_meta_.row_count_;
-    param.column_cnt_ = sstable_param_->basic_meta_.column_cnt_;
-    param.data_checksum_ = sstable_param_->basic_meta_.data_checksum_;
-    param.occupy_size_ = sstable_param_->basic_meta_.occupy_size_;
-    param.original_size_ = sstable_param_->basic_meta_.original_size_;
-    param.max_merged_trans_version_ = sstable_param_->basic_meta_.max_merged_trans_version_;
-    param.ddl_scn_ = sstable_param_->basic_meta_.ddl_scn_;
-    param.filled_tx_scn_ = sstable_param_->basic_meta_.filled_tx_scn_;
-    param.contain_uncommitted_row_ = sstable_param_->basic_meta_.contain_uncommitted_row_;
-    param.compressor_type_ = sstable_param_->basic_meta_.compressor_type_;
-    param.encrypt_id_ = sstable_param_->basic_meta_.encrypt_id_;
-    param.master_key_id_ = sstable_param_->basic_meta_.master_key_id_;
-    param.root_block_addr_.set_none_addr();
-    param.data_block_macro_meta_addr_.set_none_addr();
-    param.rowkey_column_cnt_ = sstable_param_->basic_meta_.rowkey_column_count_;
-    MEMCPY(param.encrypt_key_, sstable_param_->basic_meta_.encrypt_key_, share::OB_MAX_TABLESPACE_ENCRYPT_KEY_LENGTH);
-    if (OB_FAIL(param.column_checksums_.assign(sstable_param_->column_checksums_))) {
-      LOG_WARN("fail to assign column checksums", K(ret), KPC(sstable_param_));
-    }
+  } else if (OB_FAIL(param.init_for_ha(*sstable_param_))) {
+    LOG_WARN("fail to init create sstable param", K(ret), KPC(sstable_param_));
   }
   return ret;
 }

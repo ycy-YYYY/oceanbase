@@ -378,7 +378,6 @@ int ObComplementDataContext::write_start_log(const ObComplementDataParam &param)
 {
   int ret = OB_SUCCESS;
   ObITable::TableKey hidden_table_key;
-  SCN start_scn;
   if (OB_UNLIKELY(!is_inited_)) {
     ret = OB_NOT_INIT;
     LOG_WARN("ObComplementDataContext not init", K(ret));
@@ -396,8 +395,11 @@ int ObComplementDataContext::write_start_log(const ObComplementDataParam &param)
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("unexpected err", K(ret), K(MTL_ID()));
     } else if (OB_FAIL(tenant_direct_load_mgr->open_tablet_direct_load(true, /*is_full_direct_load*/
-      param.dest_ls_id_, param.dest_tablet_id_, context_id_, start_scn, tablet_direct_load_mgr_handle_))) {
+      param.dest_ls_id_, param.dest_tablet_id_, context_id_, start_scn_, tablet_direct_load_mgr_handle_))) {
       LOG_WARN("write ddl start log failed", K(ret));
+    } else if (OB_UNLIKELY(!start_scn_.is_valid_and_not_min())) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("invalid start scn", K(ret), K(start_scn_));
     }
     LOG_INFO("complement task start ddl redo success", K(ret), K(param));
   }
@@ -704,6 +706,7 @@ int ObComplementDataDag::report_replica_build_status()
       LOG_WARN("fail to send build ddl single replica response", K(ret), K(arg));
     }
   }
+  DEBUG_SYNC(HOLD_DDL_COMPLEMENT_DAG_AFTER_REPORT_FINISH);
   FLOG_INFO("complement data finished", K(ret), K(context_.complement_data_ret_));
   return ret;
 }
@@ -742,6 +745,42 @@ int ObComplementDataDag::fill_dag_key(char *buf, const int64_t buf_len) const
   } else if (OB_FAIL(databuff_printf(buf, buf_len, "logstream_id=%ld source_tablet_id=%ld dest_tablet_id=%ld",
                               param_.orig_ls_id_.id(), param_.orig_tablet_id_.id(), param_.dest_tablet_id_.id()))) {
     LOG_WARN("fill dag key for ddl table merge dag failed", K(ret), K(param_));
+  }
+  return ret;
+}
+
+int ObComplementDataDag::check_and_exit_on_demand()
+{
+  int ret = OB_SUCCESS;
+  int tmp_ret = OB_SUCCESS;
+  if (OB_UNLIKELY(!is_inited_)) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("dag has not been initialized", K(ret));
+  } else {
+    DEBUG_SYNC(HOLD_DDL_COMPLEMENT_DAG_WHEN_APPEND_ROW);
+    SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+      ObSqlString sql_string;
+      sqlclient::ObMySQLResult *result = nullptr;
+      if (OB_TMP_FAIL(sql_string.assign_fmt("SELECT status FROM %s WHERE task_id = %lu", share::OB_ALL_DDL_TASK_STATUS_TNAME, param_.task_id_))) {
+        LOG_WARN("assign sql string failed", K(tmp_ret), K(param_));
+      } else if (OB_TMP_FAIL(GCTX.sql_proxy_->read(res, param_.dest_tenant_id_, sql_string.ptr()))) {
+        LOG_WARN("fail to execute sql", K(tmp_ret), K(sql_string));
+      } else if (OB_ISNULL(result = res.get_result())) {
+        tmp_ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("error unexpected, query result must not be NULL", K(tmp_ret));
+      } else if (OB_TMP_FAIL(result->next())) {
+        if (OB_ENTRY_NOT_EXIST == tmp_ret) {
+          ret = OB_CANCELED;
+        }
+        LOG_WARN("iterate next failed", K(ret), K(tmp_ret));
+      } else {
+        int task_status = 0;
+        EXTRACT_INT_FIELD_MYSQL(*result, "status", task_status, int);
+        if (OB_SUCC(ret)) {
+          ret = task_status == ObDDLTaskStatus::REDEFINITION ? ret : OB_CANCELED;
+        }
+      }
+    }
   }
   return ret;
 }
@@ -812,7 +851,8 @@ int ObComplementPrepareTask::process()
 }
 
 ObComplementWriteTask::ObComplementWriteTask()
-  : ObITask(TASK_TYPE_COMPLEMENT_WRITE), is_inited_(false), task_id_(0), param_(nullptr),
+  : ObITask(TASK_TYPE_COMPLEMENT_WRITE), allocator_("WriteTaskAlloc", OB_MALLOC_NORMAL_BLOCK_SIZE, MTL_ID()),
+    is_inited_(false), task_id_(0), param_(nullptr),
     context_(nullptr), write_row_(),
     col_ids_(), org_col_ids_(), output_projector_()
 {
@@ -820,6 +860,11 @@ ObComplementWriteTask::ObComplementWriteTask()
 
 ObComplementWriteTask::~ObComplementWriteTask()
 {
+  col_ids_.reset();
+  org_col_ids_.reset();
+  output_projector_.reset();
+  write_row_.reset();
+  allocator_.reset();
 }
 
 int ObComplementWriteTask::init(const int64_t task_id, ObComplementDataParam &param,
@@ -847,7 +892,7 @@ int ObComplementWriteTask::init(const int64_t task_id, ObComplementDataParam &pa
   } else if (OB_FAIL(hidden_table_schema->get_store_column_count(schema_stored_column_cnt))) {
     LOG_WARN("get stored column cnt failed", K(ret));
   } else if (OB_FAIL(write_row_.init(
-              param.allocator_, schema_stored_column_cnt + storage::ObMultiVersionRowkeyHelpper::get_extra_rowkey_col_cnt()))) {
+              allocator_, schema_stored_column_cnt + storage::ObMultiVersionRowkeyHelpper::get_extra_rowkey_col_cnt()))) {
     LOG_WARN("Fail to init write row", K(ret));
   } else {
     write_row_.row_flag_.set_flag(ObDmlFlag::DF_INSERT);
@@ -1265,6 +1310,7 @@ int ObComplementWriteTask::append_lob(
       slice_info.data_tablet_id_ = param_->dest_tablet_id_;
       slice_info.slice_id_ = iterator.get_lob_slice_id();
       slice_info.context_id_ = context_->context_id_;
+      slice_info.src_tenant_id_ = param_->orig_tenant_id_;
       if (OB_FAIL(MTL(ObTenantDirectLoadMgr *)->fill_lob_sstable_slice(lob_allocator, slice_info,
           iterator.get_lob_id_cache(), lob_column_idxs, col_types, write_row_))) {
         LOG_WARN("fill batch lob sstable slice failed", K(ret), K(slice_info), K(write_row_));
@@ -1277,6 +1323,9 @@ int ObComplementWriteTask::append_lob(
 int ObComplementWriteTask::append_row(ObScan *scan)
 {
   int ret = OB_SUCCESS;
+  ObComplementDataDag *current_dag = nullptr;
+  const int64_t CHECK_DAG_NEED_EXIT_INTERVAL = 10000; // 1w rows.
+  ObDataStoreDesc data_desc;
   HEAP_VARS_4((ObMacroBlockWriter, writer),
               (ObSchemaGetterGuard, schema_guard),
               (ObRelativeTable, relative_table),
@@ -1294,6 +1343,8 @@ int ObComplementWriteTask::append_row(ObScan *scan)
     int64_t t2 = 0;
     int64_t t3 = 0;
     int64_t lob_cnt = 0;
+    int64_t row_scanned = 0;
+    int64_t row_inserted = 0;
     ObArenaAllocator lob_allocator(ObModIds::OB_LOB_ACCESS_BUFFER, OB_MALLOC_NORMAL_BLOCK_SIZE, MTL_ID());
     ObStoreRow reshaped_row;
     reshaped_row.flag_.set_flag(ObDmlFlag::DF_INSERT);
@@ -1307,21 +1358,31 @@ int ObComplementWriteTask::append_row(ObScan *scan)
     ObTenantDirectLoadMgr *tenant_direct_load_mgr = MTL(ObTenantDirectLoadMgr *);
     ObTabletDirectLoadMgrHandle direct_load_hdl;
     bool is_major_sstable_exist = false;
-    ObDDLInsertRowIterator row_iter(nullptr/*ObPxMultiPartSSTableInsertOp*/, false/*is_slice_empty*/,
-          param_->dest_ls_id_, param_->dest_tablet_id_, 0/*unused_rowkey_num*/, param_->snapshot_version_, context_->context_id_, task_id_);
+    ObDDLInsertRowIterator row_iter;
     blocksstable::ObNewRowBuilder new_row_builder;
     int64_t lob_inrow_threshold = OB_DEFAULT_LOB_INROW_THRESHOLD;
-    if (OB_ISNULL(tenant_direct_load_mgr)) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("unexpected err", K(ret), K(MTL_ID()));
-    } else if (OB_UNLIKELY(!is_inited_)) {
+    if (OB_UNLIKELY(!is_inited_)) {
       ret = OB_NOT_INIT;
       LOG_WARN("ObComplementWriteTask is not inited", K(ret));
-    } else if (OB_ISNULL(param_) || OB_ISNULL(scan) || OB_UNLIKELY(!param_->is_valid()) || OB_ISNULL(context_)) {
+    } else if (OB_ISNULL(scan)) {
       ret = OB_INVALID_ARGUMENT;
       LOG_WARN("invalid arguments", K(ret));
+    } else if (OB_ISNULL(tenant_direct_load_mgr)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected err", K(ret), K(MTL_ID()));
+    } else if (OB_FAIL(row_iter.init(nullptr/*ObPxMultiPartSSTableInsertOp*/,
+                              false/*is_slice_empty*/,
+                              param_->dest_ls_id_,
+                              param_->dest_tablet_id_,
+                              0/*unused_rowkey_num*/,
+                              param_->snapshot_version_,
+                              context_->context_id_,
+                              task_id_))) {
+      LOG_WARN("init failed", K(ret));
     } else if (OB_FAIL(macro_start_seq.set_parallel_degree(task_id_))) {
       LOG_WARN("set parallel degree failed", K(ret), K(task_id_));
+    } else if (OB_FAIL(context_->check_already_committed(param_->dest_ls_id_, param_->dest_tablet_id_, ddl_committed))) {
+      LOG_WARN("check tablet already committed failed", K(ret));
     } else {
       const ObTableSchema *hidden_table_schema = nullptr;
       if (OB_FAIL(ObMultiVersionSchemaService::get_instance().get_tenant_schema_guard(
@@ -1348,7 +1409,7 @@ int ObComplementWriteTask::append_row(ObScan *scan)
         LOG_WARN("hidden table key is invalid", K(ret), K(hidden_table_key));
       } else if (OB_FAIL(sstable_redo_writer.init(param_->dest_ls_id_, param_->dest_tablet_id_))) {
         LOG_WARN("fail to init sstable redo writer", K(ret));
-      } else if (OB_UNLIKELY(nullptr == static_cast<ObComplementDataDag *>(get_dag()))) {
+      } else if (OB_ISNULL(current_dag = static_cast<ObComplementDataDag *>(get_dag()))) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("the dag of this task is null", K(ret));
       } else if (OB_FAIL(tenant_direct_load_mgr->get_tablet_mgr_and_check_major(
@@ -1366,10 +1427,13 @@ int ObComplementWriteTask::append_row(ObScan *scan)
       } else if (OB_UNLIKELY(!direct_load_hdl.get_full_obj()->get_start_scn().is_valid_and_not_min())) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("unexpected err", K(ret), K(direct_load_hdl.get_full_obj()->get_start_scn()));
+      } else if (OB_UNLIKELY(context_->start_scn_ != direct_load_hdl.get_full_obj()->get_start_scn())) {
+        ret = OB_TASK_EXPIRED;
+        LOG_WARN("task expired", K(ret), K(context_->start_scn_), "start_scn", direct_load_hdl.get_full_obj()->get_start_scn());
       } else if (OB_FAIL(callback.init(DDL_MB_DATA_TYPE,
                                        hidden_table_key,
                                        param_->task_id_,
-                                       direct_load_hdl.get_full_obj()->get_start_scn(),
+                                       context_->start_scn_,
                                        param_->data_format_version_,
                                        &sstable_redo_writer))) {
         LOG_WARN("fail to init data callback", K(ret), K(hidden_table_key));
@@ -1416,8 +1480,6 @@ int ObComplementWriteTask::append_row(ObScan *scan)
         LOG_WARN("fail to yield dag", KR(ret));
       } else if (OB_FAIL(DDL_SIM(param_->dest_tenant_id_, param_->task_id_, DDL_INSERT_SSTABLE_GET_NEXT_ROW_FAILED))) {
         LOG_WARN("ddl sim failure", K(ret), KPC(param_));
-      } else if ((0 == (context_->row_inserted_ % 100000)) && OB_FAIL(context_->check_already_committed(param_->dest_ls_id_, param_->dest_tablet_id_, ddl_committed))) {
-        LOG_WARN("check tablet already committed failed", K(ret));
       } else if (OB_FAIL(scan->get_next_row(tmp_row, reshape_row_only_for_remote_scan))) {
         if (OB_UNLIKELY(OB_ITER_END != ret)) {
           LOG_WARN("fail to get next row", K(ret));
@@ -1427,7 +1489,7 @@ int ObComplementWriteTask::append_row(ObScan *scan)
         LOG_WARN("tmp_row is nullptr", K(ret));
       } else if (OB_FAIL(add_extra_rowkey(rowkey_column_cnt, extra_rowkey_cnt, *tmp_row))) {
         LOG_WARN("fail to add extra rowkey", K(ret));
-      } else if (OB_FAIL(append_lob(rowkey_column_cnt, extra_rowkey_cnt, row_iter, lob_allocator))) {
+      } else if (!ddl_committed && OB_FAIL(append_lob(rowkey_column_cnt, extra_rowkey_cnt, row_iter, lob_allocator))) {
         LOG_WARN("append lob into macro block failed", K(ret));
       } else if (OB_FAIL(new_row_builder.build(write_row_, tmp_store_row))) {
       } else if (OB_FAIL(ObRowReshapeUtil::reshape_table_rows(
@@ -1438,7 +1500,9 @@ int ObComplementWriteTask::append_row(ObScan *scan)
       } else {
         t2 = ObTimeUtility::current_time();
         get_next_row_time += t2 - t1;
-        context_->row_scanned_++;
+        if (++row_scanned % 100 == 0) {
+          (void) ATOMIC_AAF(&context_->row_scanned_, 100);
+        }
         if (!ddl_committed && OB_FAIL(writer.append_row(datum_row))) {
           LOG_WARN("fail to append row to macro block", K(ret), K(datum_row));
         }
@@ -1462,11 +1526,16 @@ int ObComplementWriteTask::append_row(ObScan *scan)
         if (OB_SUCC(ret)) {
           t3 = ObTimeUtility::current_time();
           append_row_time += t3 - t2;
-          context_->row_inserted_++;
+          if (++row_inserted % 100 == 0) {
+            (void) ATOMIC_AAF(&context_->row_inserted_, 100);
+          }
+          if (row_inserted % CHECK_DAG_NEED_EXIT_INTERVAL == 0) {
+            if (OB_FAIL(current_dag->check_and_exit_on_demand())) {
+              LOG_WARN("dag check and exit on demand failed", K(ret));
+            }
+          }
         }
-        if (lob_cnt % 128 == 0) {
-          lob_allocator.reuse(); // reuse after append_row to macro block to save memory
-        }
+        lob_allocator.reuse(); // reuse after append_row to macro block to save memory
       }
     }
     if (OB_ITER_END == ret) {
@@ -1475,6 +1544,8 @@ int ObComplementWriteTask::append_row(ObScan *scan)
         LOG_WARN("close lob sstable slice failed", K(ret));
       }
     }
+    (void) ATOMIC_AAF(&context_->row_scanned_, row_scanned % 100);
+    (void) ATOMIC_AAF(&context_->row_inserted_, row_inserted % 100);
     LOG_INFO("print append row to macro block cost time", K(ret), K(task_id_), K(context_->row_inserted_),
         K(get_next_row_time), K(append_row_time));
     ObRowReshapeUtil::free_row_reshape(allocator, reshape_ptr, 1);
@@ -1502,11 +1573,13 @@ int ObComplementWriteTask::append_row(ObScan *scan)
       } else {
         if (OB_FAIL(ObDDLChecksumOperator::update_checksum(param_->dest_tenant_id_,
                 param_->orig_table_id_,
+                param_->orig_tablet_id_.id(),
                 param_->task_id_,
                 report_col_checksums,
                 report_col_ids,
                 1/*execution_id*/,
                 param_->tablet_task_id_ << ObDDLChecksumItem::PX_SQC_ID_OFFSET | task_id_,
+                param_->data_format_version_,
                 *GCTX.sql_proxy_))) {
           LOG_WARN("fail to report origin table checksum", K(ret));
         } else {
@@ -1581,7 +1654,8 @@ int ObComplementMergeTask::process()
                                                             1 /* execution_id */,
                                                             param_->task_id_,
                                                             sst_meta_hdl.get_sstable_meta().get_col_checksum(),
-                                                            sst_meta_hdl.get_sstable_meta().get_col_checksum_cnt()))) {
+                                                            sst_meta_hdl.get_sstable_meta().get_col_checksum_cnt(),
+                                                            param_->data_format_version_))) {
       LOG_WARN("report ddl column checksum failed", K(ret), K(*param_));
     } else if (OB_FAIL(MTL(ObTabletTableUpdater*)->submit_tablet_update_task(param_->dest_ls_id_, param_->dest_tablet_id_))) {
       LOG_WARN("fail to submit tablet update task", K(ret), K(*param_));
@@ -1590,11 +1664,13 @@ int ObComplementMergeTask::process()
     LOG_WARN("get column checksum failed", K(ret));
   } else if (param_->use_new_checksum() && OB_FAIL(ObDDLChecksumOperator::update_checksum(param_->dest_tenant_id_,
           param_->orig_table_id_,
+          param_->orig_tablet_id_.id(),
           param_->task_id_,
           report_col_checksums,
           report_col_ids,
           1/*execution_id*/,
           param_->orig_tablet_id_.id(),
+          param_->data_format_version_,
           *GCTX.sql_proxy_))) {
     LOG_WARN("fail to report origin table checksum", K(ret));
   } else if (OB_FAIL(add_build_hidden_table_sstable())) {

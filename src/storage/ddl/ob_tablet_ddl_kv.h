@@ -44,21 +44,33 @@ namespace storage
 class ObBlockMetaTreeValue final
 {
 public:
-  ObBlockMetaTreeValue() : block_meta_(nullptr), rowkey_(nullptr), header_() {}
+  ObBlockMetaTreeValue() : co_sstable_row_offset_(0), block_meta_(nullptr), rowkey_(nullptr), header_() {}
   ObBlockMetaTreeValue(const blocksstable::ObDataMacroBlockMeta *block_meta,
                        const blocksstable::ObDatumRowkey *rowkey)
-    : block_meta_(block_meta), rowkey_(rowkey), header_(){}
+    : co_sstable_row_offset_(0), block_meta_(block_meta), rowkey_(rowkey), header_(){}
   ~ObBlockMetaTreeValue()
   {
+    co_sstable_row_offset_ = 0;
     block_meta_ = nullptr;
     rowkey_ = nullptr;
   }
-  TO_STRING_KV(KPC_(block_meta), KPC_(rowkey), K_(header));
+  TO_STRING_KV(K_(co_sstable_row_offset), KPC_(block_meta), KPC_(rowkey), K_(header));
 
 public:
+  int64_t co_sstable_row_offset_;
   const blocksstable::ObDataMacroBlockMeta *block_meta_;
   const blocksstable::ObDatumRowkey *rowkey_;
   blocksstable::ObIndexBlockRowHeader header_;
+};
+
+struct ObDDLBlockMeta
+{
+public:
+  ObDDLBlockMeta() : block_meta_(nullptr), end_row_offset_(-1) {}
+  TO_STRING_KV(KPC(block_meta_), K(end_row_offset_));
+public:
+  const blocksstable::ObDataMacroBlockMeta *block_meta_;
+  int64_t end_row_offset_;
 };
 
 class ObBlockMetaTree
@@ -72,12 +84,14 @@ public:
   int init(ObTablet &tablet,
            const ObITable::TableKey &table_key,
            const share::SCN &ddl_start_scn,
-           const uint64_t data_format_version);
+           const uint64_t data_format_version,
+           const ObStorageSchema *storage_schema);
   void destroy();
   void destroy_tree_value();
   int insert_macro_block(const ObDDLMacroHandle &macro_handle,
                          const blocksstable::ObDatumRowkey *rowkey,
-                         const blocksstable::ObDataMacroBlockMeta *meta);
+                         const blocksstable::ObDataMacroBlockMeta *meta,
+                         const int64_t co_sstable_row_offset);
   int locate_key(const blocksstable::ObDatumRange &range,
                  const blocksstable::ObStorageDatumUtils &datum_utils,
                  blocksstable::DDLBtreeIterator &iter,
@@ -89,16 +103,21 @@ public:
                    const bool is_reverse_scan,
                    blocksstable::DDLBtreeIterator &iter,
                    ObBlockMetaTreeValue *&cur_tree_value) const;
+  int skip_to_next_valid_position(const blocksstable::ObDatumRowkey &rowkey,
+                                  const blocksstable::ObStorageDatumUtils &datum_utils,
+                                  blocksstable::DDLBtreeIterator &iter,
+                                  ObBlockMetaTreeValue *&tree_value) const;
   int get_next_tree_value(blocksstable::DDLBtreeIterator &iter,
                           const int64_t step,
                           ObBlockMetaTreeValue *&tree_value) const;
   int64_t get_macro_block_cnt() const { return macro_blocks_.count(); }
   int get_last_rowkey(const blocksstable::ObDatumRowkey *&last_rowkey);
-  int get_sorted_meta_array(ObIArray<const blocksstable::ObDataMacroBlockMeta *> &meta_array);
+  int get_sorted_meta_array(ObIArray<ObDDLBlockMeta> &meta_array);
   int exist(const blocksstable::ObDatumRowkey *rowkey, bool &is_exist);
   const blocksstable::ObDataStoreDesc &get_data_desc() const { return data_desc_.get_desc(); }
   bool is_valid() const { return is_inited_; }
   int64_t get_memory_used() const;
+  const KeyBtree &get_keybtree() const { return block_tree_; }
   TO_STRING_KV(K(is_inited_), K(macro_blocks_.count()), K(arena_.total()), K(data_desc_));
 
 private:
@@ -149,6 +168,7 @@ public:
   ObDDLMemtable();
   virtual ~ObDDLMemtable();
   int init(
+      ObArenaAllocator &allocator,
       ObTablet &tablet,
       const ObITable::TableKey &table_key,
       const share::SCN &ddl_start_scn,
@@ -156,12 +176,11 @@ public:
   void reset();
   int insert_block_meta_tree(
       const ObDDLMacroHandle &macro_handle,
-      blocksstable::ObDataMacroBlockMeta *data_macro_meta);
+      blocksstable::ObDataMacroBlockMeta *data_macro_meta,
+      const int64_t co_sstable_row_offset);
   void set_scn_range(
       const share::SCN &start_scn,
       const share::SCN &end_scn);
-  int get_sorted_meta_array(
-      ObIArray<const blocksstable::ObDataMacroBlockMeta *> &meta_array);
   const ObBlockMetaTree *get_block_meta_tree() { return &block_meta_tree_; }
   int init_ddl_index_iterator(const blocksstable::ObStorageDatumUtils *datum_utils,
                               const bool is_reverse_scan,
@@ -176,7 +195,6 @@ private:
       ObTabletCreateSSTableParam &sstable_param);
 private:
   bool is_inited_;
-  ObArenaAllocator allocator_;
   ObBlockMetaTree block_meta_tree_;
 };
 

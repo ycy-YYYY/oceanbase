@@ -187,6 +187,54 @@ int ObNestedLoopJoinOp::rescan()
   return ret;
 }
 
+int ObNestedLoopJoinOp::do_drain_exch_multi_lvel_bnlj()
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(try_open())) {
+    LOG_WARN("fail to open operator", K(ret));
+  } else if (!exch_drained_) {
+    // the drain request is triggered by current NLJ operator, and current NLJ is a multi level Batch NLJ
+    // It will block rescan request for it's child operator, if the drain request is passed to it's child operator
+    // The child operators will be marked as iter-end_, and will not get any row if rescan is blocked
+    // So we block the drain request here; Only set current operator to end;
+    int tmp_ret = inner_drain_exch();
+    exch_drained_ = true;
+    brs_.end_ = true;
+    batch_reach_end_ = true;
+    row_reach_end_ = true;
+    if (OB_SUCC(ret)) {
+      ret = tmp_ret;
+    }
+  }
+  return ret;
+}
+
+int ObNestedLoopJoinOp::do_drain_exch()
+{
+  int ret = OB_SUCCESS;
+  if (!MY_SPEC.group_rescan_) {
+    if (OB_FAIL( ObOperator::do_drain_exch())) {
+      LOG_WARN("failed to drain NLJ operator", K(ret));
+    }
+  } else if (!group_join_buffer_.is_multi_level()) {
+    if (OB_FAIL( ObOperator::do_drain_exch())) {
+      LOG_WARN("failed to drain NLJ operator", K(ret));
+    }
+  } else {
+    if (!is_operator_end()) {
+      // the drain request is triggered by parent operator
+      // NLJ needs to pass the drain request to it's child operator
+      LOG_TRACE("The drain request is passed by parent operator");
+      if (OB_FAIL( ObOperator::do_drain_exch())) {
+        LOG_WARN("failed to drain normal NLJ operator", K(ret));
+      }
+    } else if (OB_FAIL(do_drain_exch_multi_lvel_bnlj())) {
+      LOG_WARN("failed to drain multi level NLJ operator", K(ret));
+    }
+  }
+  return ret;
+}
+
 int ObNestedLoopJoinOp::inner_rescan()
 {
   int ret = OB_SUCCESS;
@@ -350,6 +398,7 @@ int ObNestedLoopJoinOp::join_end_func_end()
 int ObNestedLoopJoinOp::read_left_operate()
 {
   int ret = OB_SUCCESS;
+  clear_evaluated_flag();
   if (MY_SPEC.group_rescan_ || MY_SPEC.enable_px_batch_rescan_) {
     if (OB_FAIL(group_read_left_operate()) && OB_ITER_END != ret) {
       LOG_WARN("failed to read left group", K(ret));
@@ -585,10 +634,9 @@ int ObNestedLoopJoinOp::read_left_func_end()
 int ObNestedLoopJoinOp::read_right_operate()
 {
   int ret = OB_SUCCESS;
+  clear_evaluated_flag();
   if (OB_FAIL(get_next_right_row()) && OB_ITER_END != ret) {
     LOG_WARN("failed to get next right row", K(ret));
-  } else {
-    clear_evaluated_flag();
   }
 
   return ret;
@@ -773,7 +821,11 @@ int ObNestedLoopJoinOp::group_get_left_batch(const ObBatchRows *&left_brs)
       }
 
       if (OB_SUCC(ret)) {
-        const_cast<ObBatchRows *>(left_brs)->skip_->reset(read_size);
+        // left_brs.size_ may be larger or smaller than read_size:
+        //   left_brs.size_ > read_size: group size is small and lots of left rows were skipped;
+        //   left_brs.size_ < read_size: left_brs reaches iter end with no enough rows;
+        // Thus, we need to reset skip_ with max size of left_brs.size_ and read_size.
+        const_cast<ObBatchRows *>(left_brs)->skip_->reset(std::max(left_brs->size_, read_size));
         const_cast<ObBatchRows *>(left_brs)->size_ = read_size;
         const_cast<ObBatchRows *>(left_brs)->end_ = false;
         left_row_joined_ = false;
@@ -799,7 +851,11 @@ int ObNestedLoopJoinOp::group_get_left_batch(const ObBatchRows *&left_brs)
           LOG_WARN("get next batch from store failed", KR(ret));
         }
       } else {
-        const_cast<ObBatchRows *>(left_brs)->skip_->reset(read_size);
+        // left_brs.size_ may be larger or smaller than read_size:
+        //   left_brs.size_ > read_size: group size is small and lots of left rows were skipped;
+        //   left_brs.size_ < read_size: left_brs reaches iter end with no enough rows;
+        // Thus, we need to reset skip_ with max size of left_brs.size_ and read_size.
+        const_cast<ObBatchRows *>(left_brs)->skip_->reset(std::max(left_brs->size_, read_size));
         const_cast<ObBatchRows *>(left_brs)->size_ = read_size;
         const_cast<ObBatchRows *>(left_brs)->end_ = false;
         left_row_joined_ = false;

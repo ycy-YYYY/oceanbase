@@ -206,10 +206,11 @@ public:
     TASK_TYPE_DDL_KV_MERGE = 50,
     TASK_TYPE_TRANSFER_BACKFILL_TX = 51,
     TASK_TYPE_TRANSFER_REPLACE_TABLE = 52,
-    TASK_TYPE_MDS_TABLE_MERGE = 53,
+    TASK_TYPE_MDS_MINI_MERGE = 53,
     TASK_TYPE_TTL_DELETE = 54,
     TASK_TYPE_TENANT_SNAPSHOT_CREATE = 55,
     TASK_TYPE_TENANT_SNAPSHOT_GC = 56,
+    TASK_TYPE_BATCH_FREEZE_TABLETS = 57,
     TASK_TYPE_MAX,
   };
 
@@ -372,6 +373,12 @@ public:
     } else if (ObDagType::ObDagTypeEnum::DAG_TYPE_MAJOR_MERGE <= type
         && ObDagType::ObDagTypeEnum::DAG_TYPE_CO_MERGE_FINISH >= type) {
       diagnose_type = ObDiagnoseTabletType::TYPE_MEDIUM_MERGE;
+    } else if (ObDagType::ObDagTypeEnum::DAG_TYPE_TX_TABLE_MERGE == type) {
+      diagnose_type = ObDiagnoseTabletType::TYPE_TX_TABLE_MERGE;
+    } else if (ObDagType::ObDagTypeEnum::DAG_TYPE_MDS_MINI_MERGE == type) {
+      diagnose_type = ObDiagnoseTabletType::TYPE_MDS_MINI_MERGE;
+    } else if (ObDagType::ObDagTypeEnum::DAG_TYPE_BATCH_FREEZE_TABLETS) {
+      diagnose_type = ObDiagnoseTabletType::TYPE_BATCH_FREEZE;
     }
     return diagnose_type;
   }
@@ -435,7 +442,7 @@ public:
   }
   void set_start_time() { start_time_ = ObTimeUtility::fast_current_time(); }
   int64_t get_start_time() const { return start_time_; }
-  void set_force_cancel_flag() { force_cancel_flag_ = true; }
+  void set_force_cancel_flag();
   bool get_force_cancel_flag() { return force_cancel_flag_; }
   int add_child_without_inheritance(ObIDag &child);
   int add_child_without_inheritance(const common::ObIArray<ObINodeWithChild*> &child_array);
@@ -707,7 +714,7 @@ public:
   void resume();
   void run1() override;
   int yield();
-  void set_task(ObITask *task) { task_ = task; }
+  void set_task(ObITask *task);
   void set_function_type(const int64_t function_type) { function_type_ = function_type; }
   int set_dag_resource(const uint64_t group_id);
   bool need_wake_up() const;
@@ -720,9 +727,10 @@ public:
   static void set_mem_ctx(compaction::ObCompactionMemoryContext *mem_ctx) { if (nullptr == mem_ctx_) { mem_ctx_ = mem_ctx; } }
   uint64_t get_group_id() { return group_id_; }
   bool get_force_cancel_flag();
+  bool hold_by_compaction_dag() const { return hold_by_compaction_dag_; }
 private:
   void notify(DagWorkerStatus status);
-  void reset_compaction_thread_locals() { is_reserve_mode_ = false; mem_ctx_ = nullptr; }
+  void reset_compaction_thread_locals() { is_reserve_mode_ = false; mem_ctx_ = nullptr; hold_by_compaction_dag_ = false; }
 private:
   RLOCAL_STATIC(ObTenantDagWorker *, self_);
   RLOCAL_STATIC(bool, is_reserve_mode_);
@@ -737,6 +745,7 @@ private:
   int64_t function_type_;
   uint64_t group_id_;
   int tg_id_;
+  bool hold_by_compaction_dag_;
   bool is_inited_;
 };
 
@@ -1385,7 +1394,10 @@ inline bool is_compaction_dag(ObDagType::ObDagTypeEnum dag_type)
          ObDagType::DAG_TYPE_CO_MERGE_FINISH == dag_type ||
          ObDagType::DAG_TYPE_MAJOR_MERGE == dag_type ||
          ObDagType::DAG_TYPE_MINI_MERGE == dag_type ||
-         ObDagType::DAG_TYPE_MERGE_EXECUTE == dag_type;
+         ObDagType::DAG_TYPE_MERGE_EXECUTE == dag_type ||
+         ObDagType::DAG_TYPE_TX_TABLE_MERGE == dag_type ||
+         ObDagType::DAG_TYPE_MDS_MINI_MERGE == dag_type ||
+         ObDagType::DAG_TYPE_BATCH_FREEZE_TABLETS == dag_type;
 }
 
 inline int dag_yield()
@@ -1419,7 +1431,14 @@ inline bool is_reserve_mode()
 #define SET_MEM_CTX(mem_ctx)                                             \
   ({                                                                     \
     share::ObTenantDagWorker *worker = share::ObTenantDagWorker::self(); \
-    worker->set_mem_ctx(&mem_ctx);                                       \
+    if (NULL != worker) {                                                \
+      if (worker->hold_by_compaction_dag()) {                            \
+        worker->set_mem_ctx(&mem_ctx);                                   \
+      } else if (REACH_TENANT_TIME_INTERVAL(30 * 1000 * 1000L/*30s*/)) { \
+        COMMON_LOG_RET(WARN, OB_ERR_UNEXPECTED,                          \
+          "only compaction dag can set memctx", K(worker));              \
+      }                                                                  \
+    }                                                                    \
   })
 
 #define CURRENT_MEM_CTX()                                                \
@@ -1427,15 +1446,20 @@ inline bool is_reserve_mode()
     compaction::ObCompactionMemoryContext *mem_ctx = nullptr;            \
     share::ObTenantDagWorker *worker = share::ObTenantDagWorker::self(); \
     if (NULL != worker) {                                                \
-      mem_ctx = worker->get_mem_ctx();                                   \
+      if (worker->hold_by_compaction_dag()) {                            \
+        mem_ctx = worker->get_mem_ctx();                                 \
+      } else if (REACH_TENANT_TIME_INTERVAL(30 * 1000 * 1000L/*30s*/)) { \
+        COMMON_LOG_RET(WARN, OB_ERR_UNEXPECTED,                          \
+          "memctx only provided for compaction dag", K(worker));         \
+      }                                                                  \
     }                                                                    \
     mem_ctx;                                                             \
   })
 
 
-constexpr uint64_t operator "" _percentage(unsigned long long percentage)
+constexpr double operator "" _percentage(unsigned long long percentage)
 {
-  return percentage / 100;
+  return (percentage + 0.0) / 100;
 }
 
 #define ADAPTIVE_PERCENT 40_percentage

@@ -260,6 +260,7 @@ static ObSysPackageFile oracle_sys_package_file_table[] = {
   {"json_object_t", "json_object_type.sql", "json_object_type_body.sql"},
   {"dbms_mview", "dbms_mview.sql", "dbms_mview_body.sql"},
   {"dbms_mview_stats", "dbms_mview_stats.sql", "dbms_mview_stats_body.sql"},
+  {"sdo_geometry", "sdo_geometry.sql", "sdo_geometry_body.sql"},
 #endif
 };
 
@@ -804,9 +805,11 @@ int ObPLPackageManager::set_package_var_val(const ObPLResolveCtx &resolve_ctx,
                                          new_var_val), K(package_id), K(var_idx), K(var_val));
     if (OB_FAIL(ret)) {
     } else if (var->get_type().is_cursor_type()) {
-      OV (var_val.is_tinyint() || var_val.is_number(), OB_ERR_UNEXPECTED, K(var_val));
+      OV (var_val.is_tinyint() || var_val.is_number() || var_val.is_decimal_int(), OB_ERR_UNEXPECTED, K(var_val));
       if (OB_SUCC(ret)
-          && (var_val.is_tinyint() ? var_val.get_bool() : !var_val.is_zero_number())) {
+          && (var_val.is_tinyint()
+              ? var_val.get_bool()
+                : (var_val.is_number() ? !var_val.is_zero_number() : !var_val.is_zero_decimalint()))) {
         if (from_proxy) {
           ret = OB_NOT_SUPPORTED;
           LOG_WARN("can not sync package open cursor from proxy,"
@@ -849,6 +852,7 @@ int ObPLPackageManager::set_package_var_val(const ObPLResolveCtx &resolve_ctx,
   }
   if (!need_deserialize) {
     OZ (package_state->update_changed_vars(var_idx));
+    OX (resolve_ctx.session_info_.set_pl_can_retry(false));
   }
   return ret;
 }
@@ -861,6 +865,7 @@ int ObPLPackageManager::load_package_spec(const ObPLResolveCtx &resolve_ctx,
                                           ObPLPackage *&package_spec)
 {
   int ret = OB_SUCCESS;
+  DISABLE_SQL_MEMLEAK_GUARD;
   package_spec = NULL;
   const uint64_t tenant_id = package_spec_info.get_tenant_id();
   uint64_t db_id = package_spec_info.get_database_id();
@@ -928,6 +933,7 @@ int ObPLPackageManager::load_package_body(const ObPLResolveCtx &resolve_ctx,
                                           ObPLPackage *&package_body)
 {
   int ret = OB_SUCCESS;
+  DISABLE_SQL_MEMLEAK_GUARD;
   package_body = NULL;
   ObPLCompiler compiler(resolve_ctx.allocator_,
                         resolve_ctx.session_info_,
@@ -1371,16 +1377,15 @@ int ObPLPackageManager::add_package_to_plan_cache(const ObPLResolveCtx &resolve_
 
     //HEAP_VAR(ObExecContext, exec_ctx, allocator) {
 
+      ObPLCacheCtx pc_ctx;
       uint64_t database_id = OB_INVALID_ID;
       resolve_ctx.session_info_.get_database_id(database_id);
 
-      ObPLCacheCtx pc_ctx;
       pc_ctx.session_info_ = &resolve_ctx.session_info_;
       pc_ctx.schema_guard_ = &resolve_ctx.schema_guard_;
       (void)ObSQLUtils::md5(sql,pc_ctx.sql_id_, (int32_t)sizeof(pc_ctx.sql_id_));
       int64_t sys_schema_version = OB_INVALID_VERSION;
       int64_t tenant_schema_version = OB_INVALID_VERSION;
-
       pc_ctx.key_.namespace_ = ObLibCacheNameSpace::NS_PKG;
       pc_ctx.key_.db_id_ = database_id;
       pc_ctx.key_.key_id_ = package_id;
@@ -1395,6 +1400,7 @@ int ObPLPackageManager::add_package_to_plan_cache(const ObPLResolveCtx &resolve_
       } else {
         package->set_tenant_schema_version(tenant_schema_version);
         package->set_sys_schema_version(sys_schema_version);
+        package->get_stat_for_update().name_ = package->get_name();
       }
       if (OB_FAIL(ret)) {
         // do nothing

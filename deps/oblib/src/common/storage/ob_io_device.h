@@ -330,6 +330,8 @@ public:
   //file/dir interfaces
   virtual int open(const char *pathname, const int flags, const mode_t mode,
                     ObIOFd &fd, ObIODOpts *opts= NULL) = 0;
+  virtual int complete(const ObIOFd &fd) = 0;
+  virtual int abort(const ObIOFd &fd) = 0;
   virtual int close(const ObIOFd &fd) = 0;
   virtual int mkdir(const char *pathname, mode_t mode) = 0;
   virtual int rmdir(const char *pathname) = 0;
@@ -436,6 +438,7 @@ public:
   virtual int64_t get_max_block_count(int64_t reserved_size) const = 0;
   virtual int64_t get_reserved_block_count() const = 0;
   virtual int check_space_full(const int64_t required_size) const = 0;
+  virtual int check_write_limited() const = 0;
 
 public:
   ObStorageType device_type_;

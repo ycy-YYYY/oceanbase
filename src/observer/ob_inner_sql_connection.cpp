@@ -76,7 +76,7 @@ public:
   virtual int execute(sql::ObSql &engine, sql::ObSqlCtx &ctx, sql::ObResultSet &res)
   {
     int ret = OB_SUCCESS;
-    common::ObSqlInfoGuard si_guard(sql_);
+    SQL_INFO_GUARD(sql_, ObString(OB_MAX_SQL_ID_LENGTH, ctx.sql_id_));
     // Deep copy sql, because sql may be destroyed before result iteration.
     const int64_t alloc_size = sizeof(ObString) + sql_.length() + 1; // 1 for C terminate char
     void *mem = res.get_mem_pool().alloc(alloc_size);
@@ -531,6 +531,13 @@ int ObInnerSQLConnection::process_record(sql::ObResultSet &result_set,
   ObExecStatUtils::record_exec_timestamp(time_record, first_record, exec_timestamp);
   audit_record.exec_timestamp_ = exec_timestamp;
   audit_record.exec_timestamp_.update_stage_time();
+  audit_record.plsql_exec_time_ = session.get_plsql_exec_time();
+  if (audit_record.pl_trace_id_.is_invalid() &&
+        result_set.is_pl_stmt(result_set.get_stmt_type()) &&
+        OB_NOT_NULL(ObCurTraceId::get_trace_id())) {
+    audit_record.pl_trace_id_ = *ObCurTraceId::get_trace_id();
+  }
+  session.update_pure_sql_exec_time(audit_record.exec_timestamp_.elapsed_t_);
 
   if (enable_perf_event) {
     record_stat(session, result_set.get_stmt_type(), is_from_pl);
@@ -914,6 +921,7 @@ template <typename T>
 int ObInnerSQLConnection::retry_while_no_tenant_resource(const int64_t cluster_id, const uint64_t &tenant_id, T function)
 {
   int ret = OB_SUCCESS;
+  DISABLE_SQL_MEMLEAK_GUARD;
   share::ObLSID ls_id(share::ObLSID::SYS_LS_ID);
   const int64_t max_retry_us = 128 * 1000;
   int64_t retry_us = 2 * 1000;
@@ -1184,15 +1192,17 @@ int ObInnerSQLConnection::register_multi_data_source(const uint64_t &tenant_id,
 int ObInnerSQLConnection::forward_request(const uint64_t tenant_id,
                                           const int64_t op_type,
                                           const ObString &sql,
-                                          ObInnerSQLResult &res)
+                                          ObInnerSQLResult &res,
+                                          const int32_t group_id)
 {
-  return forward_request_(tenant_id, op_type, sql, res);
+  return forward_request_(tenant_id, op_type, sql, res, group_id);
 }
 
 int ObInnerSQLConnection::forward_request_(const uint64_t tenant_id,
                                            const int64_t op_type,
                                            const ObString &sql,
-                                           ObInnerSQLResult &res)
+                                           ObInnerSQLResult &res,
+                                           const int32_t group_id)
 {
   int ret = OB_SUCCESS;
 
@@ -1204,6 +1214,10 @@ int ObInnerSQLConnection::forward_request_(const uint64_t tenant_id,
   ObSQLMode sql_mode = 0;
   const ObSessionDDLInfo &ddl_info = get_session().get_ddl_info();
   bool is_load_data_exec = get_session().is_load_data_exec_session();
+  int32_t real_group_id = group_id_;
+  if (0 != group_id) {
+    real_group_id = group_id;
+  }
   if (is_resource_conn()) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("resource_conn of resource_svr still doesn't has the tenant resource", K(ret),
@@ -1233,7 +1247,7 @@ int ObInnerSQLConnection::forward_request_(const uint64_t tenant_id,
     } else if (OB_FAIL(GCTX.inner_sql_rpc_proxy_->to(get_resource_svr())
                        .by(tenant_id)
                        .timeout(query_timeout)
-                       .group_id(group_id_)
+                       .group_id(real_group_id)
                        .inner_sql_sync_transmit(arg,
                                                 *(handler->get_result()),
                                                 handler->get_handle()))) {
@@ -1421,9 +1435,10 @@ int ObInnerSQLConnection::execute_proc(const uint64_t tenant_id,
                                       ObString &sql,
                                       const share::schema::ObRoutineInfo &routine_info,
                                       const common::ObIArray<const pl::ObUserDefinedType *> &udts,
-                                      const ObTimeZoneInfo *tz_info)
+                                      const ObTimeZoneInfo *tz_info,
+                                      ObObj *result)
 {
-  UNUSEDx(tenant_id, allocator, params, sql, routine_info, udts, tz_info);
+  UNUSEDx(tenant_id, allocator, params, sql, routine_info, udts, tz_info, result);
   int ret = OB_SUCCESS;
   return ret;
 }
@@ -1783,27 +1798,26 @@ int ObInnerSQLConnection::nonblock_get_leader(
   } else if (OB_FAIL(set_timeout(abs_timeout_us))) {
     LOG_WARN("set timeout failed", K(ret));
   } else {
+    int tmp_ret = OB_SUCCESS;
     bool is_tenant_dropped = false;
     int64_t tmp_abs_timeout_us = 0;
     const int64_t retry_interval_us = 200 * 1000; // 200ms
     do {
+      ret = OB_SUCCESS;
       tmp_abs_timeout_us = ObTimeUtility::current_time() + GCONF.location_cache_refresh_sql_timeout;
       if (THIS_WORKER.is_timeout()) {
         ret = OB_TIMEOUT;
         LOG_WARN("already timeout", K(ret), K(THIS_WORKER.get_timeout_ts()));
-      } else if (OB_FAIL(GSCHEMASERVICE.check_if_tenant_has_been_dropped(
-                         tenant_id, is_tenant_dropped))) {
+      } else if (OB_TMP_FAIL(GSCHEMASERVICE.check_if_tenant_has_been_dropped(tenant_id,
+                                                                             is_tenant_dropped))) {
         LOG_WARN("user tenant has been dropped", KR(ret), K(tenant_id));
       } else if (is_tenant_dropped) {
         ret = OB_TENANT_HAS_BEEN_DROPPED;
         LOG_WARN("user tenant has been dropped", KR(ret), K(tenant_id));
+      }
+      if (OB_FAIL(ret)) {
       } else if (OB_FAIL(GCTX.location_service_->get_leader_with_retry_until_timeout(
-                         cluster_id,
-                         tenant_id,
-                         ls_id,
-                         leader,
-                         tmp_abs_timeout_us,
-                         retry_interval_us))) {
+                  cluster_id, tenant_id, ls_id, leader, tmp_abs_timeout_us, retry_interval_us))) {
         LOG_WARN("get leader with retry until timeout failed",  KR(ret), K(tenant_id), K(ls_id),
             K(leader), K(cluster_id), K(tmp_abs_timeout_us), K(retry_interval_us));
       } else if (OB_UNLIKELY(!leader.is_valid())) {
@@ -1822,6 +1836,7 @@ int ObInnerSQLConnection::execute(
     const uint64_t tenant_id, sqlclient::ObIExecutor &executor)
 {
   int ret = OB_SUCCESS;
+  DISABLE_SQL_MEMLEAK_GUARD;
   FLTSpanGuard(inner_execute);
   SMART_VAR(ObInnerSQLResult, res, get_session()) {
     if (OB_FAIL(res.init())) {
@@ -2107,38 +2122,6 @@ int ObInnerSQLConnection::end_nested_session(ObSQLSessionInfo::StmtSavedValue &s
     execute_end_timestamp_ = saved_conn.execute_end_timestamp_;
     saved_conn.reset();
   }
-  return ret;
-}
-
-int ObInnerSQLConnection::set_foreign_key_cascade(bool is_cascade)
-{
-  int ret = OB_SUCCESS;
-  OV (is_extern_session());
-  OX (extern_session_->set_foreign_key_casecade(is_cascade));
-  return ret;
-}
-
-int ObInnerSQLConnection::get_foreign_key_cascade(bool &is_cascade) const
-{
-  int ret = OB_SUCCESS;
-  OV (is_extern_session());
-  OX (is_cascade = extern_session_->is_foreign_key_cascade());
-  return ret;
-}
-
-int ObInnerSQLConnection::set_foreign_key_check_exist(bool is_check_exist)
-{
-  int ret = OB_SUCCESS;
-  OV (is_extern_session());
-  OX (extern_session_->set_foreign_key_check_exist(is_check_exist));
-  return ret;
-}
-
-int ObInnerSQLConnection::get_foreign_key_check_exist(bool &is_check_exist) const
-{
-  int ret = OB_SUCCESS;
-  OV (is_extern_session());
-  OX (is_check_exist = extern_session_->is_foreign_key_check_exist());
   return ret;
 }
 } // end of namespace observer

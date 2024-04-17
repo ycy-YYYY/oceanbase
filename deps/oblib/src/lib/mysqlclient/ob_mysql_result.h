@@ -862,6 +862,27 @@
     } \
   }
 
+  #define EXTRACT_STRBUF_FIELD_MYSQL_SKIP_RET_AND_TRUNCATION(result, column_name, field, max_length, real_length) \
+  if (OB_SUCC(ret)) \
+  { \
+    ObString str_value; \
+    if (OB_SUCCESS == (ret = (result).get_varchar(column_name, str_value))) \
+    { \
+        real_length = MIN(str_value.length(), max_length); \
+        MEMCPY(field, str_value.ptr(), real_length); \
+        field[real_length] = '\0'; \
+    } \
+    else if (OB_ERR_NULL_VALUE == ret || OB_ERR_COLUMN_NOT_FOUND == ret) \
+    { \
+      ret = OB_SUCCESS; \
+      real_length = 0; \
+      field[0] = '\0'; \
+    } \
+    else \
+    { \
+      SQL_LOG(WARN, "fail to extract strbuf field mysql. ", K(ret)); \
+    } \
+  }
 
 #define EXTRACT_STRBUF_FIELD_TO_CLASS_MYSQL_SKIP_RET(result, column_name, class_obj, max_length) \
   if (OB_SUCC(ret)) \
@@ -1042,7 +1063,7 @@
         res_obj.meta_.set_collation_level(CS_LEVEL_IMPLICIT); \
         ret = (class_obj).set_##column_name(res_obj); \
       } \
-      else if (column.is_identity_column() || ob_is_string_type(data_type) || ob_is_geometry(data_type)) \
+      else if (column.is_identity_column() || ob_is_string_type(data_type) || ob_is_geometry(data_type) || ob_is_collection_sql_type(data_type)) \
       { \
         res_obj.set_string(data_type, str_value); \
         res_obj.meta_.set_collation_type(column.get_collation_type());  \
@@ -1054,7 +1075,7 @@
           SQL_LOG(WARN, "outrow lob unsupported", "column_name", #column_name); \
         } \
         else { \
-          if (ob_is_text_tc(data_type) || ob_is_geometry(data_type)) { res_obj.set_inrow(); } \
+          if (ob_is_text_tc(data_type) || ob_is_geometry(data_type) || ob_is_collection_sql_type(data_type)) { res_obj.set_inrow(); } \
           ret = (class_obj).set_##column_name(res_obj); \
         } \
       }                                               \

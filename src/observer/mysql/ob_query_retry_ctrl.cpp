@@ -17,6 +17,7 @@
 #include "sql/resolver/ob_stmt.h"
 #include "pl/ob_pl.h"
 #include "storage/tx/ob_trans_define.h"
+#include "storage/memtable/ob_lock_wait_mgr.h"
 #include "observer/mysql/ob_mysql_result_set.h"
 #include "observer/ob_server_struct.h"
 #include "observer/mysql/obmp_query.h"
@@ -266,6 +267,17 @@ public:
     return exec_ctx.get_table_direct_insert_ctx().get_is_direct();
   }
 
+  bool is_load_local(ObRetryParam &v) const
+  {
+    bool bret = false;
+    const ObICmd *cmd = v.result_.get_cmd();
+    if (OB_NOT_NULL(cmd) && cmd->get_cmd_type() == stmt::T_LOAD_DATA) {
+      const ObLoadDataStmt *load_data_stmt = static_cast<const ObLoadDataStmt *>(cmd);
+      bret = load_data_stmt->get_load_arguments().load_file_storage_ == ObLoadFileLocation::CLIENT_DISK;
+    }
+    return bret;
+  }
+
   virtual void test(ObRetryParam &v) const override
   {
     int err = v.err_;
@@ -286,6 +298,10 @@ public:
         v.client_ret_ = err;
         v.retry_type_ = RETRY_TYPE_NONE;
       }
+      v.no_more_test_ = true;
+    } else if (is_load_local(v)) {
+      v.client_ret_ = err;
+      v.retry_type_ = RETRY_TYPE_NONE;
       v.no_more_test_ = true;
     } else if (is_direct_load(v)) {
       if (is_direct_load_retry_err(err)) {
@@ -973,6 +989,13 @@ void ObQueryRetryCtrl::after_func(ObRetryParam &v)
   if (OB_UNLIKELY(OB_SUCCESS == v.client_ret_)) {
     LOG_ERROR_RET(OB_ERR_UNEXPECTED, "no matter need retry or not, v.client_ret_ should not be OB_SUCCESS", K(v));
   }
+  // bug fix, reset lock_wait_mgr node before doing local retry
+  if (RETRY_TYPE_LOCAL == v.retry_type_) {
+    rpc::ObLockWaitNode* node = MTL(memtable::ObLockWaitMgr*)->get_thread_node();
+    if (NULL != node) {
+      node->reset_need_wait();
+    }
+  }
 }
 
 int ObQueryRetryCtrl::init()
@@ -1044,10 +1067,10 @@ int ObQueryRetryCtrl::init()
   ERR_RETRY_FUNC("LOCATION", OB_LS_NOT_EXIST,                    location_error_proc,        inner_location_error_proc,                            ObDASRetryCtrl::tablet_location_retry_proc);
   // OB_TABLET_NOT_EXIST may be caused by old version schema or incorrect location.
   // Just use location_error_proc to retry sql and a new schema guard will be obtained during the retry process.
-  ERR_RETRY_FUNC("LOCATION", OB_TABLET_NOT_EXIST,                location_error_proc,        inner_location_error_proc,                            ObDASRetryCtrl::tablet_not_exist_retry_proc);
+  ERR_RETRY_FUNC("LOCATION", OB_TABLET_NOT_EXIST,                location_error_proc,        inner_location_error_proc,                            ObDASRetryCtrl::tablet_location_retry_proc);
   ERR_RETRY_FUNC("LOCATION", OB_LS_LOCATION_NOT_EXIST,           location_error_proc,        inner_location_error_proc,                            ObDASRetryCtrl::tablet_location_retry_proc);
   ERR_RETRY_FUNC("LOCATION", OB_PARTITION_IS_BLOCKED,            location_error_proc,        inner_location_error_proc,                            ObDASRetryCtrl::tablet_location_retry_proc);
-  ERR_RETRY_FUNC("LOCATION", OB_MAPPING_BETWEEN_TABLET_AND_LS_NOT_EXIST, location_error_proc,inner_location_error_proc,                            ObDASRetryCtrl::tablet_not_exist_retry_proc);
+  ERR_RETRY_FUNC("LOCATION", OB_MAPPING_BETWEEN_TABLET_AND_LS_NOT_EXIST, location_error_proc,inner_location_error_proc,                            ObDASRetryCtrl::tablet_location_retry_proc);
 
   ERR_RETRY_FUNC("LOCATION", OB_GET_LOCATION_TIME_OUT,           location_error_proc,        inner_table_location_error_proc,                      ObDASRetryCtrl::tablet_location_retry_proc);
 
@@ -1072,6 +1095,7 @@ int ObQueryRetryCtrl::init()
   ERR_RETRY_FUNC("TRX",      OB_GTS_NOT_READY,                   short_wait_retry_proc,      short_wait_retry_proc,                                nullptr);
   ERR_RETRY_FUNC("TRX",      OB_GTI_NOT_READY,                   short_wait_retry_proc,      short_wait_retry_proc,                                nullptr);
   ERR_RETRY_FUNC("TRX",      OB_TRANS_WEAK_READ_VERSION_NOT_READY, short_wait_retry_proc,    short_wait_retry_proc,                                nullptr);
+  ERR_RETRY_FUNC("TRX",      OB_SEQ_NO_REORDER_UNDER_PDML,       short_wait_retry_proc,      short_wait_retry_proc,                                nullptr);
 
   /* sql */
   ERR_RETRY_FUNC("SQL",      OB_ERR_INSUFFICIENT_PX_WORKER,      px_thread_not_enough_proc,  short_wait_retry_proc,                                nullptr);
@@ -1174,8 +1198,11 @@ void ObQueryRetryCtrl::test_and_save_retry_state(const ObGlobalContext &gctx,
   } else {
     // you can't tell exact stmt retry times for a SQL in PL as PL may do whole block retry
     // so we use retry_times_ as stmt_retry_times for any stmt in PL
+    // if pl + stmt_retry_times == 0 scene, will cause timeout early.
+    // So the number of retry times here is at least 1
     const int64_t stmt_retry_times =
-        is_part_of_pl_sql ? retry_times_ : session->get_retry_info().get_retry_cnt();
+        is_part_of_pl_sql ? (retry_times_ == 0 ? 1 : retry_times_):
+        session->get_retry_info().get_retry_cnt();
     ObRetryParam retry_param(ctx, result, *session,
                              curr_query_tenant_local_schema_version_,
                              curr_query_tenant_global_schema_version_,

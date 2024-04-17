@@ -88,8 +88,8 @@ struct ObDirectLoadInsertTabletWriteCtx
 
 class ObDirectLoadInsertTabletContext
 {
-  static const int64_t PK_CACHE_SIZE = 1000000;
-  static const int64_t WRITE_BATCH_SIZE = 100000;
+  static const int64_t PK_CACHE_SIZE = 5000000;
+  static const int64_t WRITE_BATCH_SIZE = 5000000;
 public:
   ObDirectLoadInsertTabletContext();
   ~ObDirectLoadInsertTabletContext();
@@ -110,7 +110,7 @@ public:
                              blocksstable::ObDatumRow &datum_row);
 
   int get_lob_write_ctx(ObDirectLoadInsertTabletWriteCtx &write_ctx);
-  int calc_range();
+  int calc_range(const int64_t thread_cnt);
   int fill_column_group(const int64_t thread_cnt, const int64_t thread_id);
   int cancel();
   TO_STRING_KV(K_(param), K_(is_open));
@@ -143,6 +143,7 @@ public:
   int init(const ObDirectLoadInsertTableParam &param);
   int get_tablet_context(const common::ObTabletID &tablet_id,
                          ObDirectLoadInsertTabletContext *&tablet_ctx) const;
+  void cancel();
   TO_STRING_KV(K_(param));
 private:
   int create_all_tablet_contexts();

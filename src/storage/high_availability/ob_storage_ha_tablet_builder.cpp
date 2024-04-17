@@ -544,7 +544,7 @@ int ObStorageHATabletsBuilder::create_or_update_tablet_(
   } else if (ObCopyTabletStatus::TABLET_NOT_EXIST == tablet_info.status_ && tablet_info.tablet_id_.is_ls_inner_tablet()) {
     ret = OB_TABLET_NOT_EXIST;
     LOG_WARN("src ls inner tablet is not exist, src ls is maybe deleted", K(ret), K(tablet_info));
-  } else if (need_check_tablet_limit && OB_FAIL(ObTabletCreateMdsHelper::check_create_new_tablets(1LL, true/*is_soft_limit*/))) {
+  } else if (need_check_tablet_limit && OB_FAIL(ObTabletCreateMdsHelper::check_create_new_tablets(1LL, ObTabletCreateThrottlingLevel::SOFT))) {
     if (OB_TOO_MANY_PARTITIONS_ERROR == ret) {
       LOG_ERROR("too many partitions, failed to check create new tablet", K(ret), K(tablet_info));
     } else {
@@ -941,7 +941,7 @@ int ObStorageHATabletsBuilder::get_minor_scn_range_(
     if (OB_SUCC(ret)) {
       //need copy src all minor sstables for tablet meta merge, do not need calculate sstable version range.
       //here set end scn just for compatible
-      if (GET_MIN_CLUSTER_VERSION() <= CLUSTER_VERSION_4_2_1_1) {
+      if (GET_MIN_CLUSTER_VERSION() < CLUSTER_VERSION_4_2_2_0) {
         scn_range.start_scn_ = ObTabletMeta::INIT_CLOG_CHECKPOINT_SCN;
         scn_range.end_scn_ = sstables.empty() ? tablet->get_tablet_meta().clog_checkpoint_scn_ : sstables.at(0).get_sstable()->get_start_scn();
       } else {

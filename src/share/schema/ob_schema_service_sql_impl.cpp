@@ -6033,10 +6033,10 @@ int ObSchemaServiceSQLImpl::sort_table_partition_info(
     lib::CompatModeGuard g(is_oracle_mode ?
                       lib::Worker::CompatMode::ORACLE :
                       lib::Worker::CompatMode::MYSQL);
-    if (OB_FAIL(ObSchemaServiceSQLImpl::sort_partition_array(table_schema))) {
-      LOG_WARN("failed to sort partition array", KR(ret), K(table_schema));
-    } else if (OB_FAIL(try_mock_partition_array(table_schema))) {
+    if (OB_FAIL(try_mock_partition_array(table_schema))) {
       LOG_WARN("fail to mock partition array", KR(ret), K(table_schema));
+    } else if (OB_FAIL(ObSchemaServiceSQLImpl::sort_partition_array(table_schema))) {
+      LOG_WARN("failed to sort partition array", KR(ret), K(table_schema));
     } else if (OB_FAIL(ObSchemaServiceSQLImpl::sort_subpartition_array(table_schema))) {
       LOG_WARN("failed to sort subpartition array", KR(ret), K(table_schema));
     }
@@ -6060,6 +6060,15 @@ int ObSchemaServiceSQLImpl::try_mock_partition_array(
     // only mock vtable's partition array after 4.0
     if (OB_FAIL(table_schema.mock_list_partition_array())) {
       LOG_WARN("fail to mock list partition array", KR(ret), K(table_schema));
+    }
+  }
+  // to prevent one/two level table's partition array is empty
+  if (OB_SUCC(ret)
+      && table_schema.is_user_partition_table()) {
+    if (OB_ISNULL(table_schema.get_part_array())
+        || table_schema.get_partition_num() <= 0) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_ERROR("partition array is empty", KR(ret), K(table_schema));
     }
   }
   return ret;
@@ -8509,10 +8518,10 @@ int ObSchemaServiceSQLImpl::sort_subpartition_array(ObPartitionSchema &partition
         int64_t subpartition_num = partition->get_subpartition_num();
         if (subpart_num != subpartition_num) {
           ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("subpartition num not match", K(ret), K(subpart_num), K(subpartition_num));
+          LOG_ERROR("subpartition num not match", K(ret), K(subpart_num), K(subpartition_num));
         } else if (OB_ISNULL(subpart_array) || subpartition_num <= 0) {
           ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("subpartition array is empty", K(ret), K(i), K(partition_schema));
+          LOG_ERROR("subpartition array is empty", K(ret), K(i), K(partition_schema));
         } else if (partition_schema.is_range_subpart()) {
           std::sort(subpart_array, subpart_array + subpartition_num, ObBasePartition::less_than);
           std::sort(partition->get_hidden_subpart_array(),
@@ -8941,12 +8950,20 @@ int ObSchemaServiceSQLImpl::get_link_table_schema(const ObDbLinkSchema *dblink_s
       }
     }
   }
-  // don't need set param_ctx.charset_id_ and param_ctx.ncharset_id_, default value is what we need.
-  param_ctx.pool_type_ = DblinkPoolType::DBLINK_POOL_SCHEMA;
-  param_ctx.sql_request_level_ = sql_request_level;
-  param_ctx.tenant_id_ = tenant_id;
-  param_ctx.dblink_id_ = dblink_id;
-  param_ctx.link_type_ = link_type;
+  if (OB_FAIL(ret)) {
+    // do nothing
+  } else if (OB_FAIL(ObDblinkService::init_dblink_param_ctx(param_ctx,
+                                                     session_info,
+                                                     alloctor, //useless in oracle mode
+                                                     dblink_id,
+                                                     link_type,
+                                                     DblinkPoolType::DBLINK_POOL_SCHEMA))) {
+    LOG_WARN("failed to init dblink param ctx", K(ret), K(param_ctx), K(dblink_id));
+  } else {
+    // param_ctx.charset_id_ and param_ctx.ncharset_id_, default value is what we need.
+    param_ctx.charset_id_ = common::ObNlsCharsetId::CHARSET_AL32UTF8_ID;
+    param_ctx.ncharset_id_ = common::ObNlsCharsetId::CHARSET_AL32UTF8_ID;
+  }
   // skip to process TM process sql within @xxxx send by RM, cause here can not get DBLINK_INFO hint(still unresolved).
   LOG_DEBUG("get link table schema", K(table_name), K(database_name), KP(dblink_schema), KP(reverse_link), K(is_reverse_link), K(conn_type), K(ret));
   if (OB_FAIL(ret)) {// process normal dblink request
@@ -8954,9 +8971,6 @@ int ObSchemaServiceSQLImpl::get_link_table_schema(const ObDbLinkSchema *dblink_s
   } else if (sql::DblinkGetConnType::DBLINK_POOL == conn_type && OB_ISNULL(dblink_schema)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected null", K(ret), KP(dblink_schema));
-  } else if (!lib::is_oracle_mode() &&
-             OB_FAIL(ObDblinkService::get_set_sql_mode_cstr(session_info, param_ctx.set_sql_mode_cstr_, alloctor))) {
-    LOG_WARN("failed to get sql mode cstr", K(ret));
   } else if (sql::DblinkGetConnType::DBLINK_POOL == conn_type &&
       OB_FAIL(dblink_proxy_->create_dblink_pool(param_ctx,
                                                 dblink_schema->get_host_addr(),
@@ -9045,7 +9059,6 @@ int ObSchemaServiceSQLImpl::fetch_link_table_info(dblink_param_ctx &param_ctx,
       } else {
         LOG_DEBUG("succ to read table meta by reverse_link");
       }
-    } else if (FALSE_IT(param_ctx.sessid_ = session_info->get_sessid())) {
     } else if (OB_FAIL(dblink_proxy_->acquire_dblink(param_ctx,
                                                      dblink_conn))) {
       LOG_WARN("failed to acquire dblink", K(ret), K(param_ctx));

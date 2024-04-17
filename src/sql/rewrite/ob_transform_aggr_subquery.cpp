@@ -949,8 +949,6 @@ int ObTransformAggrSubquery::transform_upper_stmt(ObDMLStmt &stmt, TransformPara
       OB_ISNULL(subquery = query_expr->get_ref_stmt())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("params are invalid", K(ret), K(ctx_), K(subquery));
-  } else if (OB_FAIL(ObOptimizerUtil::remove_item(stmt.get_subquery_exprs(), query_expr))) {
-    LOG_WARN("failed to remove subquery expr", K(ret));
   } else if (OB_FAIL(ObTransformUtils::add_new_table_item(ctx_, &stmt, subquery, view_table))) {
     LOG_WARN("failed to add new table item", K(ret));
   } else if (OB_ISNULL(view_table)) {
@@ -1301,8 +1299,8 @@ int ObTransformAggrSubquery::get_trans_param(ObDMLStmt &stmt,
     }
   } else if (stmt.is_update_stmt()) {
     ObUpdateStmt &upd_stmt = static_cast<ObUpdateStmt &>(stmt);
-    if (OB_FAIL(upd_stmt.get_assign_values(pre_group_by_exprs, true))) {
-      LOG_WARN("failed to get assign values", K(ret));
+    if (OB_FAIL(ObTransformUtils::get_post_join_exprs(&stmt, pre_group_by_exprs, true))) {
+      LOG_WARN("failed to get post join exprs", K(ret));
     }
   }
   int64_t pre_count = pre_group_by_exprs.count();
@@ -1407,9 +1405,12 @@ int ObTransformAggrSubquery::check_stmt_valid(ObDMLStmt &stmt, bool &is_valid)
   int ret = OB_SUCCESS;
   is_valid = true;
   bool can_set_unique = false;
-  if (stmt.is_set_stmt() || stmt.is_hierarchical_query() || !stmt.is_sel_del_upd()) {
+  if (stmt.is_set_stmt()
+      || stmt.is_hierarchical_query()
+      || stmt.has_for_update()
+      || !stmt.is_sel_del_upd()) {
     is_valid = false;
-  } else if (OB_FAIL(ObTransformUtils::check_can_set_stmt_unique(&stmt, can_set_unique))) {
+  } else if (OB_FAIL(StmtUniqueKeyProvider::check_can_set_stmt_unique(&stmt, can_set_unique))) {
     LOG_WARN("failed to check can set stmt unque", K(ret));
   } else if (!can_set_unique) {
     is_valid = false;
@@ -1721,10 +1722,7 @@ int ObTransformAggrSubquery::do_join_first_transform(ObSelectStmt &select_stmt,
     }
   }
   if (OB_SUCC(ret)) {
-    if (OB_FAIL(ObOptimizerUtil::remove_item(select_stmt.get_subquery_exprs(),
-                                             query_ref_expr))) {
-      LOG_WARN("failed to remove query ref expr", K(ret));
-    } else if (is_exists_op(root_expr->get_expr_type())) {
+    if (is_exists_op(root_expr->get_expr_type())) {
       bool need_lnnvl = root_expr->get_expr_type() == T_OP_NOT_EXISTS;
       if (OB_FAIL(ObOptimizerUtil::remove_item(select_stmt.get_condition_exprs(), root_expr))) {
         LOG_WARN("failed to remove exprs", K(ret));
@@ -1765,8 +1763,6 @@ int ObTransformAggrSubquery::do_join_first_transform(ObSelectStmt &select_stmt,
       LOG_WARN("failed to append check constraint items", K(ret));
     } else if (OB_FAIL(append(select_stmt.get_aggr_items(), subquery->get_aggr_items()))) {
       LOG_WARN("failed to append aggr items", K(ret));
-    } else if (OB_FAIL(append(select_stmt.get_subquery_exprs(), subquery->get_subquery_exprs()))) {
-      LOG_WARN("failed to append subquery exprs", K(ret));
     } else if (OB_FAIL(select_stmt.rebuild_tables_hash())) {
       LOG_WARN("failed to rebuild table hash", K(ret));
     } else if (OB_FAIL(select_stmt.update_column_item_rel_id())) {
@@ -1810,7 +1806,7 @@ int ObTransformAggrSubquery::modify_vector_comparison_expr_if_necessary(
     select_exprs.assign(temp_expr);
     // replace parent_expr_of_query_ref with subquery comparison operator to the one of common comparison operator
     ObItemType value_cmp_type = T_INVALID;
-    if (OB_FAIL(ObTransformUtils::query_cmp_to_value_cmp(parent_expr_of_query_ref->get_expr_type(), value_cmp_type))) {
+    if (FAILEDx(ObTransformUtils::query_cmp_to_value_cmp(parent_expr_of_query_ref->get_expr_type(), value_cmp_type))) {
       LOG_WARN("unexpected root_expr type", K(ret), K(value_cmp_type));
     } else {
       ObOpRawExpr *new_parent_expr = NULL;
@@ -1856,7 +1852,8 @@ int ObTransformAggrSubquery::get_unique_keys(ObDMLStmt &stmt,
     LOG_WARN("transform context is invalid", K(ret), K(ctx_), K(query_hint));
   } else if (is_first_trans) {
     // 第一次改写时需要生成所有from table的unique 可以
-    if (OB_FAIL(ObTransformUtils::generate_unique_key(ctx_, &stmt, empty_ignore_tables, pkeys))) {
+    StmtUniqueKeyProvider unique_key_provider(false);
+    if (OB_FAIL(unique_key_provider.generate_unique_key(ctx_, &stmt, empty_ignore_tables, pkeys))) {
       LOG_WARN("failed to generate unique key", K(ret));
     }
   } else if ((query_hint->has_outline_data() && stmt.get_table_items().count() < 1) ||

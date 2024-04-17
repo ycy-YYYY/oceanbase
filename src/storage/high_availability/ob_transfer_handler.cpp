@@ -397,11 +397,18 @@ int ObTransferHandler::check_self_is_leader_(bool &is_leader)
   ObRole role = ObRole::INVALID_ROLE;
   int64_t proposal_id = 0;
   const uint64_t tenant_id = MTL_ID();
+  bool is_primary_tenant = true;
   is_leader = false;
 
   if (!is_inited_) {
     ret = OB_NOT_INIT;
     LOG_WARN("transfer handler do not init", K(ret));
+  } else if (OB_FAIL(ObStorageHAUtils::check_is_primary_tenant(tenant_id, is_primary_tenant))) {
+    //Setting the tenant as the primary tenant from the standby tenant and changing the leader attribute of palf are not atomic.
+    //The attributes of palf will change first, and then the attributes of the tenant will change.
+    LOG_WARN("failed to check is primary tenant", K(ret), K(tenant_id));
+  } else if (!is_primary_tenant) {
+    is_leader = false;
   } else if (OB_FAIL(ls_->get_log_handler()->get_role(role, proposal_id))) {
     LOG_WARN("failed to get role", K(ret), KPC(ls_));
   } else if (is_strong_leader(role)) {
@@ -1074,7 +1081,7 @@ int ObTransferHandler::wait_tablet_write_end_(
       LOG_WARN("failed to wait tx_write end", KR(ret), K(task_info));
     } else if (OB_FAIL(ls->get_tx_svr()->traverse_trans_to_submit_redo_log(failed_tx_id))) {
       LOG_WARN("failed to submit tx log", KR(ret), K(task_info));
-    } else if (OB_FAIL(ls->batch_tablet_freeze(tablet_list, true))) {
+    } else if (OB_FAIL(ls->batch_tablet_freeze(checkpoint::INVALID_TRACE_ID, tablet_list, true))) {
       LOG_WARN("batch tablet freeze failed", KR(ret), KPC(ls), K(task_info));
     } else if (OB_FAIL(ls->check_tablet_no_active_memtable(tablet_list, has_active_memtable))) {
       LOG_WARN("check tablet has active memtable failed", KR(ret), KPC(ls), K(task_info));
@@ -1300,6 +1307,7 @@ int ObTransferHandler::do_tx_start_transfer_out_(
     start_transfer_out_info.data_end_scn_ = data_end_scn;
     // TODO lana optimise transfer_epoch value
     start_transfer_out_info.transfer_epoch_ = task_info.task_id_.id();
+    start_transfer_out_info.data_version_ = DEFAULT_MIN_DATA_VERSION;
     if (OB_FAIL(start_transfer_out_info.tablet_list_.assign(task_info.tablet_list_))) {
       LOG_WARN("failed to assign transfer tablet list", K(ret), K(task_info));
     } else {
@@ -1492,7 +1500,9 @@ int ObTransferHandler::wait_src_ls_replay_to_start_scn_(
   } else {
     LOG_INFO("[TRANSFER_BLOCK_TX] wait src ls repaly to start scn", "cost", ObTimeUtil::current_time() - start_ts);
   }
-
+#ifdef ERRSIM
+  SERVER_EVENT_SYNC_ADD("errsim_transfer", "DEBUG_SYNC_WAIT_REPLAY_TO_START_SCN");
+#endif
   DEBUG_SYNC(AFTER_START_TRANSFER_WAIT_REPLAY_TO_START_SCN);
 #ifdef ERRSIM
   if (OB_SUCC(ret)) {
@@ -1742,6 +1752,7 @@ int ObTransferHandler::do_tx_start_transfer_in_(
       start_transfer_in_info.src_ls_id_ = task_info.src_ls_id_;
       start_transfer_in_info.dest_ls_id_ = task_info.dest_ls_id_;
       start_transfer_in_info.start_scn_ = start_scn;
+      start_transfer_in_info.data_version_ = DEFAULT_MIN_DATA_VERSION;
 
       if (timeout_ctx.is_timeouted()) {
         ret = OB_TIMEOUT;
@@ -2672,7 +2683,7 @@ int enable_new_transfer(bool &enable)
     LOG_INFO("[TRANSFER] get min data version failed", K(ret));
   } else if (DATA_VERSION_4_3_0_0 > data_version) {
     enable = false;
-  } else if (!tenant_config->_enable_transfer_active_tx) {
+  } else if (!tenant_config->_enable_active_txn_transfer) {
     enable = false;
   } else {
     enable = true;

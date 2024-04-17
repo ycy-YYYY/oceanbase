@@ -107,7 +107,7 @@ namespace observer
 class ObServer
 {
 public:
-  static const int64_t DEFAULT_ETHERNET_SPEED = 1000 / 8 * 1024 * 1024; // default 125m/s  1000Mbit
+  static const int64_t DEFAULT_ETHERNET_SPEED = 10000 / 8 * 1024 * 1024; // change from default 125m/s  1000Mbit to 1250MBps 10000Mbit
   static const int64_t DISK_USAGE_REPORT_INTERVAL = 1000L * 1000L * 300L; // 5min
   static const uint64_t DEFAULT_CPU_FREQUENCY = 2500 * 1000; // 2500 * 1000 khz
   static ObServer &get_instance();
@@ -183,6 +183,21 @@ public:
     bool is_inited_;
   };
 
+  class ObRefreshIOCalibrationTimeTask: public common::ObTimerTask
+  {
+  public:
+    ObRefreshIOCalibrationTimeTask();
+    virtual ~ObRefreshIOCalibrationTimeTask() {}
+    int init(ObServer *observer, int tg_id);
+    void destroy();
+    virtual void runTimerTask() override;
+  private:
+    const static int64_t REFRESH_INTERVAL = 10 * 1000L * 1000L;//10s
+    ObServer *obs_;
+    int tg_id_;
+    bool is_inited_;
+  };
+
   class ObRefreshTime {
   public:
     explicit ObRefreshTime(ObServer *obs): obs_(obs){}
@@ -250,6 +265,10 @@ private:
   ~ObServer();
 
   int init_config();
+  int init_opts_config(bool has_config_file); // init configs from command line
+  int init_local_ip_and_devname();
+  int init_self_addr();
+  int init_config_module();
   int init_tz_info_mgr();
   int init_pre_setting();
   int init_network();
@@ -288,6 +307,7 @@ private:
   int get_network_speed_from_config_file(int64_t &network_speed);
   int refresh_network_speed();
   int refresh_cpu_frequency();
+  int refresh_io_calibration();
   int clean_up_invalid_tables();
   int clean_up_invalid_tables_by_tenant(const uint64_t tenant_id);
   int init_ctas_clean_up_task(); //Regularly clean up the residuals related to querying and building tables and temporary tables
@@ -297,10 +317,14 @@ private:
   int init_refresh_active_time_task(); //Regularly update the sess_active_time of the temporary table created by the proxy connection sess
   int init_refresh_network_speed_task();
   int init_refresh_cpu_frequency();
+  int init_refresh_io_calibration();
   int set_running_mode();
   void check_user_tenant_schema_refreshed(const common::ObIArray<uint64_t> &tenant_ids, const int64_t expire_time);
   void check_log_replay_over(const common::ObIArray<uint64_t> &tenant_ids, const int64_t expire_time);
   int try_update_hidden_sys();
+  int check_if_multi_tenant_synced();
+  int check_if_schema_ready();
+  int check_if_timezone_usable();
   int parse_mode();
   void deinit_zlib_lite_compressor();
 
@@ -440,6 +464,7 @@ private:
   ObRefreshTimeTask refresh_active_time_task_; // repeat & no retry
   ObRefreshNetworkSpeedTask refresh_network_speed_task_; // repeat & no retry
   ObRefreshCpuFreqTimeTask refresh_cpu_frequency_task_;
+  ObRefreshIOCalibrationTimeTask refresh_io_calibration_task_; // retry to success & no repeat
   blocksstable::ObStorageEnv storage_env_;
   share::ObSchemaStatusProxy schema_status_proxy_;
 

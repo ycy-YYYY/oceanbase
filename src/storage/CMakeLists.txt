@@ -139,10 +139,6 @@ ob_set_subtarget(ob_storage blocksstable_index_block
   blocksstable/index_block/ob_sstable_sec_meta_iterator.cpp
 )
 
-ob_set_subtarget(ob_storage blockstore
-  blockstore/ob_shared_block_reader_writer.cpp
-)
-
 ob_set_subtarget(ob_storage slog
   slog/ob_server_slog_writer.cpp
   slog/ob_storage_log_batch_header.cpp
@@ -380,6 +376,7 @@ ob_set_subtarget(ob_storage tx
   tx/ob_xa_query.cpp
   tx/ob_xa_rpc.cpp
   tx/ob_xa_service.cpp
+  tx/ob_xa_trans_event.cpp
   tx/ob_xa_trans_heartbeat_worker.cpp
   tx/ob_tx_ctx_mds.cpp
   tx/ob_multi_data_source.cpp
@@ -451,6 +448,7 @@ ob_set_subtarget(ob_storage column_store
   column_store/ob_co_sstable_row_scanner.cpp
   column_store/ob_co_sstable_row_multi_scanner.cpp
   column_store/ob_co_sstable_rows_filter.cpp
+  column_store/ob_co_where_optimizer.cpp
   column_store/ob_cg_bitmap.cpp
   column_store/ob_cg_iter_param_pool.cpp
   column_store/ob_cg_sstable_row_getter.cpp
@@ -499,6 +497,7 @@ ob_set_subtarget(ob_storage access
   access/ob_rows_info.cpp
   access/ob_sample_iter_helper.cpp
   access/ob_table_read_info.cpp
+  access/ob_sample_filter.cpp
   access/ob_table_scan_range.cpp
   access/ob_table_access_param.cpp
   access/ob_table_access_context.cpp
@@ -507,6 +506,7 @@ ob_set_subtarget(ob_storage access
   access/ob_micro_block_handle_mgr.cpp
   access/ob_pushdown_aggregate.cpp
   access/ob_empty_read_bucket.cpp
+  access/ob_global_iterator_pool.cpp
 )
 
 ob_set_subtarget(ob_storage ddl
@@ -571,6 +571,7 @@ ob_set_subtarget(ob_storage common_mixed
   checkpoint/ob_data_checkpoint.cpp
   checkpoint/ob_freeze_checkpoint.cpp
   meta_mem/ob_tablet_leak_checker.cpp
+  checkpoint/ob_checkpoint_diagnose.cpp
   meta_mem/ob_meta_obj_struct.cpp
   meta_mem/ob_tablet_handle.cpp
   meta_mem/ob_tablet_map_key.cpp
@@ -581,6 +582,10 @@ ob_set_subtarget(ob_storage common_mixed
   meta_mem/ob_tenant_meta_obj_pool.cpp
   meta_mem/ob_storage_meta_cache.cpp
   utl_file/ob_utl_file_handler.cpp
+  blockstore/ob_shared_block_reader_writer.cpp
+  concurrency_control/ob_multi_version_garbage_collector.cpp
+  concurrency_control/ob_trans_stat_row.cpp
+  concurrency_control/ob_data_validation_service.cpp
 )
 
 ob_set_subtarget(ob_storage compaction
@@ -625,11 +630,6 @@ ob_set_subtarget(ob_storage compaction
   compaction/ob_compaction_memory_context.cpp
 )
 
-ob_set_subtarget(ob_storage concurrency_control
-  concurrency_control/ob_multi_version_garbage_collector.cpp
-  concurrency_control/ob_trans_stat_row.cpp
-)
-
 ob_set_subtarget(ob_storage memtable
   memtable/ob_lock_wait_mgr.cpp
   memtable/ob_memtable.cpp
@@ -670,6 +670,7 @@ ob_set_subtarget(ob_storage multi_data_source
   multi_data_source/adapter_define/mds_dump_node.cpp
   multi_data_source/runtime_utility/mds_tenant_service.cpp
   multi_data_source/runtime_utility/mds_factory.cpp
+  multi_data_source/runtime_utility/mds_retry_control.cpp
   multi_data_source/ob_mds_table_merge_dag.cpp
   multi_data_source/ob_mds_table_merge_dag_param.cpp
   multi_data_source/ob_mds_table_merge_task.cpp

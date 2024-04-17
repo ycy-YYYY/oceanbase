@@ -231,7 +231,7 @@ public:
   virtual ~ObOpSpec();
 
   DECLARE_VIRTUAL_TO_STRING;
-  const char *op_name() const { return ob_phy_operator_type_str(type_); }
+  const char *op_name() const { return ob_phy_operator_type_str(type_, use_rich_format_); }
 
   // Pre-order recursive create execution components (ObOperator and ObOperatorInput)
   // for current DFO.
@@ -274,7 +274,7 @@ public:
   int32_t get_child_num() const { return get_child_cnt(); }
   ObPhyOperatorType get_type() const { return type_; }
   uint64_t get_id() const { return id_; }
-  const char *get_name() const { return get_phy_op_name(type_); }
+  const char *get_name() const { return get_phy_op_name(type_, use_rich_format_); }
 
   int accept(ObOpSpecVisitor &visitor) const;
   int64_t get_rows() const { return rows_; }
@@ -476,13 +476,20 @@ public:
   static int filter_row(ObEvalCtx &eval_ctx,
                         const common::ObIArray<ObExpr *> &exprs,
                         bool &filtered);
+  static int filter_row_vector(ObEvalCtx &eval_ctx,
+                               const common::ObIArray<ObExpr *> &exprs,
+                               const sql::ObBitVector &skip_bit,
+                               bool &filtered);
   ObBatchRows &get_brs() { return brs_; }
   // Drain exchange in data for PX, or producer DFO will be blocked.
-  virtual int drain_exch();
+  int drain_exch();
   void set_pushdown_param_null(const common::ObIArray<ObDynamicParamSetter> &rescan_params);
   void set_feedback_node_idx(int64_t idx)
   { fb_node_idx_ = idx; }
+
+  bool is_operator_end() { return batch_reach_end_ ||  row_reach_end_ ; }
 protected:
+  virtual int do_drain_exch();
   int init_skip_vector();
   // Execute filter
   // Calc buffer does not reset internally, you need to reset it appropriately.
@@ -565,7 +572,6 @@ private:
   int output_expr_decint_datum_len_check();
   int output_expr_decint_datum_len_check_batch();
   int setup_op_feedback_info();
-  int do_drain_exch();
   // child can implement this interface, but can't call this directly
   virtual int inner_drain_exch() { return common::OB_SUCCESS; };
 protected:

@@ -165,7 +165,7 @@ int ObTabletMemtableMgr::reset_storage_recorder()
   return ret;
 }
 
-inline int ObTabletMemtableMgr::try_resolve_boundary_on_create_memtable_(
+inline int ObTabletMemtableMgr::try_resolve_boundary_on_create_memtable_for_leader_(
   memtable::ObMemtable *last_frozen_memtable,
   memtable::ObMemtable *new_memtable)
 {
@@ -192,14 +192,24 @@ inline int ObTabletMemtableMgr::try_resolve_boundary_on_create_memtable_(
     double_check = !double_check;
   } while (!can_resolve && double_check);
 
-  if (can_resolve) {
+
+  if (write_ref > 0) {
+    // NB: for the leader, if the write ref on the frozen memtable is greater
+    // than 0, we cannot create a new memtable. Otherwise we may finish the
+    // write on the new memtable before finishing the write on the frozen
+    // memtable and cause the writes and callbacks on memtable_ctx out of order.
+    ret = OB_EAGAIN;
+    TRANS_LOG(INFO, "last frozen's write flag is not 0 during create new memtable",
+              KPC(last_frozen_memtable), KPC(new_memtable));
+  } else if (can_resolve) {
     last_frozen_memtable->set_resolved_active_memtable_left_boundary(true);
     last_frozen_memtable->resolve_right_boundary();
     TRANS_LOG(INFO, "[resolve_right_boundary] in create_memtable on leader", KPC(last_frozen_memtable));
     if (new_memtable != last_frozen_memtable) {
-      new_memtable->resolve_left_boundary(last_frozen_memtable->get_end_scn());
+      const SCN &new_start_scn = MAX(last_frozen_memtable->get_end_scn(), last_frozen_memtable->get_migration_clog_checkpoint_scn());
+      new_memtable->resolve_left_boundary(new_start_scn);
     }
-  } else if (unsubmitted_cnt > 0 || write_ref > 0) {
+  } else if (unsubmitted_cnt > 0) {
     new_memtable->set_logging_blocked();
     TRANS_LOG(INFO, "set new memtable logging blocked", KPC(last_frozen_memtable), KPC(new_memtable));
   }
@@ -303,11 +313,13 @@ int ObTabletMemtableMgr::create_memtable(const SCN clog_checkpoint_scn,
           last_frozen_memtable->resolve_right_boundary();
           TRANS_LOG(INFO, "[resolve_right_boundary] in create_memtable on replay", KPC(last_frozen_memtable));
           if (memtable != last_frozen_memtable) {
-            memtable->resolve_left_boundary(last_frozen_memtable->get_end_scn());
+            const SCN start_scn = MAX(last_frozen_memtable->get_end_scn(),
+                                      last_frozen_memtable->get_migration_clog_checkpoint_scn());
+            memtable->resolve_left_boundary(start_scn);
           }
         }
         // for leader, decide the right boundary of frozen memtable
-        else if (OB_FAIL(try_resolve_boundary_on_create_memtable_(last_frozen_memtable, memtable))) {
+        else if (OB_FAIL(try_resolve_boundary_on_create_memtable_for_leader_(last_frozen_memtable, memtable))) {
           TRANS_LOG(WARN, "try resolve boundary fail", K(ret));
         }
       } else {
@@ -541,7 +553,9 @@ int ObTabletMemtableMgr::unset_logging_blocked_for_active_memtable(memtable::ObI
   return ret;
 }
 
-int ObTabletMemtableMgr::set_is_tablet_freeze_for_active_memtable(ObTableHandleV2 &handle)
+int ObTabletMemtableMgr::set_is_tablet_freeze_for_active_memtable(
+    ObTableHandleV2 &handle,
+    const int64_t trace_id)
 {
   handle.reset();
   memtable::ObIMemtable *active_memtable = nullptr;
@@ -562,6 +576,9 @@ int ObTabletMemtableMgr::set_is_tablet_freeze_for_active_memtable(ObTableHandleV
   } else if (FALSE_IT(memtable = static_cast<ObMemtable*>(active_memtable))) {
   } else if (memtable->allow_freeze()) {
     memtable->set_is_tablet_freeze();
+    if (checkpoint::INVALID_TRACE_ID != trace_id) {
+      memtable->set_trace_id(trace_id);
+    }
   } else {
     handle.reset();
     ret = OB_ENTRY_NOT_EXIST;
@@ -667,6 +684,7 @@ int ObTabletMemtableMgr::get_all_memtables(ObTableHdlArray &handle)
   return ret;
 }
 
+DEF_REPORT_CHEKCPOINT_DIAGNOSE_INFO(UpdateReleaseTime, update_release_time)
 int ObTabletMemtableMgr::release_head_memtable_(memtable::ObIMemtable *imemtable,
                                                 const bool force)
 {
@@ -697,12 +715,14 @@ int ObTabletMemtableMgr::release_head_memtable_(memtable::ObIMemtable *imemtable
       memtable->set_is_flushed();
       memtable->set_freeze_state(ObMemtableFreezeState::RELEASED);
       memtable->set_frozen();
+      memtable->report_memtable_diagnose_info(UpdateReleaseTime());
       release_head_memtable();
       memtable::ObMemtable *active_memtable = get_active_memtable_();
       if (OB_NOT_NULL(active_memtable) && !active_memtable->allow_freeze()) {
         active_memtable->set_allow_freeze(true);
         FLOG_INFO("allow active memtable to be freezed", K(ls_id), KPC(active_memtable));
       }
+
       FLOG_INFO("succeed to release head data memtable", K(ret), K(ls_id), K(tablet_id_));
     }
   }

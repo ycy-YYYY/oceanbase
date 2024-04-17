@@ -32,6 +32,9 @@ using namespace share;
 static ObSharedMemAllocMgr MTL_MEM_ALLOC_MGR;
 
 namespace share {
+
+ObTxDataThrottleGuard::~ObTxDataThrottleGuard() {}
+
 int ObTenantTxDataAllocator::init(const char *label)
 {
   int ret = OB_SUCCESS;
@@ -335,6 +338,29 @@ TEST_F(ObTestTx, rollback_savepoint_with_need_retry_error)
     ASSERT_EQ(ObTxSEQ::INVL(), tx.active_scn_);
     ASSERT_EQ(OB_SUCCESS, n1->rollback_to_implicit_savepoint(tx, sp, n1->ts_after_ms(5), nullptr));
   }
+}
+
+TEST_F(ObTestTx, create_savepoint_with_sanity_check_tx_abort)
+{
+  START_ONE_TX_NODE(n1);
+  PREPARE_TX(n1, tx);
+  PREPARE_TX_PARAM(tx_param);
+  GET_READ_SNAPSHOT(n1, tx, tx_param, snapshot);
+  tx.flags_.PART_ABORTED_ = 1;
+  ObTxSEQ sp;
+  ASSERT_EQ(OB_TRANS_NEED_ROLLBACK, n1->create_implicit_savepoint(tx, tx_param, sp));
+
+}
+
+TEST_F(ObTestTx, rollback_savepoint_with_sanity_check_tx_abort)
+{
+  START_ONE_TX_NODE(n1);
+  PREPARE_TX(n1, tx);
+  PREPARE_TX_PARAM(tx_param);
+  GET_READ_SNAPSHOT(n1, tx, tx_param, snapshot);
+  CREATE_IMPLICIT_SAVEPOINT(n1, tx, tx_param, sp);
+  tx.flags_.PART_ABORTED_ = 1;
+  ASSERT_EQ(OB_TRANS_NEED_ROLLBACK, n1->rollback_to_implicit_savepoint(tx, sp, n1->ts_after_ms(5), nullptr));
 }
 
 TEST_F(ObTestTx, switch_to_follower_gracefully)
@@ -2405,10 +2431,14 @@ TEST_F(ObTestTx, interrupt_get_read_snapshot)
   PREPARE_TX(n1, tx);
   ObTxReadSnapshot snapshot;
   n1->get_ts_mgr_().inject_get_gts_error(OB_EAGAIN);
-  ASYNC_DO(acq_snapshot, n1->get_read_snapshot(tx, ObTxIsolationLevel::RC, n1->ts_after_ms(20 * 1000), snapshot));
-  ASSERT_EQ(OB_SUCCESS, n1->interrupt(tx, OB_TRANS_KILLED));
-  ASYNC_WAIT(acq_snapshot, 2000 * 1000, wait_ret);
-  ASSERT_EQ(OB_ERR_INTERRUPTED, wait_ret);
+  int ret = OB_SUCCESS;
+  do {
+    ASYNC_DO(acq_snapshot, n1->get_read_snapshot(tx, ObTxIsolationLevel::RC, n1->ts_after_ms(20 * 1000), snapshot));
+    ASSERT_EQ(OB_SUCCESS, n1->interrupt(tx, OB_TRANS_KILLED));
+    ASYNC_WAIT(acq_snapshot, 2000 * 1000, wait_ret);
+    ret = wait_ret;
+  } while (OB_GTS_NOT_READY == ret);
+  ASSERT_EQ(OB_ERR_INTERRUPTED, ret);
   ROLLBACK_TX(n1, tx);
 }
 

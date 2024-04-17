@@ -122,13 +122,18 @@ void ObMemtableCtx::reset()
       TRANS_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "txn unsubmitted cnt not zero", K(*this), K(unsubmitted_cnt_));
       ob_abort();
     }
-    const int64_t fill = log_gen_.get_redo_filled_count();
-    const int64_t sync_succ = log_gen_.get_redo_sync_succ_count();
-    const int64_t sync_fail = log_gen_.get_redo_sync_fail_count();
-    if (OB_UNLIKELY(fill != sync_succ + sync_fail)) {
-      TRANS_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "redo filled_count != sync_succ + sync_fail", KPC(this),
+    if (OB_TRANS_KILLED != end_code_) {
+      // _NOTE_: skip when txn was forcedly killed
+      // if txn killed forcedly, callbacks of log unsynced will not been processed
+      // after log sync succeed
+      const int64_t fill = log_gen_.get_redo_filled_count();
+      const int64_t sync_succ = log_gen_.get_redo_sync_succ_count();
+      const int64_t sync_fail = log_gen_.get_redo_sync_fail_count();
+      if (OB_UNLIKELY(fill != sync_succ + sync_fail)) {
+        TRANS_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "redo filled_count != sync_succ + sync_fail", KPC(this),
                     K(fill), K(sync_succ), K(sync_fail));
-      ob_abort();
+        ob_abort();
+      }
     }
     is_inited_ = false;
     callback_free_count_ = 0;
@@ -1008,7 +1013,7 @@ int ObMemtableCtx::check_lock_exist(const ObLockID &lock_id,
                                     const ObTableLockMode mode,
                                     const ObTableLockOpType op_type,
                                     bool &is_exist,
-                                    ObTableLockMode &lock_mode_in_same_trans) const
+                                    uint64_t lock_mode_cnt_in_same_trans[]) const
 {
   int ret = OB_SUCCESS;
   is_exist = false;
@@ -1017,7 +1022,7 @@ int ObMemtableCtx::check_lock_exist(const ObLockID &lock_id,
                                              mode,
                                              op_type,
                                              is_exist,
-                                             lock_mode_in_same_trans))) {
+                                             lock_mode_cnt_in_same_trans))) {
     TRANS_LOG(WARN, "check lock exist failed. ", K(ret), K(lock_id),
               K(owner_id), K(mode), K(*this));
   }
@@ -1180,6 +1185,7 @@ int ObMemtableCtx::register_multi_source_data_if_need_(
     int64_t pos = 0;
     ObTxDataSourceType type = ObTxDataSourceType::TABLE_LOCK;
     ObPartTransCtx *part_ctx = static_cast<ObPartTransCtx *>(ctx_);
+
     if (serialize_size > tablelock::ObTableLockOp::MAX_SERIALIZE_SIZE) {
       ret = OB_ERR_UNEXPECTED;
       TRANS_LOG(WARN, "lock op serialize size if over flow", K(ret), K(serialize_size));
@@ -1296,5 +1302,6 @@ void ObMemtableCtx::check_all_redo_flushed()
 {
   trans_mgr_.check_all_redo_flushed();
 }
+
 }
 }

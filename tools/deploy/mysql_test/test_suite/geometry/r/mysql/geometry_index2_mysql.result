@@ -232,7 +232,7 @@ Outline Data:
   /*+
       BEGIN_OUTLINE_DATA
       FULL(@"SEL$1" "test"."tt2"@"SEL$1")
-      OPTIMIZER_FEATURES_ENABLE('4.0.0.0')
+      OPTIMIZER_FEATURES_ENABLE('')
       END_OUTLINE_DATA
   */
 Optimization Info:
@@ -249,6 +249,7 @@ Optimization Info:
       pruned_index_name:[idx]
       stats version:0
       dynamic sampling level:0
+      estimation method:[DEFAULT, STORAGE]
   Plan Type:
       LOCAL
   Note:
@@ -280,7 +281,7 @@ Outline Data:
   /*+
       BEGIN_OUTLINE_DATA
       FULL(@"SEL$1" "test"."tt2"@"SEL$1")
-      OPTIMIZER_FEATURES_ENABLE('4.0.0.0')
+      OPTIMIZER_FEATURES_ENABLE('')
       END_OUTLINE_DATA
   */
 Optimization Info:
@@ -297,6 +298,7 @@ Optimization Info:
       pruned_index_name:[idx]
       stats version:0
       dynamic sampling level:0
+      estimation method:[DEFAULT, STORAGE]
   Plan Type:
       LOCAL
   Note:
@@ -335,7 +337,7 @@ Outline Data:
   /*+
       BEGIN_OUTLINE_DATA
       INDEX(@"SEL$1" "test"."tt2"@"SEL$1" "idx")
-      OPTIMIZER_FEATURES_ENABLE('4.0.0.0')
+      OPTIMIZER_FEATURES_ENABLE('')
       END_OUTLINE_DATA
   */
 Optimization Info:
@@ -352,6 +354,7 @@ Optimization Info:
       unstable_index_name:[tt2]
       stats version:0
       dynamic sampling level:0
+      estimation method:[DEFAULT, STORAGE]
   Plan Type:
       LOCAL
   Note:
@@ -387,7 +390,7 @@ Outline Data:
   /*+
       BEGIN_OUTLINE_DATA
       INDEX(@"SEL$1" "test"."tt2"@"SEL$1" "idx")
-      OPTIMIZER_FEATURES_ENABLE('4.0.0.0')
+      OPTIMIZER_FEATURES_ENABLE('')
       END_OUTLINE_DATA
   */
 Optimization Info:
@@ -404,6 +407,7 @@ Optimization Info:
       pruned_index_name:[tt2]
       stats version:0
       dynamic sampling level:0
+      estimation method:[DEFAULT, STORAGE]
   Plan Type:
       LOCAL
   Note:
@@ -439,7 +443,7 @@ Outline Data:
   /*+
       BEGIN_OUTLINE_DATA
       INDEX(@"SEL$1" "test"."tt2"@"SEL$1" "idx")
-      OPTIMIZER_FEATURES_ENABLE('4.0.0.0')
+      OPTIMIZER_FEATURES_ENABLE('')
       END_OUTLINE_DATA
   */
 Optimization Info:
@@ -456,6 +460,7 @@ Optimization Info:
       unstable_index_name:[tt2]
       stats version:0
       dynamic sampling level:0
+      estimation method:[DEFAULT, STORAGE]
   Plan Type:
       LOCAL
   Note:
@@ -491,7 +496,7 @@ Outline Data:
   /*+
       BEGIN_OUTLINE_DATA
       INDEX(@"SEL$1" "test"."tt2"@"SEL$1" "idx")
-      OPTIMIZER_FEATURES_ENABLE('4.0.0.0')
+      OPTIMIZER_FEATURES_ENABLE('')
       END_OUTLINE_DATA
   */
 Optimization Info:
@@ -508,6 +513,7 @@ Optimization Info:
       pruned_index_name:[tt2]
       stats version:0
       dynamic sampling level:0
+      estimation method:[DEFAULT, STORAGE]
   Plan Type:
       LOCAL
   Note:
@@ -534,7 +540,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |478         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -559,7 +565,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |478         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -584,7 +590,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |478         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -609,7 +615,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |478         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -634,7 +640,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |478         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -659,7 +665,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |478         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -684,7 +690,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |478         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -709,7 +715,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |478         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -734,7 +740,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |304         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -759,7 +765,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |304         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -784,7 +790,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |304         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -809,7 +815,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |304         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -834,7 +840,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |478         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -859,7 +865,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |478         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -941,7 +947,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |218         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -966,7 +972,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |218         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -991,7 +997,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |218         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -1016,7 +1022,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |218         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -1041,7 +1047,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |218         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -1066,7 +1072,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |218         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -1091,7 +1097,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |218         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -1116,7 +1122,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |218         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -1141,7 +1147,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |218         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -1166,7 +1172,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |218         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -1191,7 +1197,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |218         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -1216,7 +1222,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |218         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -1241,7 +1247,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |159         |
 =================================================
 Outputs & filters:
 -------------------------------------
@@ -1266,7 +1272,7 @@ Query Plan
 =================================================
 |ID|OPERATOR       |NAME  |EST.ROWS|EST.TIME(us)|
 -------------------------------------------------
-|0 |TABLE FULL SCAN|t(idx)|1       |299         |
+|0 |TABLE FULL SCAN|t(idx)|1       |159         |
 =================================================
 Outputs & filters:
 -------------------------------------

@@ -316,7 +316,6 @@ public:
       cur_stmt_tables_.reset();
       read_uncommited_ = false;
       inc_autocommit_ = false;
-      is_foreign_key_cascade_ = false;
       need_serial_exec_ = false;
     }
   public:
@@ -331,8 +330,6 @@ public:
 //  bool in_transaction_;                   // 对应TransSavedValue的trans_flags_，不放在基类中。
     bool read_uncommited_;
     bool inc_autocommit_;
-    bool is_foreign_key_cascade_;
-    bool is_foreign_key_check_exist_;
     bool need_serial_exec_;
   public:
     // 原TransSavedValue的属性
@@ -386,6 +383,13 @@ public:
     transaction::ObTxExecResult tx_result_;
     int64_t nested_count_;
     transaction::ObXATransID xid_;
+  };
+
+  enum class ForceRichFormatStatus
+  {
+    Disable = 0,
+    FORCE_ON,
+    FORCE_OFF
   };
 
 public:
@@ -477,11 +481,45 @@ public:
                     const bool need_check_valid /* true */);
   void init_use_rich_format()
   {
-    use_rich_vector_format_ = GET_MIN_CLUSTER_VERSION() >= CLUSTER_VERSION_4_3_0_0
-                              && sys_vars_cache_.get_enable_rich_vector_format();
+    config_use_rich_format_ = GCONF._global_enable_rich_vector_format;
+    if (!config_use_rich_format_) {
+      use_rich_vector_format_ = false;
+      force_rich_vector_format_ = ForceRichFormatStatus::FORCE_OFF;
+    } else {
+      use_rich_vector_format_ = GET_MIN_CLUSTER_VERSION() >= CLUSTER_VERSION_4_3_0_0
+                                && sys_vars_cache_.get_enable_rich_vector_format();
+      force_rich_vector_format_ = ForceRichFormatStatus::Disable;
+    }
+  }
+  bool is_force_off_rich_format() {
+    return force_rich_vector_format_ == ForceRichFormatStatus::FORCE_OFF;
   }
   bool use_rich_format() const {
+    if (force_rich_vector_format_ != ForceRichFormatStatus::Disable) {
+      return force_rich_vector_format_ == ForceRichFormatStatus::FORCE_ON;
+    } else {
+      return use_rich_vector_format_;
+    }
+  }
+
+  bool config_use_rich_format() { return config_use_rich_format_; }
+
+  bool initial_use_rich_format() const {
     return use_rich_vector_format_;
+  }
+
+  ObBasicSessionInfo::ForceRichFormatStatus get_force_rich_format_status() const
+  {
+    return force_rich_vector_format_;
+  }
+
+  void set_force_rich_format(ObBasicSessionInfo::ForceRichFormatStatus status)
+  {
+    if (GET_MIN_CLUSTER_VERSION() >= CLUSTER_VERSION_4_3_0_0) {
+      force_rich_vector_format_ = status;
+    } else {
+      force_rich_vector_format_ = ForceRichFormatStatus::Disable;
+    }
   }
   //getters
   const common::ObString get_tenant_name() const;
@@ -518,6 +556,7 @@ public:
   bool is_query_killed() const;
   bool is_valid() const { return is_valid_; };
   uint64_t get_user_id() const { return user_id_; }
+  uint64_t get_proxy_user_id() const { return proxy_user_id_; }
   bool is_auditor_user() const { return is_ora_auditor_user(user_id_); };
   bool is_lbacsys_user() const { return is_ora_lbacsys_user(user_id_); };
   bool is_oracle_sys_user() const { return is_ora_sys_user(user_id_); };
@@ -637,6 +676,7 @@ public:
     return common::OB_SUCCESS;
   }
   int get_nlj_batching_enabled(bool &v) const;
+  int get_optimizer_features_enable_version(uint64_t &version) const;
   int get_enable_parallel_dml(bool &v) const;
   int get_enable_parallel_query(bool &v) const;
   int get_enable_parallel_ddl(bool &v) const;
@@ -713,6 +753,7 @@ public:
 
   /// @{ thread_data_ related: }
   int set_user(const common::ObString &user_name, const common::ObString &host_name, const uint64_t user_id);
+  inline void set_proxy_user_id(const uint64_t proxy_user_id) { proxy_user_id_ = proxy_user_id; }
   int set_real_client_ip_and_port(const common::ObString &client_ip, int32_t client_addr_port);
   const common::ObString &get_user_name() const { return thread_data_.user_name_;}
   const common::ObString &get_host_name() const { return thread_data_.host_name_;}
@@ -941,7 +982,7 @@ public:
   int load_all_sys_vars(const share::schema::ObSysVariableSchema &sys_var_schema, bool sys_var_created);
   int clean_all_sys_vars();
   SysVarIncInfo sys_var_inc_info_;
-
+  const ObString get_cur_sql_id() const { return ObString(sql_id_); }
   void get_cur_sql_id(char *sql_id_buf, int64_t sql_id_buf_size) const;
   void set_cur_sql_id(char *sql_id);
   int set_cur_phy_plan(ObPhysicalPlan *cur_phy_plan);
@@ -970,6 +1011,7 @@ public:
   int if_aggr_pushdown_allowed(bool &aggr_pushdown_allowed) const;
   int is_transformation_enabled(bool &transformation_enabled) const;
   int is_serial_set_order_forced(bool &force_set_order, bool is_oracle_mode) const;
+  int is_storage_estimation_enabled(bool &storage_estimation_enabled) const;
   bool is_use_trace_log() const
   {
     return sys_vars_cache_.get_ob_enable_trace_log();
@@ -983,7 +1025,7 @@ public:
   ///@{ user variables related:
   sql::ObSessionValMap &get_user_var_val_map() {return user_var_val_map_;}
   const sql::ObSessionValMap &get_user_var_val_map() const {return user_var_val_map_;}
-  int replace_user_variable(const common::ObString &var, const ObSessionVariable &val);
+  int replace_user_variable(const common::ObString &var, const ObSessionVariable &val, bool need_track = true);
   int replace_user_variables(const ObSessionValMap &user_var_map);
   int remove_user_variable(const common::ObString &var);
   int get_user_variable(const common::ObString &var, ObSessionVariable &val) const;
@@ -1307,11 +1349,6 @@ public:
   void set_tenant_killed() { ATOMIC_STORE(&is_tenant_killed_, 1); }
   bool is_use_inner_allocator() const;
   int64_t get_reused_count() const { return reused_count_; }
-  bool is_foreign_key_cascade() const { return is_foreign_key_cascade_; }
-  void set_foreign_key_casecade(bool value) { is_foreign_key_cascade_ = value; }
-  bool is_foreign_key_check_exist() const { return is_foreign_key_check_exist_; }
-  void set_foreign_key_check_exist(bool value) { is_foreign_key_check_exist_ = value; }
-  bool reuse_cur_sql_no() const { return is_foreign_key_cascade() || is_foreign_key_check_exist(); }
   inline void set_first_need_txn_stmt_type(stmt::StmtType stmt_type)
   {
     if (stmt::T_NONE == first_need_txn_stmt_type_) {
@@ -1453,7 +1490,9 @@ protected:
                          is_shadow_(false),
                          is_in_retry_(SESS_NOT_IN_RETRY),
                          client_addr_port_(0),
-                         is_mark_killed_(false)
+                         is_mark_killed_(false),
+                         proxy_user_name_(),
+                         proxy_host_name_()
     {
       CHAR_CARRAY_INIT(database_name_);
     }
@@ -1492,6 +1531,8 @@ protected:
       is_in_retry_ = SESS_NOT_IN_RETRY;
       client_addr_port_ = 0;
       is_mark_killed_ = false;
+      proxy_user_name_.reset();
+      proxy_host_name_.reset();
     }
     ~MultiThreadData ()
     {
@@ -1527,6 +1568,8 @@ protected:
     ObSessionRetryStatus is_in_retry_;//标识当前session是否处于query retry的状态
     int32_t client_addr_port_; // Record client address port.
     bool is_mark_killed_; // Mark the current session as delayed kill
+    common::ObString proxy_user_name_;
+    common::ObString proxy_host_name_;
   };
 
 public:
@@ -2086,6 +2129,7 @@ private:
   uint64_t proxy_sessid_;
   int64_t global_vars_version_; // used for obproxy synchronize variables
   int64_t sys_var_base_version_;
+  uint64_t proxy_user_id_;              // current proxy user id
   /*******************************************
    * transaction ctrl relative for session
    *******************************************/
@@ -2235,8 +2279,6 @@ private:
   int64_t curr_trans_last_stmt_end_time_;
 
   bool check_sys_variable_;
-  bool is_foreign_key_cascade_;
-  bool is_foreign_key_check_exist_;
   bool acquire_from_pool_;
   // 在构造函数中初始化为true，在一些特定错误情况下被设为false，表示session不能释放回session pool。
   // 所以reset接口中不需要、并且也不能重置release_to_pool_。
@@ -2296,6 +2338,13 @@ private:
   bool is_client_sessid_support_; //client session id support flag
   bool use_rich_vector_format_;
   int64_t last_refresh_schema_version_;
+  // rich format specified hint, e.g. `select /*+opt_param('enable_rich_vector_format', 'true')*/ * from t`
+  // force_rich_vector_format_ == FORCE_ON => use_rich_format() returns true
+  // force_rich_vector_format_ == FORCE_OFF => use_rich_format() returns false
+  // otherwise use_rich_format() returns use_rich_vector_format_
+  ForceRichFormatStatus force_rich_vector_format_;
+  // just used to plan cache key
+  bool config_use_rich_format_;
 };
 
 

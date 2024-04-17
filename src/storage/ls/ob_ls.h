@@ -85,7 +85,7 @@ class ObCompactionScheduleIterator;
 }
 namespace storage
 {
-const static int64_t LS_INNER_TABLET_FROZEN_TIMESTAMP = 1;
+class ObTabletCreateDeleteMdsUserData;
 
 struct ObLSVTInfo
 {
@@ -308,7 +308,6 @@ public:
   int finish_create_ls();
 
   bool is_create_committed() const;
-  bool is_need_gc() const;
   bool is_in_gc();
   bool is_restore_first_step() const;
   bool is_clone_first_step() const;
@@ -381,6 +380,7 @@ public:
   int replay_get_tablet_no_check(
       const common::ObTabletID &tablet_id,
       const share::SCN &scn,
+      const bool replay_allow_tablet_not_exist,
       ObTabletHandle &tablet_handle) const;
 
   int flush_if_need(const bool need_flush);
@@ -388,7 +388,13 @@ public:
   int check_can_replay_clog(bool &can_replay);
   int check_ls_need_online(bool &need_online);
 
-  TO_STRING_KV(K_(running_state), K_(ls_meta), K_(switch_epoch), K_(log_handler), K_(restore_handler), K_(is_inited), K_(tablet_gc_handler), K_(startup_transfer_info));
+  // for delaying the resource recycle after correctness issue
+  bool need_delay_resource_recycle() const;
+  void set_delay_resource_recycle();
+  void clear_delay_resource_recycle();
+
+  TO_STRING_KV(K_(running_state), K_(ls_meta), K_(switch_epoch), K_(log_handler), K_(restore_handler),
+               K_(is_inited), K_(tablet_gc_handler), K_(startup_transfer_info), K_(need_delay_resource_recycle));
 private:
   void update_state_seq_();
   int ls_init_for_dup_table_();
@@ -760,6 +766,7 @@ public:
   // @return OB_NOT_MASTER, if the LogStream is follower replica
   // @return OB_TRANS_CTX_NOT_EXIST, if the specified TxCtx is not found;
   CONST_DELEGATE_WITH_RET(ls_tx_svr_, get_tx_ctx, int);
+  CONST_DELEGATE_WITH_RET(ls_tx_svr_, get_tx_ctx_with_timeout, int);
 
   // Decrease the specified tx_ctx's reference count
   // @param [in] tx_ctx: the TxCtx will be revert
@@ -821,6 +828,7 @@ public:
   // iterate the obj lock op at tx service.
   // int iterate_tx_obj_lock_op(ObLockOpIterator &iter) const;
   CONST_DELEGATE_WITH_RET(ls_tx_svr_, iterate_tx_obj_lock_op, int);
+  CONST_DELEGATE_WITH_RET(ls_tx_svr_, iterate_tx_ctx, int);
 
   DELEGATE_WITH_RET(ls_tx_svr_, get_tx_ctx_count, int);
   DELEGATE_WITH_RET(ls_tx_svr_, get_active_tx_count, int);
@@ -847,9 +855,11 @@ public:
 
   // ObFreezer interface:
   // freeze the data of ls:
+  // @param [in] trace_id, for checkpoint diagnose
   // @param [in] is_sync, only used for wait_freeze_finished()
   // @param [in] abs_timeout_ts, wait until timeout if lock conflict
-  int logstream_freeze(const bool is_sync = false,
+  int logstream_freeze(const int64_t trace_id,
+                       const bool is_sync = false,
                        const int64_t abs_timeout_ts = INT64_MAX);
   // tablet freeze
   // @param [in] is_sync, only used for wait_freeze_finished()
@@ -865,9 +875,10 @@ public:
   // @param [in] tablet_ids
   // @param [in] is_sync
   // @param [in] abs_timeout_ts, wait until timeout if lock conflict
-  int batch_tablet_freeze(const ObIArray<ObTabletID> &tablet_ids,
-                          const bool is_sync = false,
-                          const int64_t abs_timeout_ts = INT64_MAX);
+  int batch_tablet_freeze(const int64_t trace_id,
+      const ObIArray<ObTabletID> &tablet_ids,
+      const bool is_sync = false,
+      const int64_t abs_timeout_ts = INT64_MAX);
 
   // ObTxTable interface
   DELEGATE_WITH_RET(tx_table_, get_tx_table_guard, int);
@@ -918,7 +929,6 @@ public:
   DELEGATE_WITH_RET(reserved_snapshot_mgr_, add_dependent_medium_tablet, int);
   DELEGATE_WITH_RET(reserved_snapshot_mgr_, del_dependent_medium_tablet, int);
   int set_ls_migration_gc(bool &allow_gc);
-
 private:
   // StorageBaseUtil
   // table manager: create, remove and guard get.
@@ -1008,6 +1018,9 @@ private:
   ObLSTransferStatus ls_transfer_status_;
   // this is used for the meta lock, and will be removed later
   RWLock meta_rwlock_;
+
+  // for delaying the resource recycle after correctness issue
+  bool need_delay_resource_recycle_;
 };
 
 }

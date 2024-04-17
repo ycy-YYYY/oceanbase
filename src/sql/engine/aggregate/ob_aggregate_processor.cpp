@@ -31,6 +31,7 @@
 #include "sql/engine/basic/ob_material_op_impl.h"
 #include "share/stat/ob_hybrid_hist_estimator.h"
 #include "share/stat/ob_dbms_stats_utils.h"
+#include "sql/engine/expr/ob_expr_sys_op_opnsize.h"
 #ifdef OB_BUILD_ORACLE_XML
 #include "lib/xml/ob_xml_util.h"
 #include "lib/xml/ob_xml_tree.h"
@@ -203,6 +204,55 @@ int64_t ObAggrInfo::to_string(char *buf, const int64_t buf_len) const
        );
   J_OBJ_END();
   return pos;
+}
+
+int ObAggrInfo::assign(const ObAggrInfo &rhs)
+{
+  int ret = OB_SUCCESS;
+  set_allocator(rhs.alloc_);
+  expr_ = rhs.expr_;
+  real_aggr_type_ = rhs.real_aggr_type_;
+  has_distinct_ = rhs.has_distinct_;
+  is_implicit_first_aggr_ = rhs.is_implicit_first_aggr_;
+  has_order_by_ = rhs.has_order_by_;
+
+  group_concat_param_count_ = rhs.group_concat_param_count_;
+
+  separator_expr_ = rhs.separator_expr_;
+  window_size_param_expr_ = rhs.window_size_param_expr_;
+  item_size_param_expr_ = rhs.item_size_param_expr_;
+  is_need_deserialize_row_ = rhs.is_need_deserialize_row_;
+  pl_agg_udf_type_id_ = rhs.pl_agg_udf_type_id_;
+
+  pl_result_type_ = rhs.pl_result_type_;
+  dll_udf_ = rhs.dll_udf_;
+  bucket_num_param_expr_ = rhs.bucket_num_param_expr_;
+  rollup_idx_ = rhs.rollup_idx_;
+
+  format_json_ = rhs.format_json_;
+  strict_json_ = rhs.strict_json_;
+  absent_on_null_ = rhs.absent_on_null_;
+  returning_type_ = rhs.returning_type_;
+  with_unique_keys_ = rhs.with_unique_keys_;
+  max_disuse_param_expr_ = rhs.max_disuse_param_expr_;
+  if (OB_FAIL(param_exprs_.assign(rhs.param_exprs_))) {
+    LOG_WARN("fail to assign param exprs", K(ret));
+  } else if (OB_FAIL(distinct_collations_.assign(rhs.distinct_collations_))) {
+    LOG_WARN("fail to assign distinct_collations_", K(ret));
+  } else if (OB_FAIL(distinct_cmp_funcs_.assign(rhs.distinct_cmp_funcs_))) {
+    LOG_WARN("fail to assign distinct_cmp_funcs_", K(ret));
+  } else if (OB_FAIL(sort_collations_.assign(rhs.sort_collations_))) {
+    LOG_WARN("fail to assign sort_collations_", K(ret));
+  } else if (OB_FAIL(sort_cmp_funcs_.assign(rhs.sort_cmp_funcs_))) {
+    LOG_WARN("fail to assign sort_cmp_funcs_", K(ret));
+  } else if (OB_FAIL(pl_agg_udf_params_type_.assign(rhs.pl_agg_udf_params_type_))) {
+    LOG_WARN("fail to assign pl_agg_udf_params_type_", K(ret));
+  } else if (OB_FAIL(grouping_idxs_.assign(rhs.grouping_idxs_))) {
+    LOG_WARN("fail to assign grouping_idxs_", K(ret));
+  } else if (OB_FAIL(group_idxs_.assign(rhs.group_idxs_))) {
+    LOG_WARN("fail to assign group_idxs_", K(ret));
+  }
+  return ret;
 }
 
 ObAggregateProcessor::AggrCell::~AggrCell()
@@ -1105,7 +1155,7 @@ int ObAggregateProcessor::inner_process(
     } else if (aggr_info.is_implicit_first_aggr()) {
       if (!aggr_cell.get_is_evaluated()) {
         ObDatum *result = NULL;
-        if (aggr_info.expr_->eval(eval_ctx_, result)) {
+        if (OB_FAIL(aggr_info.expr_->eval(eval_ctx_, result))) {
           LOG_WARN("eval failed", K(ret));
         } else if (OB_FAIL(clone_aggr_cell(aggr_cell, *result))) {
           LOG_WARN("failed to clone non_aggr cell", K(ret));
@@ -1617,7 +1667,8 @@ int ObAggregateProcessor::process_distinct_batch(
     LOG_WARN("distinct set is NULL", K(ret));
   } else {
     // In non-rollup group_id must be 0
-    if (group_id > 0) {
+    if (group_id > 0 && group_id > start_partial_rollup_idx_ &&
+              group_id <= end_partial_rollup_idx_) {
       // Group id greater than zero in sort based group by must be rollup,
       // distinct set is sorted and iterated in rollup_process(), rewind here.
       if (OB_FAIL(extra_info->unique_sort_op_->rewind())) {
@@ -1742,7 +1793,8 @@ int ObAggregateProcessor::collect_for_empty_set()
         case T_FUN_COUNT_SUM:
         case T_FUN_APPROX_COUNT_DISTINCT:
         case T_FUN_KEEP_COUNT:
-        case T_FUN_GROUP_PERCENT_RANK: {
+        case T_FUN_GROUP_PERCENT_RANK:
+        case T_FUN_SUM_OPNSIZE: {
           ObDatum &result = aggr_info.expr_->locate_datum_for_write(eval_ctx_);
           aggr_info.expr_->set_evaluated_projected(eval_ctx_);
           if (lib::is_mysql_mode()) {
@@ -1931,6 +1983,7 @@ int ObAggregateProcessor::generate_group_row(GroupRow *&new_group_row,
         case T_FUN_JSON_OBJECTAGG:
         case T_FUN_ORA_JSON_OBJECTAGG:
         case T_FUN_ORA_XMLAGG:
+        case T_FUN_SYS_ST_ASMVT:
         {
           void *tmp_buf = NULL;
           set_need_advance_collect();
@@ -2133,6 +2186,7 @@ int ObAggregateProcessor::fill_group_row(GroupRow *new_group_row,
         case T_FUN_JSON_OBJECTAGG:
         case T_FUN_ORA_JSON_OBJECTAGG:
         case T_FUN_ORA_XMLAGG:
+        case T_FUN_SYS_ST_ASMVT:
         {
           void *tmp_buf = NULL;
           set_need_advance_collect();
@@ -2568,6 +2622,7 @@ int ObAggregateProcessor::rollup_aggregation(AggrCell &aggr_cell, AggrCell &roll
     case T_FUN_JSON_OBJECTAGG:
     case T_FUN_ORA_JSON_OBJECTAGG:
     case T_FUN_ORA_XMLAGG:
+    case T_FUN_SYS_ST_ASMVT:
     {
       GroupConcatExtraResult *aggr_extra = NULL;
       GroupConcatExtraResult *rollup_extra = NULL;
@@ -2692,6 +2747,12 @@ int ObAggregateProcessor::rollup_aggregation(AggrCell &aggr_cell, AggrCell &roll
       ret = OB_NOT_SUPPORTED;
       LOG_WARN("rollup contain bit_xor still not supported", K(ret));
       LOG_USER_ERROR(OB_NOT_SUPPORTED, "rollup contain bit_xor");
+      break;
+    }
+    case T_FUN_SUM_OPNSIZE: {
+      ret = OB_NOT_SUPPORTED;
+      LOG_WARN("rollup contain sum_opnsize still not supported", K(ret));
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "rollup contain sum_opnsize");
       break;
     }
     default:
@@ -2841,6 +2902,7 @@ int ObAggregateProcessor::prepare_aggr_result(const ObChunkDatumStore::StoredRow
     case T_FUN_JSON_OBJECTAGG:
     case T_FUN_ORA_JSON_OBJECTAGG:
     case T_FUN_ORA_XMLAGG:
+    case T_FUN_SYS_ST_ASMVT:
     {
       GroupConcatExtraResult *extra = NULL;
       if (OB_ISNULL(extra = static_cast<GroupConcatExtraResult *>(aggr_cell.get_extra()))) {
@@ -3004,6 +3066,23 @@ int ObAggregateProcessor::prepare_aggr_result(const ObChunkDatumStore::StoredRow
       aggr_cell.set_tiny_num_used();
       break;
     }
+    case T_FUN_SUM_OPNSIZE: {
+      int64_t size = 0;
+      if (OB_UNLIKELY(stored_row.cnt_ != 1) ||
+          OB_ISNULL(param_exprs) ||
+          OB_UNLIKELY(param_exprs->count() != 1)) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_WARN("curr_row_results count is not 1", K(stored_row), K(ret));
+      } else if (OB_FAIL(ObExprSysOpOpnsize::calc_sys_op_opnsize(param_exprs->at(0),
+                                                                 &stored_row.cells()[0],
+                                                                 size))) {
+        LOG_WARN("failed to calc sys op opnsize", K(ret));
+      } else {
+        aggr_cell.set_tiny_num_int(size);
+        aggr_cell.set_tiny_num_used();
+      }
+      break;
+    }
     default:
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("unknown aggr function type", K(aggr_fun), K(ret));
@@ -3137,6 +3216,7 @@ int ObAggregateProcessor::process_aggr_batch_result(
     case T_FUN_JSON_OBJECTAGG:
     case T_FUN_ORA_JSON_OBJECTAGG:
     case T_FUN_ORA_XMLAGG:
+    case T_FUN_SYS_ST_ASMVT:
     {
       GroupConcatExtraResult *extra_info = NULL;
       if (OB_ISNULL(extra_info = static_cast<GroupConcatExtraResult *>(aggr_cell.get_extra()))) {
@@ -3219,6 +3299,30 @@ int ObAggregateProcessor::process_aggr_batch_result(
     case T_FUN_SYS_BIT_XOR: {
       ObDatumVector aggr_input_datums = param_exprs->at(0)->locate_expr_datumvector(eval_ctx_);
       ret = bitwise_calc_batch(aggr_input_datums, aggr_cell, aggr_fun, selector);
+      break;
+    }
+    case T_FUN_SUM_OPNSIZE: {
+      if (OB_ISNULL(param_exprs) ||
+          OB_UNLIKELY(param_exprs->count() != 1)) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_WARN("curr_row_results count is not 1", K(ret), KPC(param_exprs));
+      } else {
+        ObDatumVector aggr_input_datums = param_exprs->at(0)->locate_expr_datumvector(eval_ctx_);
+        for (uint16_t it = selector.begin(); OB_SUCC(ret) && it < selector.end(); selector.next(it)) {
+          uint64_t nth_row = selector.get_batch_index(it);
+          int64_t size = 0;
+          if (OB_FAIL(ObExprSysOpOpnsize::calc_sys_op_opnsize(param_exprs->at(0),
+                                                              aggr_input_datums.at(nth_row),
+                                                              size))) {
+            LOG_WARN("failed to calc sys op opnsize", K(ret));
+          } else {
+            int64_t origin_size = aggr_cell.get_tiny_num_int();
+            int64_t new_size = origin_size + size;
+            aggr_cell.set_tiny_num_int(new_size);
+            aggr_cell.set_tiny_num_used();
+          }
+        }
+      }
       break;
     }
     default:
@@ -3375,6 +3479,7 @@ int ObAggregateProcessor::process_aggr_result(const ObChunkDatumStore::StoredRow
     case T_FUN_JSON_OBJECTAGG:
     case T_FUN_ORA_JSON_OBJECTAGG:
     case T_FUN_ORA_XMLAGG:
+    case T_FUN_SYS_ST_ASMVT:
     {
       GroupConcatExtraResult *extra = NULL;
       if (OB_ISNULL(extra = static_cast<GroupConcatExtraResult *>(aggr_cell.get_extra()))) {
@@ -3477,6 +3582,25 @@ int ObAggregateProcessor::process_aggr_result(const ObChunkDatumStore::StoredRow
           res_uint = left_uint ^ right_uint;
         }
         aggr_cell.set_tiny_num_uint(res_uint);
+        aggr_cell.set_tiny_num_used();
+      }
+      break;
+    }
+    case T_FUN_SUM_OPNSIZE: {
+      int64_t size = 0;
+      if (OB_UNLIKELY(stored_row.cnt_ != 1) ||
+          OB_ISNULL(param_exprs) ||
+          OB_UNLIKELY(param_exprs->count() != 1)) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_WARN("curr_row_results count is not 1", K(stored_row), K(ret));
+      } else if (OB_FAIL(ObExprSysOpOpnsize::calc_sys_op_opnsize(param_exprs->at(0),
+                                                                 &stored_row.cells()[0],
+                                                                 size))) {
+        LOG_WARN("failed to calc sys op opnsize", K(ret));
+      } else {
+        int64_t origin_size = aggr_cell.get_tiny_num_int();
+        int64_t new_size = origin_size + size;
+        aggr_cell.set_tiny_num_int(new_size);
         aggr_cell.set_tiny_num_used();
       }
       break;
@@ -3747,6 +3871,14 @@ int ObAggregateProcessor::collect_aggr_result(
       break;
     }
 
+    case T_FUN_SYS_ST_ASMVT: {
+      GroupConcatExtraResult *extra = static_cast<GroupConcatExtraResult *>(aggr_cell.get_extra());
+      if (OB_FAIL(get_asmvt_result(aggr_info, extra, result))) {
+        LOG_WARN("failed to get asmvt result", K(ret));
+      } else {
+      }
+      break;
+    }
     case T_FUN_GROUP_CONCAT: {
       GroupConcatExtraResult *extra = NULL;
       ObString sep_str;
@@ -4334,6 +4466,24 @@ int ObAggregateProcessor::collect_aggr_result(
     case T_FUN_SYS_BIT_OR:
     case T_FUN_SYS_BIT_XOR: {
       result.set_uint(aggr_cell.get_tiny_num_uint());
+      break;
+    }
+    case T_FUN_SUM_OPNSIZE: {
+      int64_t size = aggr_cell.get_tiny_num_int();
+      if (size > 0) {
+        if (lib::is_mysql_mode()) {
+          result.set_int(size);
+        } else {
+          char local_buff[ObNumber::MAX_BYTE_LEN];
+          ObDataBuffer local_alloc(local_buff, ObNumber::MAX_BYTE_LEN);
+          ObNumber result_num;
+          if (OB_FAIL(result_num.from(size, local_alloc))) {
+            LOG_WARN("failed to convert to number", K(ret));
+          } else {
+            result.set_number(result_num);
+          }
+        }
+      }
       break;
     }
     default:
@@ -7869,6 +8019,227 @@ int ObAggregateProcessor::fast_single_row_agg_batch(ObEvalCtx &eval_ctx, const i
   return ret;
 }
 
+int ObAggregateProcessor::get_asmvt_result(const ObAggrInfo &aggr_info,
+                                           GroupConcatExtraResult *&extra,
+                                           ObDatum &concat_result)
+{
+  int ret = OB_SUCCESS;
+  common::ObArenaAllocator tmp_alloc(ObModIds::OB_SQL_AGGR_FUNC, OB_MALLOC_NORMAL_BLOCK_SIZE, MTL_ID());
+  if (OB_ISNULL(extra) || OB_UNLIKELY(extra->empty())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unpexcted null", K(ret), K(extra));
+  } else if (extra->is_iterated() && OB_FAIL(extra->rewind())) {
+    // Group concat row may be iterated in rollup_process(), rewind here.
+    LOG_WARN("rewind failed", KPC(extra), K(ret));
+  } else if (!extra->is_iterated() && OB_FAIL(extra->finish_add_row())) {
+    LOG_WARN("finish_add_row failed", KPC(extra), K(ret));
+  } else {
+    const ObChunkDatumStore::StoredRow *storted_row = NULL;
+    bool inited_tmp_obj = false;
+    ObObj *tmp_obj = NULL;
+    mvt_agg_result mvt_res(tmp_alloc);
+    while (OB_SUCC(ret) && OB_SUCC(extra->get_next_row(storted_row))) {
+      if (OB_ISNULL(storted_row)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("get unexpected null", K(ret), K(storted_row));
+      } else {
+        common::ObArenaAllocator single_row_alloc(ObModIds::OB_SQL_AGGR_FUNC, OB_MALLOC_NORMAL_BLOCK_SIZE, MTL_ID());
+        // get obj
+        if (!inited_tmp_obj
+            && OB_ISNULL(tmp_obj = static_cast<ObObj*>(tmp_alloc.alloc(sizeof(ObObj) * (storted_row->cnt_))))) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+          LOG_WARN("failed to allocate memory", K(ret), K(tmp_obj));
+        } else if (!inited_tmp_obj && FALSE_IT(inited_tmp_obj = true)) {
+        } else if (OB_FAIL(convert_datum_to_obj(aggr_info, *storted_row, tmp_obj, storted_row->cnt_))) {
+          LOG_WARN("failed to convert datum to obj", K(ret));
+        } else if (!mvt_res.is_inited()
+                   && OB_FAIL(init_asmvt_result(tmp_alloc, aggr_info, tmp_obj, storted_row->cnt_, mvt_res))) {
+          LOG_WARN("failed to init asmvt result", K(ret));
+        } else if (FALSE_IT(mvt_res.set_tmp_allocator(&single_row_alloc))) {
+        } else if (OB_FAIL(mvt_res.generate_feature(tmp_obj, storted_row->cnt_))) {
+          LOG_WARN("failed to generate mvt feature", K(ret));
+        }
+      }
+    }//end of while
+
+    if (ret != OB_ITER_END && ret != OB_SUCCESS) {
+      LOG_WARN("fail to get next row", K(ret));
+    } else {
+      ret = OB_SUCCESS;
+      ObString mvt_str;
+      if (OB_FAIL(mvt_res.mvt_pack(mvt_str))) {
+        LOG_WARN("fail to pack mvt result", K(ret));
+      } else {
+        ObString blob_locator;
+        ObExprStrResAlloc expr_res_alloc(*aggr_info.expr_, eval_ctx_);
+        ObTextStringResult blob_res(ObLongTextType, true, &expr_res_alloc);
+        int64_t total_length = mvt_str.length();
+        if (OB_FAIL(ret)) {
+        } else if (OB_FAIL(blob_res.init(total_length))) {
+          LOG_WARN("failed to init blob res", K(ret), K(mvt_str), K(total_length));
+        } else if (OB_FAIL(blob_res.append(mvt_str))) {
+          LOG_WARN("failed to append xml binary data", K(ret), K(mvt_str));
+        } else {
+          blob_res.get_result_buffer(blob_locator);
+          concat_result.set_string(blob_locator.ptr(), blob_locator.length());
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObAggregateProcessor::init_asmvt_result(ObIAllocator &allocator,
+                                            const ObAggrInfo &aggr_info,
+                                            const ObObj *tmp_obj,
+                                            uint32_t obj_cnt,
+                                            mvt_agg_result &mvt_res)
+{
+  int ret = OB_SUCCESS;
+  uint32_t column_cnt = 0;
+  bool is_param_done = false;
+  int param_cnt = 0;
+  mvt_res.inited_ = true;
+  // try get first geom column and column number
+  for (uint32_t i = 0; i < aggr_info.param_exprs_.count() && OB_SUCC(ret); i++) {
+    if (i == 0) {
+      param_cnt = tmp_obj[i].get_int();
+      mvt_res.column_offset_ = param_cnt + 1;
+    }
+    ObExpr *expr = aggr_info.param_exprs_.at(i);
+    if (i >= mvt_res.column_offset_ && expr->type_ == T_REF_COLUMN) {
+      ObString key_name;
+      is_param_done = true;
+      column_cnt++;
+      if (i + 1 >= obj_cnt) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("invalid param", K(ret), K(i), K(obj_cnt));
+      } else if (expr->obj_meta_.is_geometry() && mvt_res.geom_idx_ == UINT32_MAX) {
+        if (mvt_res.geom_name_.empty()) {
+          mvt_res.geom_idx_ = i;
+          if (OB_FAIL(ob_write_string(allocator, tmp_obj[i + 1].get_string(), mvt_res.geom_name_))) {
+            // geo_name
+            LOG_WARN("write string failed", K(ret), K(tmp_obj[i].get_string()));
+          }
+        } else if (mvt_res.geom_name_.case_compare(tmp_obj[i + 1].get_string()) == 0) {
+          mvt_res.geom_idx_ = i;
+        } else if (OB_FAIL(ob_write_string(allocator, tmp_obj[i + 1].get_string(), key_name, true))) {
+          LOG_WARN("write string failed", K(ret), K(tmp_obj[i + 1].get_string()));
+        } else if (OB_FAIL(mvt_res.keys_.push_back(key_name))) {
+          LOG_WARN("failed to push back col name to keys", K(ret), K(i), K(tmp_obj[i + 1].get_string()));
+        }
+      } else if (!mvt_res.feature_id_name_.empty() && mvt_res.feat_id_idx_ == UINT32_MAX
+                && mvt_res.feature_id_name_.case_compare(tmp_obj[i + 1].get_string()) == 0
+                && ob_is_numeric_type(expr->obj_meta_.get_type())) {
+        // feature id column name won't add to keys
+        mvt_res.feat_id_idx_ = i;
+      } else if (!expr->obj_meta_.is_json() // json type will be expanded
+                && !expr->obj_meta_.is_enum_or_set()
+                && OB_FAIL(ob_write_string(allocator, tmp_obj[i + 1].get_string(), key_name, true))) {
+        LOG_WARN("write string failed", K(ret), K(tmp_obj[i + 1].get_string()));
+      } else if (!expr->obj_meta_.is_json() && !expr->obj_meta_.is_enum_or_set() && OB_FAIL(mvt_res.keys_.push_back(key_name))) {
+        LOG_WARN("failed to push back col name to keys", K(ret), K(i), K(tmp_obj[i + 1].get_string()));
+      }
+    } else if (!is_param_done) {
+      ObObjType type = tmp_obj[i].get_type();
+      ObString content;
+      if (ob_is_null(type)) {
+        // do nothing, use default value
+      } else if (i == 1) {
+        // layer name
+        if (!ob_is_string_tc(type) && !ob_is_large_text(type) && !ob_is_geometry_tc(type)) {
+          ret = OB_ERR_INVALID_TYPE_FOR_OP;
+          LOG_WARN("invalid type for layer name", K(ret), K(type));
+        } else if (ob_is_geometry_tc(type)) {
+          ObObj geo_hex;
+          ObObj obj;
+          ObCastCtx cast_ctx(&allocator, NULL, CM_NONE, ObCharset::get_system_collation());
+          if (OB_FAIL(ObObjCaster::to_type(ObVarcharType, cast_ctx, tmp_obj[i], obj))) {
+            LOG_WARN("failed to cast number to double type", K(ret));
+          } else if (OB_FAIL(ObHexUtils::hex(ObString(obj.get_string().length(), obj.get_string().ptr()), cast_ctx, geo_hex))) {
+            LOG_WARN("failed to cast to hex", K(ret), K(content));
+          } else if (OB_FAIL(ob_write_string(allocator, geo_hex.get_string(), mvt_res.lay_name_, true))) {
+            LOG_WARN("write string failed", K(ret), K(content));
+          }
+        } else if (OB_FAIL(tmp_obj[i].get_string(content))) {
+          LOG_WARN("get lay name string failed", K(ret));
+        } else if (mvt_agg_result::is_upper_char_exist(content)) {
+          ret = OB_ERR_BAD_FIELD_ERROR;
+          LOG_WARN("column name can't be upper case", K(ret), K(type));
+        } else if (OB_FAIL(ob_write_string(allocator, content, mvt_res.lay_name_, true))) {
+          LOG_WARN("write string failed", K(ret), K(content));
+        }
+      } else if (i == 2) {
+        // extent
+        ObObj obj;
+        const ObObj *extent_res = &tmp_obj[i];
+        if (!ob_is_int_tc(type) && !ob_is_uint_tc(type)) {
+          if (expr->is_static_const_) {
+            ObCastCtx cast_ctx(&allocator, NULL, CM_NONE, ObCharset::get_system_collation());
+            if (OB_FAIL(ObObjCaster::to_type(ObInt32Type, cast_ctx, tmp_obj[i], obj))) {
+              LOG_WARN("failed to cast number to double type", K(ret));
+            } else {
+              extent_res = &obj;
+            }
+          } else {
+            ret = OB_ERR_INVALID_TYPE_FOR_OP;
+            LOG_WARN("invalid type for extent", K(ret), K(type));
+          }
+        }
+        if (OB_FAIL(ret)) {
+        } else if (extent_res->get_int() == 0
+                   || extent_res->is_overflow_integer(ObInt32Type)) {
+          ret = OB_ERR_INVALID_INPUT_VALUE;
+          LOG_WARN("invalid extent value", K(ret), K(extent_res->get_int()));
+        } else {
+          mvt_res.extent_ = extent_res->get_int();
+        }
+      } else if (i == 3) {
+        // geo_name
+        if (!ob_is_string_tc(type)) {
+          ret = OB_ERR_INVALID_TYPE_FOR_OP;
+          LOG_WARN("invalid type for geom name", K(ret), K(type));
+        } else if (tmp_obj[i].get_string().empty()) {
+          ret = OB_ERR_BAD_FIELD_ERROR;
+          LOG_WARN("invalid column name", K(ret), K(type));
+        } else if (mvt_agg_result::is_upper_char_exist(tmp_obj[i].get_string())) {
+          ret = OB_ERR_BAD_FIELD_ERROR;
+          LOG_WARN("column name can't be upper case", K(ret), K(type));
+        } else if (OB_FAIL(ob_write_string(allocator, tmp_obj[i].get_string(), mvt_res.geom_name_))) {
+          LOG_WARN("write string failed", K(ret), K(tmp_obj[i].get_string()));
+        }
+      } else if (i == 4) {
+        // feature id name
+        if (!ob_is_string_tc(type)) {
+          ret = OB_ERR_INVALID_TYPE_FOR_OP;
+          LOG_WARN("invalid type for layer name", K(ret), K(type));
+        } else if (mvt_agg_result::is_upper_char_exist(tmp_obj[i].get_string())) {
+          ret = OB_ERR_BAD_FIELD_ERROR;
+          LOG_WARN("column name can't be upper case", K(ret), K(type));
+        } else if (OB_FAIL(ob_write_string(allocator, tmp_obj[i].get_string(), mvt_res.feature_id_name_))) {
+          LOG_WARN("write string failed", K(ret), K(tmp_obj[i].get_string()));
+        } else if (mvt_res.feature_id_name_.empty()) {
+          ret = OB_WRONG_COLUMN_NAME;
+          LOG_WARN("input an empty feature id name", K(ret));
+        }
+      }
+    }
+  }
+  if (OB_SUCC(ret)) {
+    if (!mvt_res.feature_id_name_.empty() && mvt_res.feat_id_idx_ == UINT32_MAX) {
+      // can't find feature id column
+      ret = OB_ERR_IDENTITY_COLUMN_MUST_BE_NUMERIC_TYPE;
+      LOG_WARN("invalid column type", K(ret));
+    } else {
+      mvt_res.column_cnt_ = column_cnt;
+      if (OB_FAIL(mvt_res.init_layer())) {
+        LOG_WARN("failed to init layer", K(ret));
+      }
+    }
+  }
+  return ret;
+}
+
 int ObAggregateProcessor::check_rows_prefix_str_equal_for_hybrid_hist(const ObChunkDatumStore::LastStoredRow &prev_row,
                                                                       const ObChunkDatumStore::StoredRow &cur_row,
                                                                       const ObAggrInfo &aggr_info,
@@ -8203,7 +8574,7 @@ struct ObDecIntSumBatchOpFunc<ObNumber, CALC_T, ARG_T, SELECTOR>
         number::ObNumber right_nmb;
         if (OB_FAIL(wide::to_number(accum, scale, tmp_alloc, right_nmb))) {
           LOG_WARN("fail to cast decimal int to number", K(ret));
-        } else if (processor->clone_number_cell(right_nmb, aggr_cell)) {
+        } else if (OB_FAIL(processor->clone_number_cell(right_nmb, aggr_cell))) {
           LOG_WARN("fail to clone number", K(ret));
         }
       } else {

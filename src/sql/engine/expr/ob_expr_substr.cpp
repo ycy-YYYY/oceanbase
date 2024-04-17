@@ -111,7 +111,7 @@ int ObExprSubstr::calc_result_length(ObExprResType *types_array,
             mbmaxlen = 1;
           }
           if (start_pos > 0 && substr_len > 0) {
-            if (start_pos + substr_len <= result_len + 1) {
+            if (start_pos <= INT64_MAX - substr_len && start_pos + substr_len <= result_len + 1) {
               if (is_oracle_mode) {
                 res_len = substr_len * mbmaxlen;
               } else {
@@ -997,8 +997,10 @@ int ObExprSubstr::eval_substr_vector(VECTOR_EVAL_FUNC_ARG_DECL)
       ret = vector_substr<ObVectorBase, ObVectorBase>(VECTOR_EVAL_FUNC_ARG_LIST);
     }
   }
-  SQL_LOG(DEBUG, "expr", K(ToStrVectorHeader(expr.get_vector_header(ctx), expr, &skip, bound)));
-  SQL_LOG(DEBUG, "expr.args_[0]", K(ToStrVectorHeader(expr.args_[0]->get_vector_header(ctx), *expr.args_[0], &skip, bound)));
+  if (OB_SUCC(ret)) {
+    SQL_LOG(DEBUG, "expr", K(ToStrVectorHeader(expr.get_vector_header(ctx), expr, &skip, bound)));
+    SQL_LOG(DEBUG, "expr.args_[0]", K(ToStrVectorHeader(expr.args_[0]->get_vector_header(ctx), *expr.args_[0], &skip, bound)));
+  }
   return ret;
 }
 DEF_SET_LOCAL_SESSION_VARS(ObExprSubstr, raw_expr) {

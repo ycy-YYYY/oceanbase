@@ -443,11 +443,26 @@ struct DistinctObjMeta
                                                 const ObItemType &cmp_type);
   static int replace_align_date4cmp_recursively(ObRawExprFactory &expr_factory,
                                                 ObRawExpr *&root_expr);
+  static int replace_inner_row_cmp_val_recursively(ObRawExprFactory &expr_factory,
+                                                   const ObSQLSessionInfo &session,
+                                                   ObRawExpr *&root_expr,
+                                                   bool &trans_happened);
+  static int check_and_transform_inner_row_cmp_val(ObRawExprFactory &expr_factory,
+                                                   const ObSQLSessionInfo &session,
+                                                   ObRawExpr *&row_cmp_expr,
+                                                   bool &trans_happened);
+  template<bool IS_LEFT>
+  static int transform_inner_op_row_cmp_for_decimal_int(ObRawExprFactory &expr_factory,
+                                                        const ObSQLSessionInfo &session,
+                                                        ObRawExpr *&row_cmp_expr,
+                                                        ObRawExpr *&row_expr,
+                                                        bool &trans_happened);
   int transformer_aggr_expr(ObDMLStmt *stmt, bool &trans_happened);
   int transform_rownum_as_limit_offset(const ObIArray<ObParentDMLStmt> &parent_stmts,
                                        ObDMLStmt *&stmt,
+                                       ObDMLStmt *&limit_stmt,
                                        bool &trans_happened);
-  int transform_common_rownum_as_limit(ObDMLStmt *&stmt, bool &trans_happened);
+  int transform_common_rownum_as_limit(ObDMLStmt *&stmt, ObDMLStmt *&limit_stmt, bool &trans_happened);
   int try_transform_common_rownum_as_limit_or_false(ObDMLStmt *stmt, ObRawExpr *&limit_expr, bool& is_valid);
   int transform_generated_rownum_as_limit(const ObIArray<ObParentDMLStmt> &parent_stmts,
                                           ObDMLStmt *stmt,
@@ -466,23 +481,6 @@ struct DistinctObjMeta
   int transform_json_object_expr_with_star(const ObIArray<ObParentDMLStmt> &parent_stmts,
                                            ObDMLStmt *stmt, bool &trans_happened);
   int transform_udt_columns(const common::ObIArray<ObParentDMLStmt> &parent_stmts, ObDMLStmt *stmt, bool &trans_happened);
-  int transform_udt_column_conv_function(ObDmlTableInfo &table_info,
-                                         ObIArray<ObRawExpr*> &column_conv_exprs,
-                                         ObColumnRefRawExpr &udt_col,
-                                         ObColumnRefRawExpr &hidd_col);
-  int transform_udt_column_value_expr_inner(ObDMLStmt *stmt, ObDmlTableInfo &table_info, ObRawExpr *&old_expr, ObRawExpr *hidd_expr = NULL);
-  int transform_xml_binary(ObRawExpr *hidden_blob_expr, ObRawExpr *&new_expr);
-  int transform_udt_column_value_expr(ObDMLStmt *stmt, ObDmlTableInfo &table_info, ObRawExpr *old_expr, ObRawExpr *&new_expr, ObRawExpr *hidd_expr = NULL);
-  int transform_udt_column_conv_param_expr(ObDmlTableInfo &table_info, ObRawExpr *old_expr, ObRawExpr *&new_expr);
-  int replace_udt_assignment_exprs(ObDMLStmt *stmt, ObDmlTableInfo &table_info, ObIArray<ObAssignment> &assignments, bool &trans_happened);
-  int set_hidd_col_not_null_attr(const ObColumnRefRawExpr &udt_col, ObIArray<ObColumnRefRawExpr *> &column_exprs);
-  int check_skip_child_select_view(const ObIArray<ObParentDMLStmt> &parent_stmts, ObDMLStmt *stmt, bool &skip_for_view_table);
-  int transform_query_udt_columns_exprs(const ObIArray<ObParentDMLStmt> &parent_stmts, ObDMLStmt *stmt, bool &trans_happened);
-  int transform_udt_columns_constraint_exprs(ObDMLStmt *stmt, bool &trans_happened);
-  int get_update_generated_udt_in_parent_stmt(const ObIArray<ObParentDMLStmt> &parent_stmts, const ObDMLStmt *stmt,
-                                              ObIArray<ObColumnRefRawExpr*> &col_exprs);
-  int get_dml_view_col_exprs(const ObDMLStmt *stmt, ObIArray<ObColumnRefRawExpr*> &assign_col_exprs);
-
    /*
    * following functions are used for transform rowid in subquery
    */
@@ -640,6 +638,25 @@ struct DistinctObjMeta
   int flatten_conditions(ObDMLStmt *stmt, bool &trans_happened);
   int recursive_flatten_join_conditions(ObDMLStmt *stmt, TableItem *table, bool &trans_happened);
   int do_flatten_conditions(ObDMLStmt *stmt, ObIArray<ObRawExpr*> &conditions, bool &trans_happened);
+  int preserve_order_for_pagination(ObDMLStmt *stmt,
+                                    bool &trans_happened);
+  int check_stmt_need_preserve_order(ObDMLStmt *stmt,
+                                     ObIArray<ObSelectStmt*> &preserve_order_stmts,
+                                     bool &is_valid);
+
+  int check_view_need_preserve_order(ObSelectStmt* stmt,
+                                     ObIArray<ObSelectStmt*> &preserve_order_stmts,
+                                     bool &need_preserve);
+
+  int check_set_stmt_need_preserve_order(ObSelectStmt* stmt,
+                                         ObIArray<ObSelectStmt*> &preserve_order_stmts,
+                                         bool &need_preserve);
+
+  int add_order_by_for_stmt(ObSelectStmt* stmt, bool &trans_happened);
+
+  int get_rowkey_for_single_table(ObSelectStmt* stmt,
+                                  ObIArray<ObRawExpr*> &unique_keys,
+                                  bool &is_valid);
 private:
   DISALLOW_COPY_AND_ASSIGN(ObTransformPreProcess);
 };

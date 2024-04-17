@@ -51,7 +51,8 @@ void ObTenantMdsAllocator::init_throttle_config(int64_t &resource_limit, int64_t
     max_duration = MDS_THROTTLE_MAX_DURATION;
   }
 }
-void ObTenantMdsAllocator::adaptive_update_limit(const int64_t holding_size,
+void ObTenantMdsAllocator::adaptive_update_limit(const int64_t tenant_id,
+                                                 const int64_t holding_size,
                                                  const int64_t config_specify_resource_limit,
                                                  int64_t &resource_limit,
                                                  int64_t &last_update_limit_ts,
@@ -104,16 +105,13 @@ void *ObTenantMdsAllocator::alloc(const int64_t size, const int64_t abs_expire_t
 {
   bool is_throttled = false;
 
-  // try alloc resource from throttle tool
+  // record alloc resource in throttle tool, but do not throttle immediately
+  // ObMdsThrottleGuard calls the real throttle logic
   (void)throttle_tool_->alloc_resource<ObTenantMdsAllocator>(size, abs_expire_time, is_throttled);
 
   // if is throttled, do throttle
   if (OB_UNLIKELY(is_throttled)) {
-    if (MTL(ObTenantFreezer *)->exist_ls_freezing()) {
-      (void)throttle_tool_->skip_throttle<ObTenantTxDataAllocator>(size);
-    } else {
-      (void)throttle_tool_->do_throttle<ObTenantTxDataAllocator>(abs_expire_time);
-    }
+    share::mds_throttled_alloc() += size;
   }
 
   void *obj = allocator_.alloc(size);
@@ -171,6 +169,43 @@ void ObTenantBufferCtxAllocator::free(void *ptr)
 {
   share::mtl_free(ptr);
   MTL(ObTenantMdsService*)->erase_alloc_backtrace(ptr);
+}
+
+ObMdsThrottleGuard::ObMdsThrottleGuard(const bool for_replay, const int64_t abs_expire_time) : for_replay_(for_replay), abs_expire_time_(abs_expire_time)
+{
+  throttle_tool_ = &(MTL(ObSharedMemAllocMgr *)->share_resource_throttle_tool());
+  if (0 == abs_expire_time) {
+    abs_expire_time_ =
+        ObClockGenerator::getClock() + ObThrottleUnit<ObMdsThrottleGuard>::DEFAULT_MAX_THROTTLE_TIME;
+  }
+  share::mds_throttled_alloc() = 0;
+}
+
+ObMdsThrottleGuard::~ObMdsThrottleGuard()
+{
+  ObThrottleInfoGuard share_ti_guard;
+  ObThrottleInfoGuard module_ti_guard;
+
+  if (OB_ISNULL(throttle_tool_)) {
+    MDS_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "throttle tool is unexpected nullptr", KP(throttle_tool_));
+  } else if (throttle_tool_->is_throttling<ObTenantMdsAllocator>(share_ti_guard, module_ti_guard)) {
+    (void)TxShareMemThrottleUtil::do_throttle<ObTenantMdsAllocator>(
+        for_replay_, abs_expire_time_, share::mds_throttled_alloc(), *throttle_tool_, share_ti_guard, module_ti_guard);
+
+    if (throttle_tool_->still_throttling<ObTenantMdsAllocator>(share_ti_guard, module_ti_guard)) {
+      (void)throttle_tool_->skip_throttle<ObTenantMdsAllocator>(
+          share::mds_throttled_alloc(), share_ti_guard, module_ti_guard);
+
+      if (module_ti_guard.is_valid()) {
+        module_ti_guard.throttle_info()->reset();
+      }
+    }
+
+    // reset mds throttled alloc size
+    share::mds_throttled_alloc() = 0;
+  } else {
+    // do not need throttle, exit directly
+  }
 }
 
 }  // namespace share

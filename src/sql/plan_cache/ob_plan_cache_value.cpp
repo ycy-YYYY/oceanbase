@@ -135,6 +135,7 @@ int PCVSchemaObj::init_with_version_obj(const ObSchemaObjVersion &schema_obj_ver
   schema_type_ = schema_obj_version.get_schema_type();
   schema_id_ = schema_obj_version.object_id_;
   schema_version_ = schema_obj_version.version_;
+  is_explicit_db_name_ = schema_obj_version.is_db_explicit_;
   return ret;
 }
 
@@ -179,7 +180,8 @@ ObPlanCacheValue::ObPlanCacheValue()
     is_batch_execute_(false),
     has_dynamic_values_table_(false),
     stored_schema_objs_(pc_alloc_),
-    stmt_type_(stmt::T_MAX)
+    stmt_type_(stmt::T_MAX),
+    enable_rich_vector_format_(false)
 {
   MEMSET(sql_id_, 0, sizeof(sql_id_));
   not_param_index_.set_attr(ObMemAttr(MTL_ID(), "NotParamIdex"));
@@ -262,6 +264,7 @@ int ObPlanCacheValue::init(ObPCVSet *pcv_set, const ObILibCacheObject *cache_obj
     sys_schema_version_ = plan->get_sys_schema_version();
     tenant_schema_version_ = plan->get_tenant_schema_version();
     sql_traits_ = pc_ctx.sql_traits_;
+    enable_rich_vector_format_ = static_cast<const ObPhysicalPlan *>(plan)->get_use_rich_format();
 #ifdef OB_BUILD_SPM
     is_spm_closed_ = pcv_set->get_spm_closed();
 #endif
@@ -476,6 +479,8 @@ int ObPlanCacheValue::choose_plan(ObPlanCacheCtx &pc_ctx,
   if (schema_array.count() == 0 && stored_schema_objs_.count() == 0) {
     need_check_schema = true;
   }
+  ObBasicSessionInfo::ForceRichFormatStatus orig_rich_format_status = ObBasicSessionInfo::ForceRichFormatStatus::Disable;
+  bool orig_phy_ctx_rich_format = false;
   if (stmt::T_NONE == pc_ctx.sql_ctx_.stmt_type_) {
     //sql_ctx_.stmt_type_ != stmt::T_NONE means this calling in nested sql,
     //can't cover the first stmt type in sql context
@@ -484,6 +489,7 @@ int ObPlanCacheValue::choose_plan(ObPlanCacheCtx &pc_ctx,
   if (OB_ISNULL(session = pc_ctx.exec_ctx_.get_my_session())) {
     ret = OB_ERR_UNEXPECTED;
     SQL_PC_LOG(ERROR, "got session is NULL", K(ret));
+  } else if (FALSE_IT(orig_rich_format_status = session->get_force_rich_format_status())) {
   } else if (FALSE_IT(session->set_stmt_type(stmt_type_))) {
   } else if (OB_FAIL(session->get_use_plan_baseline(enable_baseline))) {
     LOG_WARN("fail to get use plan baseline", K(ret));
@@ -552,7 +558,12 @@ int ObPlanCacheValue::choose_plan(ObPlanCacheCtx &pc_ctx,
     if (OB_SUCC(ret)) {
       ObPhysicalPlanCtx *phy_ctx = pc_ctx.exec_ctx_.get_physical_plan_ctx();
       if (NULL != phy_ctx) {
+        orig_phy_ctx_rich_format = phy_ctx->is_rich_format();
         phy_ctx->set_original_param_cnt(phy_ctx->get_param_store().count());
+        phy_ctx->set_rich_format(enable_rich_vector_format_);
+        session->set_force_rich_format(enable_rich_vector_format_ ?
+                                         ObBasicSessionInfo::ForceRichFormatStatus::FORCE_ON :
+                                         ObBasicSessionInfo::ForceRichFormatStatus::FORCE_OFF);
         if (OB_FAIL(phy_ctx->init_datum_param_store())) {
           LOG_WARN("fail to init datum param store", K(ret));
         }
@@ -672,6 +683,15 @@ int ObPlanCacheValue::choose_plan(ObPlanCacheCtx &pc_ctx,
   if (OB_SUCC(ret)) {
     plan_out = plan;
     pc_ctx.sql_traits_ = sql_traits_; //used for check read only
+  }
+  // reset force rich format status
+  if (NULL == plan) {
+    if (session != nullptr) {
+      session->set_force_rich_format(orig_rich_format_status);
+    }
+    if (pc_ctx.exec_ctx_.get_physical_plan_ctx() != nullptr) {
+      pc_ctx.exec_ctx_.get_physical_plan_ctx()->set_rich_format(orig_phy_ctx_rich_format);
+    }
   }
   return ret;
 }
@@ -1418,6 +1438,7 @@ void ObPlanCacheValue::reset()
     }
   }
   stored_schema_objs_.reset();
+  enable_rich_vector_format_ = false;
   pcv_set_ = NULL; //放最后，前面可能存在需要pcv_set
 }
 
@@ -1938,12 +1959,23 @@ int ObPlanCacheValue::get_all_dep_schema(ObPlanCacheCtx &pc_ctx,
           tenant_id = get_tenant_id_by_object_id(stored_schema_objs_.at(i)->schema_id_);
         } else if (SYNONYM_SCHEMA == pcv_schema->schema_type_) {
           const ObSimpleSynonymSchema *synonym_schema = nullptr;
-          if (OB_FAIL(schema_guard.get_synonym_info(
-                tenant_id, database_id, pcv_schema->table_name_, synonym_schema))) {
-            LOG_WARN("failed to get private synonym", K(ret));
-          } else if (OB_ISNULL(synonym_schema) && OB_FAIL(schema_guard.get_synonym_info(
-                tenant_id, OB_PUBLIC_SCHEMA_ID, pcv_schema->table_name_, synonym_schema))) {
-            LOG_WARN("failed to get public synonym", K(ret));
+          if (pcv_schema->is_explicit_db_name_) {
+            if (OB_FAIL(schema_guard.get_simple_synonym_info(tenant_id, pcv_schema->schema_id_,
+                                                             synonym_schema))) {
+              LOG_WARN("failed to get private synonym", K(ret));
+            }
+          } else {
+            if (OB_FAIL(schema_guard.get_synonym_info(tenant_id, database_id,
+                                                      pcv_schema->table_name_, synonym_schema))) {
+              LOG_WARN("failed to get private synonym", K(ret));
+            } else if (OB_ISNULL(synonym_schema)
+                       && OB_FAIL(schema_guard.get_synonym_info(tenant_id, OB_PUBLIC_SCHEMA_ID,
+                                                                pcv_schema->table_name_,
+                                                                synonym_schema))) {
+              LOG_WARN("failed to get public synonym", K(ret));
+            }
+          }
+          if (OB_FAIL(ret)) {
           } else if (OB_NOT_NULL(synonym_schema)) {
             tmp_schema_obj.database_id_ = synonym_schema->get_database_id();
             tmp_schema_obj.schema_version_ = synonym_schema->get_schema_version();

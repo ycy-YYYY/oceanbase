@@ -195,7 +195,10 @@ TO_STRING_KV(K(is_inited_), K(tenant_id_), KP(this));
 
 private:
 int check_ls_status_(const share::ObLSID &ls_id, bool &leader);
-int init_tx_(ObTxDesc &tx, const uint32_t session_id);
+int init_tx_(ObTxDesc &tx,
+             const uint32_t session_id,
+             const uint64_t cluster_version);
+int reinit_tx_(ObTxDesc &tx, const uint32_t session_id, const uint64_t cluster_version);
 int start_tx_(ObTxDesc &tx);
 int abort_tx_(ObTxDesc &tx, const int cause, bool cleanup = true);
 void abort_tx__(ObTxDesc &tx, const bool cleanup);
@@ -347,7 +350,7 @@ int update_user_savepoint_(ObTxDesc &tx, const ObTxSavePointList &savepoints);
 private:
 ObTxCtxMgr tx_ctx_mgr_;
 void invalid_registered_snapshot_(ObTxDesc &tx);
-void registered_snapshot_clear_part_(ObTxDesc &tx);
+void process_registered_snapshot_on_commit_(ObTxDesc &tx);
 int ls_rollback_to_savepoint_(const ObTransID &tx_id,
                               const share::ObLSID &ls,
                               const int64_t verify_epoch,
@@ -389,7 +392,8 @@ int ls_sync_rollback_savepoint__(ObPartTransCtx *part_ctx,
                                  ObIArray<ObTxLSEpochPair> &downstream_parts);
 void tx_post_terminate_(ObTxDesc &tx);
 int start_epoch_(ObTxDesc &tx);
-int tx_sanity_check_(ObTxDesc &tx);
+// in_stmt means stmt is executing
+int tx_sanity_check_(ObTxDesc &tx, const bool in_stmt = false);
 bool tx_need_reset_(const int error_code) const;
 int get_tx_table_guard_(ObLS *ls,
                         const share::ObLSID &ls_id,

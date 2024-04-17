@@ -60,7 +60,7 @@ public:
     ties_array_pos_(0), ties_array_(), sorted_dumped_rows_ptrs_(), last_ties_row_(nullptr), rows_(nullptr),
     sort_exprs_getter_(allocator_),
     store_row_factory_(allocator_, sql_mem_processor_, sk_row_meta_, addon_row_meta_, inmem_row_size_, topn_cnt_),
-    topn_filter_(nullptr), is_topn_filter_enabled_(false)
+    topn_filter_(nullptr), is_topn_filter_enabled_(false), compress_type_(NONE_COMPRESSOR)
   {}
   virtual ~ObSortVecOpImpl()
   {
@@ -95,7 +95,7 @@ public:
 
   int init_temp_row_store(const common::ObIArray<ObExpr *> &exprs, const int64_t mem_limit,
                           const int64_t batch_size, const bool need_callback,
-                          const bool enable_dump, const int64_t extra_size,
+                          const bool enable_dump, const int64_t extra_size, ObCompressorType compress_type,
                           ObTempRowStore &row_store);
   int init_sort_temp_row_store(const int64_t batch_size);
   int init_store_row_factory();
@@ -224,8 +224,11 @@ protected:
   void set_blk_holder(ObTempRowStore::BlockHolder *blk_holder);
   // for topn sort
   int add_heap_sort_row(const Store_Row *&store_row);
+  // load data to comp_
+  int load_data_to_comp(const ObBatchRows &input_brs);
   int add_heap_sort_batch(const ObBatchRows &input_brs, const int64_t start_pos /* 0 */,
-                          int64_t *append_row_count = nullptr);
+                          int64_t *append_row_count = nullptr,
+                          bool need_load_data = true);
   int add_heap_sort_batch(const ObBatchRows &input_brs, const uint16_t selector[],
                           const int64_t size);
   int adjust_topn_heap(const Store_Row *&store_row);
@@ -278,13 +281,13 @@ protected:
       ret = OB_ALLOCATE_MEMORY_FAILED;
       SQL_ENG_LOG(WARN, "allocate memory failed", K(ret));
     } else if (OB_FAIL(init_temp_row_store(*sk_exprs_, 1, eval_ctx_->max_batch_size_, true,
-                                           true /*enable dump*/, Store_Row::get_extra_size(true),
+                                           true /*enable dump*/, Store_Row::get_extra_size(true), compress_type_,
                                            chunk->sk_store_))) {
       SQL_ENG_LOG(WARN, "failed to init temp row store", K(ret));
     } else if (has_addon
                && OB_FAIL(init_temp_row_store(
                     *addon_exprs_, 1, eval_ctx_->max_batch_size_, true, true /*enable dump*/,
-                    Store_Row::get_extra_size(false), chunk->addon_store_))) {
+                    Store_Row::get_extra_size(false), compress_type_, chunk->addon_store_))) {
       SQL_ENG_LOG(WARN, "failed to init temp row store", K(ret));
     } else {
       while (OB_SUCC(ret)) {
@@ -440,6 +443,7 @@ protected:
   ObSortVecOpStoreRowFactory<Store_Row, has_addon> store_row_factory_;
   ObSortVecOpEagerFilter<Compare, Store_Row, has_addon> *topn_filter_;
   bool is_topn_filter_enabled_;
+  ObCompressorType compress_type_;
 };
 
 } // end namespace sql

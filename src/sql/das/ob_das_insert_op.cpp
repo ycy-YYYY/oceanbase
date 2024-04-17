@@ -163,7 +163,7 @@ int ObDASInsertOp::insert_row_with_fetch()
   } else if (OB_FAIL(ObDMLService::init_dml_param(*ins_ctdef_, *ins_rtdef_, *snapshot_, write_branch_id_, op_alloc_, dml_param))) {
     LOG_WARN("init dml param failed", K(ret), KPC_(ins_ctdef), KPC_(ins_rtdef));
   } else if (OB_ISNULL(buf = op_alloc_.alloc(sizeof(ObDASConflictIterator)))) {
-    ret = OB_ERR_UNEXPECTED;
+    ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("fail to allocate ObDASConflictIterator", K(ret));
   } else {
     result_iter = new(buf) ObDASConflictIterator(ins_ctdef_->table_rowkey_types_,
@@ -199,6 +199,10 @@ int ObDASInsertOp::insert_row_with_fetch()
           is_duplicated_ = true;
         }
       }
+    }
+    if (OB_FAIL(ret) && OB_NOT_NULL(duplicated_rows)) {
+      ObQueryIteratorFactory::free_insert_dup_iter(duplicated_rows);
+      duplicated_rows = NULL;
     }
   }
   ret = OB_ITER_END == ret ? OB_SUCCESS : ret;
@@ -258,8 +262,13 @@ int ObDASInsertOp::insert_row_with_fetch()
           } else {
             // 需要释放iter的内存， 否则会内存泄漏
             ObQueryIteratorFactory::free_insert_dup_iter(duplicated_rows);
+            duplicated_rows = NULL;
           }
         }
+      }
+      if (OB_FAIL(ret) && OB_NOT_NULL(duplicated_rows)) {
+        ObQueryIteratorFactory::free_insert_dup_iter(duplicated_rows);
+        duplicated_rows = NULL;
       }
     }
     ret = OB_ITER_END == ret ? OB_SUCCESS : ret;

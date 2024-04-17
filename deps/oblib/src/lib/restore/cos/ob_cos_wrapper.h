@@ -204,6 +204,7 @@ public:
   static int create_cos_handle(
     OB_COS_customMem &custom_mem,
     const struct ObCosAccount &account,
+    const bool check_md5,
     Handle **h);
 
   // You can not use handle any more after destroy_cos_handle is called.
@@ -266,9 +267,10 @@ public:
     Handle *h,
     const CosStringBuffer &bucket_name,
     const CosStringBuffer &object_name,
-    int64_t offset,
+    const int64_t offset,
     char *buf,
-    int64_t buf_size,
+    const int64_t buf_size,
+    const bool is_range_read,
     int64_t &read_size);
 
   // Get whole object
@@ -278,7 +280,7 @@ public:
     const CosStringBuffer &bucket_name,
     const CosStringBuffer &object_name,
     char *buf,
-    int64_t buf_size,
+    const int64_t buf_size,
     int64_t &read_size);
 
   static int is_object_tagging(

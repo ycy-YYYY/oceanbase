@@ -336,26 +336,35 @@ int ObTabletDDLKvMgr::get_active_ddl_kv_impl(ObDDLKVHandle &kv_handle)
 }
 
 int ObTabletDDLKvMgr::get_or_create_ddl_kv(
-    const share::SCN &start_scn,
-    const share::SCN &scn,
-    const int64_t snapshot_version,
-    const uint64_t data_format_version,
+    const share::SCN &macro_redo_scn,
+    const share::SCN &macro_redo_start_scn,
+    ObTabletDirectLoadMgrHandle &direct_load_mgr_handle,
     ObDDLKVHandle &kv_handle)
 {
   int ret = OB_SUCCESS;
   kv_handle.reset();
+  uint32_t direct_load_lock_tid = 0;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("ObTabletDDLKvMgr is not inited", K(ret));
-  } else if (!scn.is_valid_and_not_min()) {
+  } else if (OB_UNLIKELY(!macro_redo_scn.is_valid_and_not_min() || !macro_redo_start_scn.is_valid_and_not_min())) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid argument", K(ret), K(scn));
+    LOG_WARN("invalid argument", K(ret), K(macro_redo_scn), K(macro_redo_start_scn));
+  } else if (OB_FAIL(direct_load_mgr_handle.get_obj()->rdlock(TRY_LOCK_TIMEOUT/*10s*/, direct_load_lock_tid))) {
+    // usually use the latest start scn to allocate kv.
+    LOG_WARN("lock failed", K(ret));
+  } else if (OB_UNLIKELY(macro_redo_start_scn < direct_load_mgr_handle.get_obj()->get_start_scn())) {
+    ret = OB_TASK_EXPIRED;
+    LOG_WARN("ddl task expired", K(ret), K(macro_redo_start_scn), "start_scn", direct_load_mgr_handle.get_obj()->get_start_scn());
+  } else if (OB_UNLIKELY(macro_redo_start_scn > direct_load_mgr_handle.get_obj()->get_start_scn())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected start scn in memory", K(ret), K(macro_redo_start_scn), "start_scn", direct_load_mgr_handle.get_obj()->get_start_scn());
   } else {
     uint32_t lock_tid = 0; // try lock to avoid hang in clog callback
     if (OB_FAIL(rdlock(TRY_LOCK_TIMEOUT, lock_tid))) {
-      LOG_WARN("failed to rdlock", K(ret), K(start_scn), KPC(this));
+      LOG_WARN("failed to rdlock", K(ret), KPC(this));
     } else {
-      try_get_ddl_kv_unlock(scn, kv_handle);
+      try_get_ddl_kv_unlock(macro_redo_scn, kv_handle);
     }
     if (lock_tid != 0) {
       unlock(lock_tid);
@@ -364,19 +373,24 @@ int ObTabletDDLKvMgr::get_or_create_ddl_kv(
   if (OB_SUCC(ret) && !kv_handle.is_valid()) {
     uint32_t lock_tid = 0; // try lock to avoid hang in clog callback
     if (OB_FAIL(wrlock(TRY_LOCK_TIMEOUT, lock_tid))) {
-      LOG_WARN("failed to wrlock", K(ret), K(start_scn), KPC(this));
+      LOG_WARN("failed to wrlock", K(ret), KPC(this));
     } else {
-      try_get_ddl_kv_unlock(scn, kv_handle);
+      try_get_ddl_kv_unlock(macro_redo_scn, kv_handle);
       if (kv_handle.is_valid()) {
         // do nothing
-      } else if (OB_FAIL(alloc_ddl_kv(start_scn,
-        snapshot_version, data_format_version, kv_handle))) {
-        LOG_WARN("create ddl kv failed", K(ret));
+      } else if (OB_FAIL(alloc_ddl_kv(direct_load_mgr_handle.get_obj()->get_start_scn(),
+        direct_load_mgr_handle.get_obj()->get_table_key().get_snapshot_version(),
+        direct_load_mgr_handle.get_obj()->get_data_format_version(),
+        kv_handle))) {
+        LOG_WARN("create ddl kv failed", K(ret), KPC(direct_load_mgr_handle.get_obj()));
       }
     }
     if (lock_tid != 0) {
       unlock(lock_tid);
     }
+  }
+  if (direct_load_lock_tid != 0) {
+    direct_load_mgr_handle.get_obj()->unlock(direct_load_lock_tid);
   }
   return ret;
 }
@@ -555,6 +569,47 @@ int ObTabletDDLKvMgr::get_ddl_kvs_for_query(ObTablet &tablet, ObIArray<ObDDLKVHa
   return ret;
 }
 
+// when ddl commit scn is only in memory, try flush it, need wait log replay point elapsed the ddl commit scn
+int ObTabletDDLKvMgr::try_flush_ddl_commit_scn(
+    ObLSHandle &ls_handle,
+    const ObTabletHandle &tablet_handle,
+    const ObTabletDirectLoadMgrHandle &direct_load_mgr_handle,
+    const share::SCN &commit_scn)
+{
+  int ret = OB_SUCCESS;
+   ObTabletFullDirectLoadMgr *direct_load_mgr = nullptr;
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("ObTabletDDLKvMgr is not inited", K(ret));
+  } else if (OB_UNLIKELY(!ls_handle.is_valid() || !tablet_handle.is_valid() || OB_ISNULL(direct_load_mgr = direct_load_mgr_handle.get_full_obj()))) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", K(ret), K(ls_handle), K(tablet_handle));
+  } else if (commit_scn.is_valid_and_not_min() // already committed
+      && tablet_handle.get_obj()->get_tablet_meta().ddl_checkpoint_scn_ != commit_scn) {// only exist in memory
+    SCN max_decided_scn;
+    bool already_freezed = true;
+    {
+      ObLatchRGuard guard(lock_, ObLatchIds::TABLET_DDL_KV_MGR_LOCK);
+      already_freezed = max_freeze_scn_ >= commit_scn;
+    }
+    if (already_freezed) {
+      // do nothing
+    } else if (OB_FAIL(ls_handle.get_ls()->get_max_decided_scn(max_decided_scn))) {
+      LOG_WARN("get max decided log ts failed", K(ret), K(ls_handle.get_ls()->get_ls_id()));
+    } else if (SCN::plus(max_decided_scn, 1) >= commit_scn) { // commit_scn elapsed, means the prev clog already replayed or applied
+      // max_decided_scn is the left border scn - 1
+      // the min deciding(replay or apply) scn (aka left border) is max_decided_scn + 1
+      if (OB_FAIL(freeze_ddl_kv(direct_load_mgr->get_start_scn(),
+              direct_load_mgr->get_table_key().get_snapshot_version(),
+              direct_load_mgr->get_data_format_version(),
+              commit_scn))) {
+        LOG_WARN("freeze ddl kv failed", K(ret));
+      }
+    }
+  }
+  return ret;
+}
+
 int ObTabletDDLKvMgr::check_has_effective_ddl_kv(bool &has_ddl_kv)
 {
   int ret = OB_SUCCESS;
@@ -564,6 +619,30 @@ int ObTabletDDLKvMgr::check_has_effective_ddl_kv(bool &has_ddl_kv)
     LOG_WARN("ObTabletDDLKvMgr is not inited", K(ret));
   } else {
     has_ddl_kv = 0 != get_count_nolock();
+  }
+  return ret;
+}
+
+int ObTabletDDLKvMgr::check_has_freezed_ddl_kv(bool &has_freezed_ddl_kv)
+{
+  int ret = OB_SUCCESS;
+  has_freezed_ddl_kv = false;
+  ObLatchRGuard guard(lock_, ObLatchIds::TABLET_DDL_KV_MGR_LOCK);
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("ObTabletDDLKvMgr is not inited", K(ret));
+  } else {
+    for (int64_t pos = head_; !has_freezed_ddl_kv && OB_SUCC(ret) && pos < tail_; ++pos) {
+      const int64_t idx = get_idx(pos);
+      ObDDLKVHandle &cur_kv_handle = ddl_kv_handles_[idx];
+      ObDDLKV *cur_kv = cur_kv_handle.get_obj();
+      if (OB_ISNULL(cur_kv)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("ddl kv is null", K(ret), K(ls_id_), K(tablet_id_), KP(cur_kv), K(pos), K(head_), K(tail_));
+      } else if (cur_kv->is_freezed()) {
+        has_freezed_ddl_kv = true;
+      }
+    }
   }
   return ret;
 }

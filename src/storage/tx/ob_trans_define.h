@@ -89,7 +89,7 @@ class ObXACtx;
 class ObITxCallback;
 class ObTxMultiDataSourceLog;
 typedef palf::LSN LogOffSet;
-enum { MAX_CALLBACK_LIST_COUNT = OB_MAX_CPU_NUM };
+enum { MAX_CALLBACK_LIST_COUNT = 64 };
 class ObTransErrsim
 {
 public:
@@ -1212,7 +1212,8 @@ public:
   static const int64_t END_TRANS_CB_TASK = 0;
   static const int64_t ADVANCE_LS_CKPT_TASK = 1;
   static const int64_t STANDBY_CLEANUP_TASK = 2;
-  static const int64_t MAX = 3;
+  static const int64_t DUP_TABLE_TX_REDO_SYNC_RETRY_TASK = 3;
+  static const int64_t MAX = 4;
 public:
   static bool is_valid(const int64_t task_type)
   { return task_type > UNKNOWN && task_type < MAX; }
@@ -1728,12 +1729,18 @@ typedef common::ObSEArray<ObTxExecPart, share::OB_DEFAULT_LS_COUNT> ObTxRollback
     if (OB_FAIL(parts.push_back(commit_parts.at(idx).ls_id_))) {             \
       TRANS_LOG(WARN, "parts push failed", K(ret));                          \
     }                                                                        \
+  }                                                                          \
+  if (OB_FAIL(ret)) {                                                        \
+    parts.reset();                                                           \
   }
-#define CONVERT_PARTS_TO_COMMIT_PARTS(parts, commit_parts) \
-  for (int64_t idx = 0; OB_SUCC(ret) && idx < parts.count(); idx++) { \
-    if (OB_FAIL(commit_parts.push_back(ObTxExecPart(parts.at(idx), -1, -1)))) {             \
-      TRANS_LOG(WARN, "parts push failed", K(ret));                         \
-    }                                                                       \
+#define CONVERT_PARTS_TO_COMMIT_PARTS(parts, commit_parts)                      \
+  for (int64_t idx = 0; OB_SUCC(ret) && idx < parts.count(); idx++) {           \
+    if (OB_FAIL(commit_parts.push_back(ObTxExecPart(parts.at(idx), -1, -1)))) { \
+      TRANS_LOG(WARN, "parts push failed", K(ret));                             \
+    }                                                                           \
+  }                                                                             \
+  if (OB_FAIL(ret)) {                                                           \
+    commit_parts.reset();                                                       \
   }
 
 class ObEndParticipantsRes
@@ -1750,6 +1757,21 @@ public:
 private:
   ObBlockedTransArray blocked_trans_ids_;
 };
+
+enum class PartCtxSource
+{
+  UNKOWN = 0,
+  MVCC_WRITE = 1,
+  REGISTER_MDS = 2,
+  REPLAY = 3,
+  RECOVER = 4,
+  TRANSFER = 5,
+  TRANSFER_RECOVER = 6,
+};
+
+bool is_transfer_ctx(PartCtxSource ctx_source);
+
+const char *to_str(PartCtxSource src);
 
 enum class RetainCause : int16_t
 {
@@ -1788,6 +1810,7 @@ public:
       incremental_participants_(OB_MALLOC_NORMAL_BLOCK_SIZE, ModulePageAllocator(allocator, "INC_PART`")),
       intermediate_participants_(OB_MALLOC_NORMAL_BLOCK_SIZE, ModulePageAllocator(allocator, "INTER_PART`")),
       redo_lsns_(OB_MALLOC_NORMAL_BLOCK_SIZE, ModulePageAllocator(allocator, "REDO_LSNS")),
+      multi_data_source_(OB_MALLOC_NORMAL_BLOCK_SIZE, ModulePageAllocator(allocator, "MDS_ARRAY")),
       checksum_(OB_MALLOC_NORMAL_BLOCK_SIZE, ModulePageAllocator(allocator, "TX_CHECKSUM")),
       checksum_scn_(OB_MALLOC_NORMAL_BLOCK_SIZE, ModulePageAllocator(allocator, "TX_CHECKSUM")),
       prepare_log_info_arr_(OB_MALLOC_NORMAL_BLOCK_SIZE, ModulePageAllocator(allocator, "PREPARE_INFO"))

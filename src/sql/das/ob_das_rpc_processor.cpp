@@ -11,6 +11,7 @@
  */
 
 #define USING_LOG_PREFIX SQL_DAS
+#include "lib/signal/ob_signal_struct.h"
 #include "sql/das/ob_das_rpc_processor.h"
 #include "sql/das/ob_data_access_service.h"
 #include "sql/das/ob_das_utils.h"
@@ -76,6 +77,7 @@ int ObDASBaseAccessP<pcode>::process()
   LOG_DEBUG("DAS base access remote process", K_(RpcProcessor::arg));
   ObDASTaskArg &task = RpcProcessor::arg_;
   ObDASTaskResp &task_resp = RpcProcessor::result_;
+  SQL_INFO_GUARD(ObString("DAS REMOTE PROCESS"), task.get_remote_info()->sql_id_);
   const common::ObSEArray<ObIDASTaskOp*, 2> &task_ops = task.get_task_ops();
   common::ObSEArray<ObIDASTaskResult*, 2> &task_results = task_resp.get_op_results();
   ObDASTaskFactory *das_factory = ObDASBaseAccessP<pcode>::get_das_factory();
@@ -118,6 +120,10 @@ int ObDASBaseAccessP<pcode>::process()
           //ignore the errcode of storing warning msg
           (void)task_resp.store_warning_msg(*wb);
         }
+      }
+      if (OB_FAIL(ret) && OB_NOT_NULL(op_result)) {
+        // accessing failed das task result is undefined behavior.
+        op_result->reuse();
       }
       //因为end_task还有可能失败，需要通过RPC将end_task的返回值带回到scheduler上
       int tmp_ret = task_op->end_das_task();

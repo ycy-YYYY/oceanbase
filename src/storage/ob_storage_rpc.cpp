@@ -1183,7 +1183,10 @@ int ObStorageStreamRpcP<RPC_CODE>::fill_data(const Data &data)
       || (curr_ts - last_send_time_ >= FLUSH_TIME_INTERVAL
           && this->result_.get_capacity() != this->result_.get_remain())) {
     LOG_INFO("flush", K(this->result_));
-    if (OB_FAIL(flush_and_wait())) {
+    if (0 == this->result_.get_position()) {
+      ret = OB_ERR_UNEXPECTED;
+      STORAGE_LOG(ERROR, "data is too large", K(ret));
+    } else if (OB_FAIL(flush_and_wait())) {
       STORAGE_LOG(WARN, "failed to flush_and_wait", K(ret));
     }
   }
@@ -1314,7 +1317,7 @@ int ObStorageStreamRpcP<RPC_CODE>::flush_and_wait()
 
     if (OB_FAIL(this->check_timeout())) {
       LOG_WARN("rpc is timeout, no need flush", K(ret));
-    } else if (OB_FAIL(this->flush(OB_DEFAULT_STREAM_WAIT_TIMEOUT))) {
+    } else if (OB_FAIL(this->flush())) {
       STORAGE_LOG(WARN, "failed to flush", K(ret));
     } else {
       this->result_.get_position() = 0;

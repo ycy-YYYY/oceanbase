@@ -120,6 +120,8 @@ void oceanbase::observer::init_srv_xlator_for_partition(ObSrvRpcXlator *xlator) 
   RPC_PROCESSOR(ObRpcGetLSAccessModeP, gctx_);
   RPC_PROCESSOR(ObRpcChangeLSAccessModeP, gctx_);
   RPC_PROCESSOR(ObTabletLocationReceiveP, gctx_);
+  RPC_PROCESSOR(ObForceSetTenantLogDiskP, gctx_);
+  RPC_PROCESSOR(ObForceDumpServerUsageP, gctx_);
 }
 
 void oceanbase::observer::init_srv_xlator_for_migrator(ObSrvRpcXlator *xlator) {
@@ -314,4 +316,7 @@ void oceanbase::observer::init_srv_xlator_for_others(ObSrvRpcXlator *xlator) {
   RPC_PROCESSOR(ObKillClientSessionP, gctx_);
   // client session create time
   RPC_PROCESSOR(ObClientSessionConnectTimeP, gctx_);
+
+  // ddl
+  RPC_PROCESSOR(ObRpcCheckandCancelDDLComplementDagP, gctx_);
 }

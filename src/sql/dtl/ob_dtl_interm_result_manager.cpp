@@ -104,9 +104,9 @@ void ObAtomicAppendBlockCall::operator() (common::hash::HashMapPair<ObDTLIntermR
       ret_ = OB_INVALID_ARGUMENT;
     } else {
       if (entry.second->use_rich_format_) {
-        entry.second->col_store_->append_block(block_buf_, size_);
+        ret_ = entry.second->col_store_->append_block(block_buf_, size_);
       } else {
-        entry.second->datum_store_->append_block(block_buf_, size_, true);
+        ret_ = entry.second->datum_store_->append_block(block_buf_, size_, true);
       }
       if (is_eof_) {
         entry.second->is_eof_ = is_eof_;
@@ -125,9 +125,9 @@ void ObAtomicAppendPartBlockCall::operator() (common::hash::HashMapPair<ObDTLInt
       ret_ = OB_INVALID_ARGUMENT;
     } else {
       if (entry.second->use_rich_format_) {
-        entry.second->col_store_->append_block_payload(block_buf_ + start_pos_, length_, rows_);
+        ret_ = entry.second->col_store_->append_block_payload(block_buf_ + start_pos_, length_, rows_);
       } else {
-        entry.second->datum_store_->append_block_payload(block_buf_ + start_pos_, length_, rows_, true);
+        ret_ = entry.second->datum_store_->append_block_payload(block_buf_ + start_pos_, length_, rows_, true);
       }
       if (is_eof_) {
         entry.second->is_eof_ = is_eof_;
@@ -203,6 +203,7 @@ int ObDTLIntermResultManager::create_interm_result_info(ObMemAttr &attr,
   int ret = OB_SUCCESS;
   void *result_info_buf = NULL;
   void *store_buf = NULL;
+  SET_IGNORE_MEM_VERSION(attr);
   const int64_t store_size = use_rich_format ? sizeof(ObTempColumnStore) : sizeof(ObChunkDatumStore);
   if (OB_ISNULL(result_info_buf = ob_malloc(sizeof(ObDTLIntermResultInfo), attr))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
@@ -344,6 +345,8 @@ int ObDTLIntermResultManager::atomic_append_block(ObDTLIntermResultKey &key, ObA
   int ret = OB_SUCCESS;
   if (OB_FAIL(map_.atomic_refactored(key, call))) {
     LOG_WARN("fail to get row store in result manager", K(ret));
+  } else if (OB_FAIL(call.ret_)) {
+    LOG_WARN("ObAtomicAppendBlockCall fail", K(ret));
   } else {
     LOG_DEBUG("debug append block to interm result info", K(key));
   }
@@ -355,6 +358,8 @@ int ObDTLIntermResultManager::atomic_append_part_block(ObDTLIntermResultKey &key
   int ret = OB_SUCCESS;
   if (OB_FAIL(map_.atomic_refactored(key, call))) {
     LOG_WARN("fail to get row store in result manager", K(ret));
+  } else if (OB_FAIL(call.ret_)) {
+    LOG_WARN("ObAtomicAppendPartBlockCall fail", K(ret));
   } else {
     LOG_DEBUG("debug append part block to interm result info", K(key));
   }
@@ -389,21 +394,21 @@ int ObDTLIntermResultManager::erase_tenant_interm_result_info()
   int ret = OB_SUCCESS;
   MAP::bucket_iterator bucket_it = map_.bucket_begin();
   while (bucket_it != map_.bucket_end()) {
-    MAP::hashtable::bucket_lock_cond blc(*bucket_it);
-    MAP::hashtable::writelocker locker(blc.lock());
-    MAP::hashtable::hashbucket::const_iterator node_it = bucket_it->node_begin();
-    while (node_it != bucket_it->node_end()) {
-      int tmp_ret = OB_SUCCESS;
-      const ObDTLIntermResultKey &key = node_it->first;
-      node_it++;
-      if (OB_SUCCESS != (tmp_ret = erase_interm_result_info(key))) {
-        if (OB_HASH_NOT_EXIST != tmp_ret) {
-          LOG_WARN("fail to erase result info", K(key), K(tmp_ret));
-          ret = tmp_ret;
+    while (true) {
+      ObDTLIntermResultKey key;
+      {
+        MAP::hashtable::bucket_lock_cond blc(*bucket_it);
+        MAP::hashtable::readlocker locker(blc.lock());
+        MAP::hashtable::hashbucket::const_iterator node_it = bucket_it->node_begin();
+        if (node_it == bucket_it->node_end()) {
+          break;
+        } else {
+          key = node_it->first;
         }
       }
+      erase_interm_result_info(key);
     }
-    bucket_it++;
+    ++bucket_it;
   }
   if (OB_SUCC(ret)) {
     LOG_INFO("erase_tenant_interm_result_info", K(MTL_ID()), K(map_.size()));
@@ -628,6 +633,7 @@ int ObDTLIntermResultManager::mtl_start(ObDTLIntermResultManager *&dtl_interm_re
     } else {
       dtl_interm_result_manager->get_gc_task().disable_timeout_check();
       dtl_interm_result_manager->get_gc_task().dtl_interm_result_manager_ = dtl_interm_result_manager;
+      dtl_interm_result_manager->get_gc_task().is_start_ = true;
     }
   }
   return ret;
@@ -635,14 +641,16 @@ int ObDTLIntermResultManager::mtl_start(ObDTLIntermResultManager *&dtl_interm_re
 
 void ObDTLIntermResultManager::mtl_stop(ObDTLIntermResultManager *&dtl_interm_result_manager)
 {
-  if (OB_LIKELY(nullptr != dtl_interm_result_manager)) {
+  if (OB_LIKELY(nullptr != dtl_interm_result_manager) &&
+      dtl_interm_result_manager->get_gc_task().is_start_) {
     TG_CANCEL_TASK(MTL(omt::ObSharedTimer*)->get_tg_id(), dtl_interm_result_manager->get_gc_task());
   }
 }
 
 void ObDTLIntermResultManager::mtl_wait(ObDTLIntermResultManager *&dtl_interm_result_manager)
 {
-  if (OB_LIKELY(nullptr != dtl_interm_result_manager)) {
+  if (OB_LIKELY(nullptr != dtl_interm_result_manager &&
+      dtl_interm_result_manager->get_gc_task().is_start_)) {
     TG_WAIT_TASK(MTL(omt::ObSharedTimer*)->get_tg_id(), dtl_interm_result_manager->get_gc_task());
   }
 }

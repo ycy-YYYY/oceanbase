@@ -188,14 +188,16 @@ public:
       const int64_t snapshot_version,
       const ObCreateTabletSchema &create_tablet_schema,
       const lib::Worker::CompatMode &compat_mode,
+      const bool need_create_empty_major_sstable,
       ObTabletHandle &tablet_handle);
   int create_transfer_in_tablet(
       const share::ObLSID &ls_id,
       const ObMigrationTabletParam &tablet_meta,
       ObTabletHandle &tablet_handle);
-  int rollback_tablet(
+  int rollback_remove_tablet(
       const share::ObLSID &ls_id,
-      const common::ObTabletID &tablet_id);
+      const common::ObTabletID &tablet_id,
+      const share::SCN &transfer_start_scn);
 
   int get_tablet(
       const common::ObTabletID &tablet_id,
@@ -280,7 +282,6 @@ public:
       const int64_t buf_len,
       const ObTabletID &tablet_id,
       ObTabletTransferInfo &tablet_transfer_info);
-  int do_remove_tablet(const ObTabletMapKey &key);
 
   int create_memtable(
       const common::ObTabletID &tablet_id,
@@ -288,7 +289,7 @@ public:
       const bool for_replay = false,
       const share::SCN clog_checkpoint_scn = share::SCN::min_scn());
   int get_read_tables(
-      const common::ObTabletID &tablet_id,
+      const common::ObTabletID tablet_id,
       const int64_t timeout_us,
       const int64_t snapshot_version,
       ObTabletTableIterator &iter,
@@ -367,7 +368,6 @@ public:
       ObTabletHandle &tablet_handle,
       ObStoreCtx &ctx,
       const ObDMLBaseParam &dml_param,
-      const int64_t abs_lock_timeout,
       const ObLockFlag lock_flag,
       const bool is_sfu,
       ObNewRowIterator *row_iter,
@@ -376,7 +376,6 @@ public:
       ObTabletHandle &tablet_handle,
       ObStoreCtx &ctx,
       const ObDMLBaseParam &dml_param,
-      const int64_t abs_lock_timeout,
       const ObNewRow &row,
       const ObLockFlag lock_flag,
       const bool is_sfu);
@@ -483,11 +482,7 @@ private:
   public:
     explicit ObUpdateDDLCommitSCN(const share::SCN ddl_commit_scn) : ddl_commit_scn_(ddl_commit_scn) {}
     virtual ~ObUpdateDDLCommitSCN() = default;
-    virtual int modify_tablet_meta(ObTabletMeta &meta) override
-    {
-      meta.ddl_commit_scn_ = ddl_commit_scn_;
-      return OB_SUCCESS;
-    }
+    virtual int modify_tablet_meta(ObTabletMeta &meta) override;
   private:
     const share::SCN ddl_commit_scn_;
     DISALLOW_COPY_AND_ASSIGN(ObUpdateDDLCommitSCN);
@@ -547,7 +542,13 @@ private:
       const common::ObTabletID &tablet_id,
       const ObUpdateTabletPointerParam &param,
       ObTabletHandle &tablet_handle);
+  int do_remove_tablet(
+      const share::ObLSID &ls_id,
+      const common::ObTabletID &tablet_id);
   int inner_remove_tablet(
+      const share::ObLSID &ls_id,
+      const common::ObTabletID &tablet_id);
+  int rollback_remove_tablet_without_lock(
       const share::ObLSID &ls_id,
       const common::ObTabletID &tablet_id);
   int rollback_rebuild_tablet(const ObTabletID &tablet_id);
@@ -561,7 +562,9 @@ private:
       ObTabletHandle &handle);
   int delete_all_tablets();
   int offline_build_tablet_without_memtable_();
+  int offline_gc_tablet_for_create_or_transfer_in_abort_();
   int offline_destroy_memtable_and_mds_table_();
+  int mock_duplicated_rows_(common::ObNewRowIterator *&duplicated_rows);
 private:
   static int check_real_leader_for_4377_(const ObLSID ls_id);
   static int check_need_rollback_in_transfer_for_4377_(const transaction::ObTxDesc *tx_desc,
@@ -780,7 +783,11 @@ private:
   int create_empty_shell_tablet(
       const ObMigrationTabletParam &param,
       ObTabletHandle &tablet_handle);
-
+  int check_rollback_tablet_is_same_(
+      const share::ObLSID &ls_id,
+      const common::ObTabletID &tablet_id,
+      const share::SCN &transfer_start_scn,
+      bool &is_same);
 private:
   int direct_insert_rows(const uint64_t table_id,
                          const int64_t task_id,

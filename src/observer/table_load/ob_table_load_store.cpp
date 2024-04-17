@@ -77,9 +77,8 @@ void ObTableLoadStore::abort_ctx(ObTableLoadTableCtx *ctx, bool &is_stopped)
     if (OB_FAIL(abort_active_trans(ctx))) {
       LOG_WARN("fail to abort active trans", KR(ret));
     }
-    // 4. stop merger
+    ctx->store_ctx_->insert_table_ctx_->cancel();
     ctx->store_ctx_->merger_->stop();
-    // 5. stop task_scheduler
     ctx->store_ctx_->task_scheduler_->stop();
     is_stopped = ctx->store_ctx_->task_scheduler_->is_stopped();
   }
@@ -89,6 +88,7 @@ int ObTableLoadStore::abort_active_trans(ObTableLoadTableCtx *ctx)
 {
   int ret = OB_SUCCESS;
   ObArray<ObTableLoadTransId> trans_id_array;
+  trans_id_array.set_tenant_id(MTL_ID());
   if (OB_FAIL(ctx->store_ctx_->get_active_trans_ids(trans_id_array))) {
     LOG_WARN("fail to get active trans ids", KR(ret));
   }
@@ -222,9 +222,10 @@ int ObTableLoadStore::pre_merge(
     LOG_WARN("ObTableLoadStore not init", KR(ret), KP(this));
   } else {
     LOG_INFO("store pre merge");
-    ObArenaAllocator allocator;
+    ObArenaAllocator allocator("TLD_Tmp");
     bool trans_exist = false;
     ObTableLoadArray<ObTableLoadTransId> store_committed_trans_id_array;
+    allocator.set_tenant_id(MTL_ID());
     // 1. 冻结状态, 防止后续继续创建trans
     if (OB_FAIL(store_ctx_->set_status_frozen())) {
       LOG_WARN("fail to set store status frozen", KR(ret));
@@ -340,8 +341,10 @@ int ObTableLoadStore::commit_sql_statistics(const ObTableLoadSqlStatistics &sql_
   const uint64_t table_id = param_.table_id_;
   ObSchemaGetterGuard schema_guard;
   const ObTableSchema *table_schema = nullptr;
-  ObSEArray<ObOptColumnStat *, 64> part_column_stats;
-  ObSEArray<ObOptTableStat *, 64> part_table_stats;
+  ObArray<ObOptColumnStat *> part_column_stats;
+  ObArray<ObOptTableStat *> part_table_stats;
+  part_column_stats.set_tenant_id(MTL_ID());
+  part_table_stats.set_tenant_id(MTL_ID());
   if (sql_statistics.is_empty()) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("sql statistics is empty", K(ret));
@@ -956,6 +959,29 @@ int ObTableLoadStore::px_finish_trans(const ObTableLoadTransId &trans_id)
     if (OB_NOT_NULL(trans)) {
       store_ctx_->put_trans(trans);
       trans = nullptr;
+    }
+  }
+  return ret;
+}
+
+int ObTableLoadStore::px_check_for_write(const ObTabletID &tablet_id)
+{
+  int ret = OB_SUCCESS;
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("ObTableLoadStore not init", KR(ret), KP(this));
+  } else {
+    bool is_exist = false;
+    for (int64_t i = 0; i < store_ctx_->ls_partition_ids_.count(); ++i) {
+      const ObTableLoadLSIdAndPartitionId &ls_part_id = store_ctx_->ls_partition_ids_.at(i);
+      if (ls_part_id.part_tablet_id_.tablet_id_ == tablet_id) {
+        is_exist = true;
+        break;
+      }
+    }
+    if (OB_UNLIKELY(!is_exist)) {
+      ret = OB_NOT_MASTER;
+      LOG_WARN("not partition master", KR(ret), K(tablet_id), K(store_ctx_->ls_partition_ids_));
     }
   }
   return ret;

@@ -113,7 +113,7 @@ void ObTabletHandle::reset()
           obj_->dec_macro_ref_cnt();
           obj_->~ObTablet();
           allocator_->free(obj_);
-        } else if (OB_FAIL(t3m_->gc_tablet(obj_))) {
+        } else if (OB_FAIL(t3m_->push_tablet_into_gc_queue(obj_))) {
           STORAGE_LOG(ERROR, "fail to gc tablet", K(ret), KPC_(obj), K_(obj_pool), K_(allocator));
         }
       }
@@ -235,6 +235,11 @@ int ObTabletTableIterator::assign(const ObTabletTableIterator& other)
 }
 
 ObTableStoreIterator *ObTabletTableIterator::table_iter()
+{
+  return &table_store_iter_;
+}
+
+const ObTableStoreIterator *ObTabletTableIterator::table_iter() const
 {
   return &table_store_iter_;
 }

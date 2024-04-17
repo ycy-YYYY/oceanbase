@@ -823,10 +823,6 @@ int ObStorageSchema::deserialize(
         STORAGE_LOG(WARN, "failed to reserve for column group array", K(ret));
       } else if (OB_FAIL(add_column_group(column_group))) {
         STORAGE_LOG(WARN, "failed to add column group", K(ret), K(column_group));
-      } else if (OB_FAIL(GET_MIN_DATA_VERSION(MTL_ID(), compat_version))) {
-        STORAGE_LOG(WARN, "failed to add column group", K(ret), K(MTL_ID()));
-      } else if (compat_version >= DATA_VERSION_4_3_0_0) {
-        storage_schema_version_ = STORAGE_SCHEMA_VERSION_V3;
       }
     } else if (OB_FAIL(serialization::decode_i64(buf, data_len, pos, &store_column_cnt_))) {
       STORAGE_LOG(WARN, "failed to deserialize store_column_cnt", K(ret), K_(store_column_cnt));
@@ -998,7 +994,7 @@ int ObStorageSchema::generate_column_group_array(const ObTableSchema &input_sche
   return ret;
 }
 
-int ObStorageSchema::generate_all_column_group_schema(ObStorageColumnGroupSchema &column_group, const ObRowStoreType row_store_type)
+int ObStorageSchema::generate_all_column_group_schema(ObStorageColumnGroupSchema &column_group, const ObRowStoreType row_store_type) const
 {
   int ret = OB_SUCCESS;
 
@@ -1018,6 +1014,93 @@ int ObStorageSchema::generate_all_column_group_schema(ObStorageColumnGroupSchema
     column_group.block_size_ = block_size_;
     column_group.compressor_type_ = compressor_type_;
     column_group.row_store_type_ = row_store_type;
+  }
+
+  return ret;
+}
+
+int ObStorageSchema::mock_row_store_cg(ObStorageColumnGroupSchema &mocked_row_store_cg) const
+{
+  // if cache mocked_row_store_cg in storage schema, cached value will become invalid when ddl happen, so re-build every time
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(generate_all_column_group_schema(mocked_row_store_cg, row_store_type_))) {
+    STORAGE_LOG(WARN, "fail to mock row store cg schema", K(ret));
+  }
+  return ret;
+}
+
+int ObStorageSchema::get_base_rowkey_column_group_index(int32_t &cg_idx) const
+{
+  int ret = OB_SUCCESS;
+  const int64_t column_group_cnt = column_group_array_.count();
+  cg_idx = OB_INVALID_INDEX; // -1
+  if (OB_UNLIKELY(1 >= column_group_cnt)) {
+    ret = OB_ERR_UNEXPECTED;
+    STORAGE_LOG(WARN, "No column group exist", K(ret), KPC(this));
+  } else if (OB_UNLIKELY(column_group_cnt > INT32_MAX)) {
+    ret = OB_SIZE_OVERFLOW;
+    STORAGE_LOG(ERROR, "column group count is overflow", K(column_group_cnt));
+  } else {
+    for (int32_t i = 0; (OB_INVALID_INDEX == cg_idx) && i < column_group_cnt; i++) {
+      if (column_group_array_.at(i).is_rowkey_column_group() || column_group_array_.at(i).is_all_column_group()) {
+         cg_idx = i;
+      }
+    }
+    if (OB_INVALID_INDEX == cg_idx) {
+      ret = OB_ERR_UNEXPECTED;
+      STORAGE_LOG(WARN, "failed to find base/rowkey cg", K(ret), K(column_group_array_));
+    }
+  }
+  return ret;
+}
+
+int ObStorageSchema::get_column_group_index(
+    const uint64_t &column_id,
+    const int32_t &column_idx,
+    int32_t &cg_idx) const
+{
+  int ret = OB_SUCCESS;
+  const int64_t column_group_cnt = column_group_array_.count();
+  const bool is_multi_version_col = OB_HIDDEN_TRANS_VERSION_COLUMN_ID == column_id
+                                 || OB_HIDDEN_SQL_SEQUENCE_COLUMN_ID == column_id;
+  cg_idx = OB_INVALID_INDEX; // -1
+  if (OB_UNLIKELY(1 >= column_group_cnt)) {
+    ret = OB_ERR_UNEXPECTED;
+    STORAGE_LOG(WARN, "No column group exist", K(ret), KPC(this));
+  } else if (OB_UNLIKELY(column_group_cnt > INT32_MAX)) {
+    ret = OB_SIZE_OVERFLOW;
+    STORAGE_LOG(ERROR, "column group count is overflow", K(column_group_cnt));
+  } else if (column_id < OB_END_RESERVED_COLUMN_ID_NUM &&
+      common::OB_HIDDEN_SESS_CREATE_TIME_COLUMN_ID != column_id &&
+      common::OB_HIDDEN_SESSION_ID_COLUMN_ID != column_id &&
+      common::OB_HIDDEN_PK_INCREMENT_COLUMN_ID != column_id) { // this has its own column group now
+    if (is_multi_version_col) {
+      if (OB_FAIL(get_base_rowkey_column_group_index(cg_idx))) {
+        STORAGE_LOG(WARN, "Fail to get base/rowkey column group index", K(ret), K(column_id));
+      }
+    } else {
+      // TODO: check the following
+      // TODO: after check, also see ObTableSchema::get_column_group_index
+      // common::OB_HIDDEN_LOGICAL_ROWID_COLUMN_ID == column_id
+      // common::OB_HIDDEN_GROUP_IDX_COLUMN_ID == column_id
+      cg_idx = OB_INVALID_INDEX;
+    }
+  } else {
+    const uint16_t *column_idxs = nullptr;
+    for (int32_t i = 0; OB_SUCC(ret) && (OB_INVALID_INDEX == cg_idx) && i < column_group_cnt; i++) {
+      const ObStorageColumnGroupSchema &cg_schema = column_group_array_.at(i);
+      if (!cg_schema.is_single_column_group()) { // now only support single cg
+      } else if (OB_ISNULL(column_idxs = cg_schema.column_idxs_)) {
+        ret = OB_ERR_UNEXPECTED;
+        STORAGE_LOG(WARN, "invalid empty cg", K(ret), K(cg_schema));
+      } else if (column_idxs[0] == column_idx) {
+        cg_idx = i;
+      }
+    }
+    if (OB_SUCC(ret) && (OB_INVALID_INDEX == cg_idx)) {
+      ret = OB_ERR_UNEXPECTED;
+      STORAGE_LOG(WARN, "failed to find column group", K(ret), K(column_id), K(column_idx), K(column_group_array_));
+    }
   }
 
   return ret;
@@ -1497,6 +1580,7 @@ int ObStorageSchema::init_column_meta_array(
 
 int ObStorageSchema::get_orig_default_row(
     const common::ObIArray<ObColDesc> &column_ids,
+    bool need_trim,
     blocksstable::ObDatumRow &default_row) const
 {
   int ret = OB_SUCCESS;
@@ -1517,10 +1601,28 @@ int ObStorageSchema::get_orig_default_row(
         STORAGE_LOG(WARN, "column id not found", K(ret), K(column_ids.at(i)));
       } else if (OB_FAIL(default_row.storage_datums_[i].from_obj_enhance(col_schema->get_orig_default_value()))) {
         STORAGE_LOG(WARN, "Failed to transfer obj to datum", K(ret));
+      } else if (need_trim && col_schema->get_orig_default_value().is_fixed_len_char_type()) {
+        trim(col_schema->get_orig_default_value().get_collation_type(), default_row.storage_datums_[i]);
       }
     }
   }
   return ret;
+}
+
+void ObStorageSchema::trim(const ObCollationType type, blocksstable::ObStorageDatum &storage_datum) const
+{
+    const char *str = storage_datum.ptr_;
+    int32_t len = storage_datum.len_;
+    ObString space_pattern = ObCharsetUtils::get_const_str(type, ' ');
+
+    for (; len >= space_pattern.length(); len -= space_pattern.length()) {
+      if (0 != MEMCMP(str + len - space_pattern.length(),
+            space_pattern.ptr(),
+            space_pattern.length())) {
+        break;
+      }
+    }
+    storage_datum.len_ = len;
 }
 
 const ObStorageColumnSchema *ObStorageSchema::get_column_schema(const int64_t column_idx) const
@@ -1620,9 +1722,7 @@ int ObCreateTabletSchema::serialize(char *buf, const int64_t buf_len, int64_t &p
   LST_DO_CODE(OB_UNIS_ENCODE,
               table_id_,
               index_status_,
-              truncate_version_,
-              tenant_data_version_,
-              need_create_empty_major_);
+              truncate_version_);
   return ret;
 }
 
@@ -1635,9 +1735,7 @@ int ObCreateTabletSchema::deserialize(common::ObIAllocator &allocator, const cha
     LST_DO_CODE(OB_UNIS_DECODE,
                 table_id_,
                 index_status_,
-                truncate_version_,
-                tenant_data_version_,
-                need_create_empty_major_);
+                truncate_version_);
   }
   return ret;
 }
@@ -1648,9 +1746,7 @@ int64_t ObCreateTabletSchema::get_serialize_size() const
   LST_DO_CODE(OB_UNIS_ADD_LEN,
               table_id_,
               index_status_,
-              truncate_version_,
-              tenant_data_version_,
-              need_create_empty_major_);
+              truncate_version_);
   return len;
 }
 
@@ -1659,9 +1755,7 @@ int ObCreateTabletSchema::init(
     const share::schema::ObTableSchema &input_schema,
     const lib::Worker::CompatMode compat_mode,
     const bool skip_column_info,
-    const int64_t compat_version,
-    const uint64_t tenant_data_version,
-    const bool need_create_empty_major)
+    const int64_t compat_version)
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(ObStorageSchema::init(allocator, input_schema, compat_mode, skip_column_info, compat_version))) {
@@ -1670,8 +1764,6 @@ int ObCreateTabletSchema::init(
     table_id_ = input_schema.get_table_id();
     index_status_ = input_schema.get_index_status();
     truncate_version_ = input_schema.get_truncate_version();
-    tenant_data_version_ = tenant_data_version;
-    need_create_empty_major_ = need_create_empty_major;
   }
   return ret;
 }
@@ -1687,8 +1779,6 @@ int ObCreateTabletSchema::init(
     table_id_ = old_schema.get_table_id();
     index_status_ = old_schema.get_index_status();
     truncate_version_ = old_schema.get_truncate_version();
-    tenant_data_version_ = old_schema.get_tenant_data_version();
-    need_create_empty_major_ = old_schema.get_need_create_empty_major();
   }
   return ret;
 }

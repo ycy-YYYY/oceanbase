@@ -238,7 +238,8 @@ int ObInsertTableInfo::iterate_stmt_expr(ObStmtExprVisitor &visitor)
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("get unexpected null", K(ret));
     } else if ((values_vector_.at(i)->has_flag(CNT_SUB_QUERY) ||
-                values_vector_.at(i)->has_flag(CNT_ONETIME)) &&
+                values_vector_.at(i)->has_flag(CNT_ONETIME) ||
+                values_vector_.at(i)->has_flag(CNT_PL_UDF)) &&
                OB_FAIL(visitor.visit(values_vector_.at(i), SCOPE_INSERT_VECTOR))) {
       LOG_WARN("failed to add expr to expr checker", K(ret));
     } else { /*do nothing*/ }
@@ -419,6 +420,7 @@ int ObDelUpdStmt::deep_copy_stmt_struct(ObIAllocator &allocator,
     ignore_ = other.ignore_;
     has_global_index_ = other.has_global_index_;
     has_instead_of_trigger_ = other.has_instead_of_trigger_;
+    pdml_disabled_ = other.pdml_disabled_;
   }
   return ret;
 }
@@ -443,6 +445,7 @@ int ObDelUpdStmt::assign(const ObDelUpdStmt &other)
     has_global_index_ = other.has_global_index_;
     has_instead_of_trigger_ = other.has_instead_of_trigger_;
     ab_stmt_id_expr_ = other.ab_stmt_id_expr_;
+    pdml_disabled_ = other.pdml_disabled_;
   }
   return ret;
 }
@@ -561,8 +564,7 @@ int ObDelUpdStmt::update_base_tid_cid()
 
         if (OB_SUCC(ret) && dml_table->loc_table_id_ != base_tid) {
           for (int64_t k = 0; OB_SUCC(ret) && k < part_expr_items_.count(); ++k) {
-            if (part_expr_items_.at(k).table_id_ == dml_table->loc_table_id_ &&
-                part_expr_items_.at(k).index_tid_ == dml_table->ref_table_id_) {
+            if (part_expr_items_.at(k).table_id_ == dml_table->loc_table_id_) {
               part_expr_items_.at(k).table_id_ = base_tid;
             }
           }

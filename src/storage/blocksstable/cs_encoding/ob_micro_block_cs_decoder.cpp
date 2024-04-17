@@ -13,6 +13,7 @@
 #define USING_LOG_PREFIX STORAGE
 
 #include "ob_micro_block_cs_decoder.h"
+#include "common/sql_mode/ob_sql_mode_utils.h"
 #include "lib/container/ob_array_iterator.h"
 #include "ob_dict_column_decoder.h"
 #include "ob_integer_column_decoder.h"
@@ -82,12 +83,12 @@ void ObCSDecoderCtxArray::reset()
     ObDecodeResourcePool *decode_res_pool = MTL(ObDecodeResourcePool*);
     if (OB_ISNULL(decode_res_pool)) {
       ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("NULL tenant decode resource pool", K(ret));
+      LOG_ERROR("NULL tenant decode resource pool", K(ret));
     } else {
       FOREACH(it, ctx_blocks_) {
         ObColumnCSDecoderCtxBlock *ctx_block = *it;
         if (OB_FAIL(decode_res_pool->free(ctx_block))) {
-          LOG_WARN("failed to free cs decoder ctx block", K(ret));
+          LOG_WARN("failed to free cs decoder ctx block", K(ret), KP(ctx_block));
         }
       }
       ctx_blocks_.reset();
@@ -118,15 +119,22 @@ int ObCSDecoderCtxArray::get_ctx_array(ObColumnCSDecoderCtx **&ctxs, int64_t siz
       if (OB_FAIL(decode_res_pool->alloc(ctx_block))) {
         LOG_WARN("alloc cs decoder ctx block failed", K(ret), K(i), K(need_block_count));
       } else if (OB_FAIL(ctx_blocks_.push_back(ctx_block))) {
-        LOG_WARN("cs ctx block array push back failed", K(ret));
+        LOG_WARN("cs ctx block array push back failed", K(ret), KP(ctx_block));
+        int tmp_ret = OB_SUCCESS;
+        if (OB_TMP_FAIL(decode_res_pool->free(ctx_block))) {
+          LOG_ERROR("failed to free cs decoder ctx block", K(tmp_ret), KP(ctx_block));
+        } else {
+          ctx_block = NULL;
+        }
       } else {
         for (int64_t j = 0; OB_SUCC(ret) && j < ObColumnCSDecoderCtxBlock::CS_CTX_NUMS; ++j) {
           if (OB_FAIL(ctxs_.push_back(&ctx_block->ctxs_[j]))) {
-            LOG_WARN("cs ctx array push back failed", K(ret));
+            LOG_WARN("cs ctx array push back failed", K(ret), K(j), KP(ctx_block));
           }
         }
       }
     }
+
     if (OB_SUCC(ret)) {
       ctxs = &ctxs_.at(0);
     }
@@ -216,7 +224,7 @@ int ObColumnCSDecoder::quick_compare(const ObStorageDatum &left,
 /////////////////////// acquire decoder from local ///////////////////////
 typedef int (*local_decode_acquire_func)(ObCSDecoderPool &local_decoder_pool,
                                    const ObIColumnCSDecoder *&decoder);
-typedef void(*local_decode_release_func)(ObCSDecoderPool &local_decoder_pool,
+typedef int(*local_decode_release_func)(ObCSDecoderPool &local_decoder_pool,
                                    ObIColumnCSDecoder *decoder);
 
 static local_decode_acquire_func acquire_local_funcs_[ObCSColumnHeader::MAX_TYPE] = {
@@ -252,15 +260,20 @@ int acquire_local_decoder(ObCSDecoderPool &local_decoder_pool, const ObIColumnCS
 }
 
 template <class Decoder>
-void release_local_decoder(ObCSDecoderPool &local_decoder_pool, ObIColumnCSDecoder *decoder)
+int release_local_decoder(ObCSDecoderPool &local_decoder_pool, ObIColumnCSDecoder *decoder)
 {
+  int ret = OB_SUCCESS;
+  Decoder *d = nullptr;
   if (nullptr == decoder) {
     //do nothing
+  } else if (FALSE_IT(d = static_cast<Decoder *>(decoder))) {
+  } else if (OB_FAIL(local_decoder_pool.free<Decoder>(d))) {
+    LOG_ERROR("failed to free cs decoder", K(ret), "type", decoder->get_type(), KP(d));
   } else {
-    Decoder* d = static_cast<Decoder *>(decoder);
-    local_decoder_pool.free<Decoder>(d);
+    d = nullptr;
     decoder = nullptr;
   }
+  return ret;
 }
 
 //////////////////////////ObIEncodeBlockGetReader/////////////////////////
@@ -280,7 +293,7 @@ ObICSEncodeBlockReader::ObICSEncodeBlockReader()
 
 ObICSEncodeBlockReader::~ObICSEncodeBlockReader()
 {
-  free_decoders();
+  (void)free_decoders();
   ctx_array_.reset();
   if (NULL != local_decoder_pool_) {
     local_decoder_pool_->reset();
@@ -290,7 +303,7 @@ ObICSEncodeBlockReader::~ObICSEncodeBlockReader()
 
 void ObICSEncodeBlockReader::reuse()
 {
-  free_decoders();
+  (void)free_decoders();
   cached_decocer_ = nullptr;
   request_cnt_ = 0;
   decoders_ = nullptr;
@@ -305,7 +318,7 @@ void ObICSEncodeBlockReader::reuse()
 
 void ObICSEncodeBlockReader::reset()
 {
-  free_decoders();
+  (void)free_decoders();
   cached_decocer_ = NULL;
   request_cnt_ = 0;
   decoders_ = nullptr;
@@ -324,16 +337,23 @@ void ObICSEncodeBlockReader::reset()
   buf_allocator_.reset();
 }
 
-void ObICSEncodeBlockReader::free_decoders()
+int ObICSEncodeBlockReader::free_decoders()
 {
+  int ret = OB_SUCCESS;
+  int tmp_ret = OB_SUCCESS;
   if (nullptr != need_release_decoders_) {
     for (int64_t i = 0; i < need_release_decoder_cnt_; ++i) {
-      release_local_funcs_[need_release_decoders_[i]->get_type()]
-          (*local_decoder_pool_, const_cast<ObIColumnCSDecoder *>(need_release_decoders_[i]));
+      if (OB_TMP_FAIL(release_local_funcs_[need_release_decoders_[i]->get_type()]
+          (*local_decoder_pool_, const_cast<ObIColumnCSDecoder *>(need_release_decoders_[i])))) {
+        ret = tmp_ret;
+        LOG_ERROR("failed to free cs decoder", K(tmp_ret), K(i), K(need_release_decoder_cnt_),
+            "type", need_release_decoders_[i]->get_type(), KP(need_release_decoders_[i]));
+      }
     }
     need_release_decoders_ = nullptr;
   }
   need_release_decoder_cnt_ = 0;
+  return ret;
 }
 
 int ObICSEncodeBlockReader::prepare(const uint64_t tenant_id, const int64_t column_cnt)
@@ -792,32 +812,40 @@ int ObMicroBlockCSDecoder::acquire(const int64_t store_idx, const ObIColumnCSDec
       LOG_WARN("acquire decoder failed", K(ret), K(store_idx), K(col_header));
     } else if (OB_FAIL(need_release_decoders_.push_back(decoder))) {
       LOG_WARN("add decoder failed", K(ret), K(store_idx), K(col_header));
+      int tmp_ret = OB_SUCCESS;
+      if (OB_TMP_FAIL(release_local_funcs_[decoder->get_type()]
+          (*local_decoder_pool_, const_cast<ObIColumnCSDecoder *>(decoder)))) {
+        LOG_ERROR("failed to free decoder", K(tmp_ret), "type", decoder->get_type(), KP(decoder));
+      } else {
+        decoder = nullptr;
+      }
     } else {
       ++need_release_decoder_cnt_;
-    }
-
-    if (OB_FAIL(ret) && decoder != nullptr) {
-      release_local_funcs_[decoder->get_type()]
-          (*local_decoder_pool_, const_cast<ObIColumnCSDecoder *>(decoder));
-      decoder = nullptr;
     }
   }
   return ret;
 }
 
-void ObMicroBlockCSDecoder::free_decoders()
+int ObMicroBlockCSDecoder::free_decoders()
 {
+  int ret = OB_SUCCESS;
+  int tmp_ret = OB_SUCCESS;
   for (int64_t i = 0; i < need_release_decoder_cnt_; ++i) {
-    release_local_funcs_[need_release_decoders_[i]->get_type()]
-        (*local_decoder_pool_, const_cast<ObIColumnCSDecoder *>(need_release_decoders_[i]));
+    if (OB_TMP_FAIL(release_local_funcs_[need_release_decoders_[i]->get_type()]
+        (*local_decoder_pool_, const_cast<ObIColumnCSDecoder *>(need_release_decoders_[i])))) {
+      ret = tmp_ret;
+      LOG_ERROR("failed to free cs decoder", K(tmp_ret), K(i), K(need_release_decoder_cnt_),
+          "type", need_release_decoders_[i]->get_type(), KP(need_release_decoders_[i]));
+    }
   }
   need_release_decoders_.clear();
   need_release_decoder_cnt_ = 0;
+  return ret;
 }
 
 void ObMicroBlockCSDecoder::inner_reset()
 {
-  free_decoders();
+  (void)free_decoders();
   cached_decoder_ = nullptr;
   ctxs_ = NULL;
   column_count_ = 0;
@@ -883,7 +911,10 @@ int ObMicroBlockCSDecoder::init_decoders()
     }
 
     if (OB_FAIL(ret)) {
-      free_decoders();
+      int tmp_ret = OB_SUCCESS;
+      if (OB_TMP_FAIL(free_decoders())) {
+        LOG_ERROR("fail to free cs decoders", K(tmp_ret));
+      }
     }
   }
 
@@ -1340,7 +1371,7 @@ int ObMicroBlockCSDecoder::filter_pushdown_filter(
         }
         bool filtered = false;
         if (OB_SUCC(ret)) {
-          if (OB_FAIL(filter.filter(datum_buf, col_count, filtered))) {
+          if (OB_FAIL(filter.filter(datum_buf, col_count, *pd_filter_info.skip_bit_, filtered))) {
             LOG_WARN("Failed to filter row with black filter", K(ret), "datum_buf",
               common::ObArrayWrap<ObStorageDatum>(datum_buf, col_count));
           } else if (!filtered) {
@@ -1406,8 +1437,7 @@ int ObMicroBlockCSDecoder::filter_pushdown_filter(
     col_cs_decoder->ctx_->get_base_ctx().set_col_param(col_params.at(0));
     if (filter.null_param_contained()
         && (op_type != sql::WHITE_OP_NU)
-        && (op_type != sql::WHITE_OP_NN)
-        && (op_type != sql::WHITE_OP_IN)) {
+        && (op_type != sql::WHITE_OP_NN)) {
     } else if (!transform_helper_.get_micro_block_header()->all_lob_in_row_) {
       // In the column store scenario, the pushdown row range is split by row store.
       // This means that the row store has determined that there is no out_row lob,
@@ -1482,7 +1512,7 @@ int ObMicroBlockCSDecoder::filter_pushdown_retro(const sql::ObPushdownFilterExec
 
         bool filtered = false;
         if (OB_FAIL(ret)) {
-        } else if (OB_FAIL(filter_white_filter(filter, obj_meta, decoded_datum, filtered))) {
+        } else if (OB_FAIL(filter_white_filter(filter, decoded_datum, filtered))) {
           LOG_WARN("Failed to filter row with white filter", K(ret), K(row_id), K(decoded_datum));
         } else if (!filtered && OB_FAIL(result_bitmap.set(offset))) {
           LOG_WARN("Failed to set result bitmap", K(ret), K(offset));
@@ -1612,6 +1642,38 @@ int ObMicroBlockCSDecoder::get_column_datum(
   return ret;
 }
 
+bool ObMicroBlockCSDecoder::can_pushdown_decoder(
+    const ObColumnCSDecoderCtx &ctx,
+    const int64_t *row_ids,
+    const int64_t row_cap,
+    const ObAggCell &agg_cell) const
+{
+  bool bret = false;
+  const ObPDAggType agg_type = agg_cell.get_type();
+  switch (ctx.type_) {
+    case ObCSColumnHeader::INTEGER : {
+      const ObIntegerColumnDecoderCtx &integer_ctx = ctx.integer_ctx_;
+      bool is_col_signed = false;
+      const ObObjType store_col_type = integer_ctx.col_header_->get_store_obj_type();
+      const bool can_convert = ObCSDecodingUtil::can_convert_to_integer(store_col_type, is_col_signed);
+      const int64_t row_gap = std::abs(row_ids[0] - row_ids[row_cap - 1] + 1);
+      bret = ((PD_MIN == agg_type || PD_MAX == agg_type) &&
+              row_cap == row_gap &&
+              can_convert);
+      break;
+    }
+    case ObCSColumnHeader::INT_DICT:
+    case ObCSColumnHeader::STR_DICT: {
+      bret = (PD_MIN == agg_type || PD_MAX == agg_type || PD_HLL == agg_type);
+      break;
+    }
+    default: {
+      bret = false;
+    }
+  }
+  return bret;
+}
+
 int ObMicroBlockCSDecoder::get_aggregate_result(
     const ObTableIterParam &iter_param,
     const ObTableAccessContext &context,
@@ -1624,16 +1686,46 @@ int ObMicroBlockCSDecoder::get_aggregate_result(
 {
   int ret = OB_SUCCESS;
   decoder_allocator_.reuse();
-  ObDatum *datum_buf = agg_datum_buf.get_datums();
-  if (OB_FAIL(get_col_datums(col_offset, row_ids, row_cap, datum_buf))) {
-    LOG_WARN("fail to get col datums", KR(ret), K(col_offset), K(row_cap));
-  } else if (col_param.get_meta_type().is_lob_storage() && transform_helper_.get_micro_block_header()->has_lob_out_row() &&
-             OB_FAIL(fill_datums_lob_locator(iter_param, context, col_param, row_cap, datum_buf))) {
-    LOG_WARN("Fail to fill lob locator", K(ret));
-  } else if (OB_FAIL(agg_cell.eval_batch(datum_buf, row_cap))) {  // TODO @donglou.zl can pushdown into decoder.
-    LOG_WARN("Failed to eval batch", K(ret));
+  ObColumnCSDecoder *column_decoder = nullptr;
+  if (OB_UNLIKELY(nullptr == row_ids || row_cap <= 0)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("Invalid arguments to get aggregate result", K(ret), KP(row_ids), K(row_cap));
+  } else if (OB_ISNULL(column_decoder = decoders_ + col_offset)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("Column decoder is null", K(ret), K(col_offset));
+  } else {
+    ObDatum *datum_buf = agg_datum_buf.get_datums();
+    const bool can_pushdown = !(col_param.get_meta_type().is_lob_storage() && has_lob_out_row()) &&
+                              can_pushdown_decoder(*column_decoder->ctx_, row_ids, row_cap, agg_cell);
+    if (can_pushdown) {
+      if (OB_FAIL(column_decoder->decoder_->get_aggregate_result(
+                  *column_decoder->ctx_,
+                  row_ids,
+                  row_cap,
+                  agg_cell))) {
+        LOG_WARN("Failed to get aggregate result", K(ret), K(col_offset));
+      }
+    } else {
+      const bool need_padding = is_pad_char_to_full_length(context.sql_mode_) &&
+                            col_param.get_meta_type().is_fixed_len_char_type();
+      if (OB_FAIL(get_col_datums(col_offset, row_ids, row_cap, datum_buf))) {
+        LOG_WARN("fail to get col datums", KR(ret), K(col_offset), K(row_cap));
+      } else if (need_padding && OB_FAIL(storage::pad_on_datums(
+                                         col_param.get_accuracy(),
+                                         col_param.get_meta_type().get_collation_type(),
+                                         decoder_allocator_.get_inner_allocator(),
+                                         row_cap,
+                                         datum_buf))) {
+        LOG_WARN("fail to pad on datums", K(ret), K(row_cap));
+      } else if (col_param.get_meta_type().is_lob_storage() && has_lob_out_row() &&
+                OB_FAIL(fill_datums_lob_locator(iter_param, context, col_param, row_cap, datum_buf))) {
+        LOG_WARN("Fail to fill lob locator", K(ret));
+      } else if (OB_FAIL(agg_cell.eval_batch(datum_buf, row_cap))) {  // TODO @donglou.zl can pushdown into decoder.
+        LOG_WARN("Failed to eval batch", K(ret));
+      }
+    }
+    LOG_DEBUG("get_aggregate_result", K(ret), K(can_pushdown), K(agg_cell));
   }
-  LOG_DEBUG("get_aggregate_result", K(ret), K(agg_cell));
   return ret;
 }
 

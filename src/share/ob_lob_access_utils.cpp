@@ -560,6 +560,14 @@ int ObTextStringIter::get_next_block_inner(ObString &str)
         COMMON_LOG(WARN,"Lob: falied to get first block.", K(ret));
       }
     } else {
+      // if put backward, we should compact buffer remain and move reserved part closed to the reading value
+      if (output_data.remain() > 0 && ctx_->is_backward_ && ctx_->reserved_byte_len_ > 0) {
+        // from :[0, output_data.length_][output_data.length_, output_data.buffer_size_][reserved_part]
+        // to   :[0, output_data.length_][reserved_part]
+        MEMMOVE(output_data.ptr() + output_data.length(),
+                output_data.ptr() + output_data.length() + output_data.remain(),
+                ctx_->reserved_byte_len_);
+      }
       ctx_->content_byte_len_ = ctx_->reserved_byte_len_ + output_data.length();
       // ToDo: @gehao get directly from lob mngr ?
       uint32 cur_out_len = static_cast<uint32_t>(ObCharset::strlen_char(cs_type_,
@@ -569,7 +577,7 @@ int ObTextStringIter::get_next_block_inner(ObString &str)
       ctx_->last_accessed_byte_len_ = ctx_->accessed_byte_len_;
       ctx_->last_accessed_len_ = ctx_->accessed_len_;
       ctx_->accessed_byte_len_ += output_data.length();
-      ctx_->accessed_len_ += cur_out_len;\
+      ctx_->accessed_len_ += cur_out_len;
       ctx_->iter_count_++;
       str.assign_ptr(ctx_->buff_, ctx_->content_byte_len_);
     }
@@ -658,7 +666,7 @@ void ObTextStringIter::set_reserved_byte_len(uint32_t reserved_byte_len)
 
 void ObTextStringIter::reset_reserve_len()
 {
-  if (is_valid_for_config()) {
+  if (is_valid_for_config(TEXTSTRING_ITER_NEXT)) {
     ctx_->reserved_byte_len_ = 0;
     ctx_->reserved_len_ = 0;
   }
@@ -1048,6 +1056,61 @@ int ObTextStringResult::calc_buffer_len(int64_t res_len)
       LOG_WARN("Lob: out row temp lob not implemented, not support length bigger than 512M",
         K(ret), K(this), K(pos_), K(buff_len_), K(res_len));
     }
+  }
+  return ret;
+}
+
+int ObTextStringResult::calc_inrow_templob_len(uint32 inrow_data_len, int64_t &templob_len)
+{
+  int ret = OB_SUCCESS;
+  if (inrow_data_len < OB_MAX_LONGTEXT_LENGTH - MAX_TMP_LOB_HEADER_LEN) {
+    bool has_extern = lib::is_oracle_mode();
+    ObMemLobExternFlags extern_flags(has_extern);
+    inrow_data_len += sizeof(ObLobCommon);
+    templob_len = ObLobLocatorV2::calc_locator_full_len(extern_flags, 0, inrow_data_len, false);
+  } else {
+    ret = OB_NOT_SUPPORTED;
+    LOG_WARN("Lob: not support length bigger than 512M", K(ret), K(inrow_data_len));
+  }
+  return ret;
+}
+
+int64_t ObTextStringResult::calc_inrow_templob_locator_len()
+{
+  ObMemLobExternFlags extern_flags(lib::is_oracle_mode());
+  return static_cast<int64_t>(ObLobLocatorV2::calc_locator_full_len(extern_flags, 0, 0, false));
+}
+
+int ObTextStringResult::fill_inrow_templob_header(const int64_t inrow_data_len, char *buf, int64_t buf_len)
+{
+  int ret = OB_SUCCESS;
+
+  if (OB_ISNULL(buf) || (buf_len == 0)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("Lob: try to fill inrow templob header with empty buffer",
+             K(ret), K(inrow_data_len), K(buf), K(buf_len));
+  } else if (inrow_data_len <= OB_MAX_LONGTEXT_LENGTH - MAX_TMP_LOB_HEADER_LEN) {
+    ObLobLocatorV2 locator(buf, static_cast<uint32_t>(buf_len), true);
+    // temp lob in oracle mode not need extern neither, for it does not have rowkey
+    // However we mock extern failed in case of return it to old client
+    ObMemLobExternFlags extern_flags(lib::is_oracle_mode());
+    ObString rowkey_str;
+    ObString empty_str;
+    ObLobCommon lob_common;
+    if (OB_FAIL(locator.fill(TEMP_FULL_LOB,
+                             extern_flags,
+                             rowkey_str,
+                             &lob_common,
+                             static_cast<uint32_t>(inrow_data_len + sizeof(ObLobCommon)),
+                             0,
+                             false))) {
+      LOG_WARN("Lob: fill temp lob locator failed", K(ret), K(inrow_data_len), K(buf), K(buf_len));
+    } else if (OB_FAIL((locator.set_payload_data(&lob_common, empty_str)))) {
+      LOG_WARN("Lob: set temp lob locator payload failed", K(ret), K(inrow_data_len), K(buf), K(buf_len));
+    }
+  } else { // oversized
+    ret = OB_NOT_SUPPORTED;
+    LOG_WARN("Lob: not support length bigger than 512M", K(ret), K(inrow_data_len), K(buf), K(buf_len));
   }
   return ret;
 }

@@ -272,6 +272,7 @@ public:
     return res;
   }
   inline const ObString get_string() const { return ObString(len_, ptr_); }
+  inline const ObString get_json() const { return get_string(); }
   inline int get_enumset_inner(ObEnumSetInnerValue &inner_value) const
   {
     int64_t pos = 0;
@@ -862,7 +863,8 @@ inline int ObDatum::from_obj(const ObObj &obj)
       case ObLobType:
       case ObJsonType:
       case ObGeometryType:
-      case ObUserDefinedSQLType: {
+      case ObUserDefinedSQLType:
+      case ObCollectionSQLType: {
         obj2datum<OBJ_DATUM_STRING>(obj);
         break;
       }
@@ -1007,7 +1009,8 @@ inline int ObDatum::to_obj(ObObj &obj, const ObObjMeta &meta) const
       case ObLobType:
       case ObJsonType:
       case ObGeometryType:
-      case ObUserDefinedSQLType: {
+      case ObUserDefinedSQLType:
+      case ObCollectionSQLType: {
         datum2obj<OBJ_DATUM_STRING>(obj);
         break;
       }
