@@ -393,7 +393,10 @@ int ObSortVecOpImpl<Compare, Store_Row, has_addon>::add_batch(const ObBatchRows 
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(use_heap_sort_ && need_dump())) {
-    if (OB_FAIL(do_dump())) {
+    bool dumped = false;
+    if (OB_FAIL(preprocess_dump(dumped))) {
+      SQL_ENG_LOG(WARN, "failed preprocess dump", K(ret));
+    } else if (dumped && OB_FAIL(do_dump())) {
       SQL_ENG_LOG(WARN, "failed to do topn dump", K(ret));
     }
   }
@@ -1156,6 +1159,11 @@ int ObSortVecOpImpl<Compare, Store_Row, has_addon>::preprocess_dump(bool &dumped
                   K(profile_.get_expect_size()), K(sql_mem_processor_.get_data_size()));
     }
   }
+  if (OB_SUCC(ret) && dumped && OB_NOT_NULL(rows_) && rows_->empty()) {
+    dumped = false; //no data to dump, try to add a batch of data directly
+    LOG_TRACE("Insufficient memory, unable to store a batch of data", K(mem_context_->used()), K(get_memory_limit()),
+                  K(profile_.get_cache_size()), K(profile_.get_expect_size()));
+  }
   return ret;
 }
 
@@ -1417,7 +1425,7 @@ int ObSortVecOpImpl<Compare, Store_Row, has_addon>::sort_inmem_data()
         }
       }
       if (part_cnt_ > 0) {
-        do_partition_sort(*sk_row_meta_, *rows_, begin, rows_->count());
+        OZ(do_partition_sort(*sk_row_meta_, *rows_, begin, rows_->count()));
       } else if (enable_encode_sortkey_) {
         bool can_encode = true;
         ObAdaptiveQS<Store_Row> aqs(*rows_, *sk_row_meta_, mem_context_->get_malloc_allocator());

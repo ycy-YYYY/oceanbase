@@ -321,7 +321,7 @@ int ObAllocExprContext::add(const ExprProducer &producer)
   if (OB_FAIL(expr_producers_.push_back(producer))) {
     LOG_WARN("failed to push back producer", K(ret));
   } else if (expr_producers_.count() == 1 &&
-             expr_map_.create(128, "ExprAlloc")) {
+             OB_FAIL(expr_map_.create(128, "ExprAlloc"))) {
     LOG_WARN("failed to init hash map", K(ret));
   } else if (OB_FAIL(expr_map_.set_refactored(reinterpret_cast<uint64_t>(producer.expr_),
                                               expr_producers_.count() - 1))) {
@@ -1068,7 +1068,7 @@ int ObLogicalOperator::compute_property(Path *path)
     if (OB_FAIL(server_list_.assign(path->server_list_))) {
       LOG_WARN("failed to assign path's server list to op", K(ret));
     } else if (OB_FAIL(check_property_valid())) {
-      LOG_WARN("failed to check property valid", K(ret));
+      LOG_WARN("failed to check property valid", K(ret), KPC(path));
     } else {
       LOG_TRACE("compute property finished",
                 K(get_op_name(type_)),
@@ -2145,7 +2145,8 @@ int ObLogicalOperator::extract_shared_exprs(ObRawExpr *raw_expr,
     LOG_WARN("failed to add var to array", K(ret));
   }
 
-  if (!ObOptimizerUtil::find_item(ctx.inseparable_exprs_, raw_expr)) {
+  if (!ObOptimizerUtil::find_item(ctx.inseparable_exprs_, raw_expr) &&
+      !raw_expr->is_match_against_expr()) {
     for (int64_t i = 0; OB_SUCC(ret) && i < raw_expr->get_param_count(); ++i) {
       ret = SMART_CALL(extract_shared_exprs(raw_expr->get_param_expr(i),
                                             ctx,
@@ -3693,8 +3694,26 @@ int ObLogicalOperator::set_plan_root_output_exprs()
   } else if (stmt->is_select_stmt()) {
     const ObSelectStmt *sel_stmt = static_cast<const ObSelectStmt*>(get_stmt());
     bool is_unpivot = (LOG_UNPIVOT == type_ && sel_stmt->is_unpivot_select());
-    if (OB_FAIL(sel_stmt->get_select_exprs(output_exprs_, is_unpivot))) {
+    uint64_t min_cluster_version = GET_MIN_CLUSTER_VERSION();
+    if (!sel_stmt->has_select_into() && OB_FAIL(sel_stmt->get_select_exprs(output_exprs_, is_unpivot))) {
       LOG_WARN("failed to get select exprs", K(ret));
+    } else if (((min_cluster_version >= CLUSTER_VERSION_4_2_2_0
+                 && min_cluster_version < CLUSTER_VERSION_4_3_0_0)
+                || (min_cluster_version >= CLUSTER_VERSION_4_3_1_0))
+               && is_oracle_mode() && OB_NOT_NULL(this->parent_)
+               && LOG_SET == this->parent_->type_) {
+      ObLogSet *set_op = static_cast<ObLogSet *>(this->parent_);
+      if (this == this->parent_->child_[1] &&
+              set_op->is_recursive_union() && set_op->is_breadth_search()) {
+        ObRawExpr *identify_seq_expr =  nullptr;
+        if (OB_FAIL(ObOptimizerUtil::allocate_identify_seq_expr(get_plan(), identify_seq_expr))) {
+          LOG_WARN("allocate identify seq expr failed", K(ret));
+        } else if (OB_FAIL(output_exprs_.push_back(identify_seq_expr))) {
+          LOG_WARN("failed to push identify seq expr into output", K(ret));
+        } else {
+          set_op->set_identify_seq_expr(identify_seq_expr);
+        }
+      }
     } else { /*do nothing*/ }
   } else if (stmt->is_returning()) {
     const ObDelUpdStmt *del_upd_stmt = static_cast<const ObDelUpdStmt *>(stmt);
@@ -3897,8 +3916,33 @@ int ObLogicalOperator::explain_print_partitions(ObTablePartitionInfo &table_part
       OZ(part_infos.push_back(part_info));
     } else {
       const ObTabletID &tablet_id = part_loc.get_tablet_id();
-      OZ(table_schema->get_part_idx_by_tablet(tablet_id, part_info.part_id_, part_info.subpart_id_));
-      OZ(part_infos.push_back(part_info));
+      if (table_schema->is_external_table()) {
+        for (int64_t j = 0; OB_SUCC(ret) && j < table_schema->get_partition_num(); j++) {
+          if (OB_ISNULL(table_schema->get_part_array())) {
+            ret = OB_INVALID_ARGUMENT;
+            LOG_WARN("table shcema is invalid", K(ret));
+          } else {
+            ObPartition *partition = table_schema->get_part_array()[j];
+            if (OB_ISNULL(partition)) {
+              ret = OB_ERR_UNEXPECTED;
+              LOG_WARN("unexpected error", K(ret));
+            } else if (partition->get_part_id() == part_loc.get_partition_id()) {
+              part_info.part_id_ = j;
+            }
+            LOG_TRACE("show external table partition", K(tablet_id), KPC(partition), K(partitions.at(i)), K(part_info));
+          }
+        }
+        OZ(part_infos.push_back(part_info));
+      } else {
+        OZ(table_schema->get_part_idx_by_tablet(tablet_id, part_info.part_id_, part_info.subpart_id_));
+        OZ(part_infos.push_back(part_info));
+      }
+      // if (OB_FAIL(ret) || part_info.part_id_ == OB_INVALID_INDEX) {
+      //   //do nothing
+      // } else if (!table_schema->is_external_table() || common::ObTabletID::INVALID_TABLET_ID == tablet_id.id()) {
+      //   //do nothing
+      // } else {
+      // }
       LOG_TRACE("explain print partition", K(tablet_id), K(part_info), K(ref_table_id));
     }
   }
@@ -4265,18 +4309,22 @@ int ObLogicalOperator::allocate_granule_nodes_above(AllocGIContext &ctx)
         gi_op->add_flag(GI_AFFINITIZE);
         gi_op->add_flag(GI_PARTITION_WISE);
       }
-      if (LOG_TABLE_SCAN == get_type() &&
-          static_cast<ObLogTableScan *>(this)->get_join_filter_info().is_inited_) {
-        ObLogTableScan *table_scan = static_cast<ObLogTableScan*>(this);
-        ObOpPseudoColumnRawExpr *tablet_id_expr = NULL;
-        if (OB_FAIL(generate_pseudo_partition_id_expr(tablet_id_expr))) {
-          LOG_WARN("fail alloc partition id expr", K(ret));
-        } else {
-          gi_op->set_tablet_id_expr(tablet_id_expr);
-          gi_op->set_join_filter_info(table_scan->get_join_filter_info());
-          ObLogJoinFilter *jf_create_op = gi_op->get_join_filter_info().log_join_filter_create_op_;
-          jf_create_op->set_paired_join_filter(gi_op);
-          gi_op->add_flag(GI_USE_PARTITION_FILTER);
+      if (LOG_TABLE_SCAN == get_type()) {
+        if (static_cast<ObLogTableScan*>(this)->is_text_retrieval_scan()) {
+          gi_op->add_flag(GI_FORCE_PARTITION_GRANULE);
+        }
+        if (static_cast<ObLogTableScan *>(this)->get_join_filter_info().is_inited_) {
+          ObLogTableScan *table_scan = static_cast<ObLogTableScan*>(this);
+          ObOpPseudoColumnRawExpr *tablet_id_expr = NULL;
+          if (OB_FAIL(generate_pseudo_partition_id_expr(tablet_id_expr))) {
+            LOG_WARN("fail alloc partition id expr", K(ret));
+          } else {
+            gi_op->set_tablet_id_expr(tablet_id_expr);
+            gi_op->set_join_filter_info(table_scan->get_join_filter_info());
+            ObLogJoinFilter *jf_create_op = gi_op->get_join_filter_info().log_join_filter_create_op_;
+            jf_create_op->set_paired_join_filter(gi_op);
+            gi_op->add_flag(GI_USE_PARTITION_FILTER);
+          }
         }
       } else if (LOG_GROUP_BY == get_type()) {
         if (static_cast<ObLogGroupBy*>(this)->force_partition_gi()) {

@@ -35,6 +35,7 @@
 #include "sql/engine/expr/ob_expr_plsql_variable.h"
 #include "share/resource_manager/ob_resource_manager_proxy.h"
 #include "sql/engine/expr/ob_expr_uuid.h"
+#include "lib/locale/ob_locale_type.h"
 #ifdef OB_BUILD_ORACLE_PL
 #include "pl/ob_pl_warning.h"
 #endif
@@ -2078,15 +2079,27 @@ int ObSysVarOnCheckFuncs::check_log_row_value_option_is_valid(sql::ObExecContext
   int ret = OB_SUCCESS;
   ObString val = in_val.get_string();
   if (!val.empty()) {
-    if (val.case_compare("partial_lob") != 0) {
-      ret = OB_ERR_PARAM_VALUE_INVALID;
-      LOG_USER_ERROR(OB_ERR_PARAM_VALUE_INVALID);
-    } else {
+    if (val.case_compare(OB_LOG_ROW_VALUE_PARTIAL_LOB) == 0) {
       // because not adapat obcdc, currently partial_lob is disabled
       // out_val = in_val;
       ret = OB_NOT_SUPPORTED;
       LOG_WARN("partial_lob is not support, please use _enable_dbms_lob_partial_update instead", K(ret), K(in_val));
       LOG_USER_ERROR(OB_NOT_SUPPORTED, "partial_lob");
+    } else if (val.case_compare(OB_LOG_ROW_VALUE_PARTIAL_JSON) == 0
+        || val.case_compare(OB_LOG_ROW_VALUE_PARTIAL_ALL) == 0) {
+      uint64_t tenant_data_version = 0;
+      if (OB_FAIL(GET_MIN_DATA_VERSION(MTL_ID(), tenant_data_version))) {
+        LOG_WARN("get tenant data version failed", K(ret), K(val));
+      } else if (! ((DATA_VERSION_4_2_2_0 <= tenant_data_version && tenant_data_version < DATA_VERSION_4_3_0_0) || tenant_data_version >= DATA_VERSION_4_3_1_0)) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_WARN("json partial update not support in current version", K(ret), K(tenant_data_version));
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "json partial update not support in current version");
+      } else {
+        out_val = in_val;
+      }
+    } else {
+      ret = OB_ERR_PARAM_VALUE_INVALID;
+      LOG_USER_ERROR(OB_ERR_PARAM_VALUE_INVALID);
     }
   } else {
     out_val = in_val;
@@ -2437,18 +2450,6 @@ int ObSysVarOnCheckFuncs::check_session_readonly(ObExecContext &ctx,
   return ret;
 }
 
-int ObSysVarOnCheckFuncs::check_locale_type_is_valid(
-    sql::ObExecContext &ctx,
-    const ObSetVar &set_var,
-    const ObBasicSysVar &sys_var,
-    const common::ObObj &in_val,
-    common::ObObj &out_val)
-{
-  int ret = OB_NOT_SUPPORTED;
-  LOG_USER_ERROR(OB_NOT_SUPPORTED, "lc_time_names");
-  return ret;
-}
-
 int ObSysVarOnCheckFuncs::check_and_convert_plsql_warnings(sql::ObExecContext &ctx,
                                                  const ObSetVar &set_var,
                                                  const ObBasicSysVar &sys_var,
@@ -2516,6 +2517,28 @@ int ObSysVarOnCheckFuncs::check_runtime_filter_type_is_valid(
       ret = OB_ERR_WRONG_VALUE_FOR_VAR;
       LOG_USER_ERROR(OB_ERR_WRONG_VALUE_FOR_VAR, str_val.length(), str_val.ptr(), str_val.length(), str_val.ptr());
     }
+  }
+  return ret;
+}
+
+int ObSysVarOnCheckFuncs::check_locale_type_is_valid(
+    sql::ObExecContext &ctx,
+    const ObSetVar &set_var,
+    const ObBasicSysVar &sys_var,
+    const common::ObObj &in_val,
+    common::ObObj &out_val)
+{
+  int ret = OB_SUCCESS;
+  const ObString &locale_val = in_val.get_string();
+  ObString valid_locale = in_val.get_string();
+  if (true == set_var.is_set_default_) {
+    //do nothing
+  } else if (!is_valid_ob_locale(locale_val, valid_locale)) {            //check if the variable is valid
+    ret = OB_ERR_WRONG_VALUE_FOR_VAR;
+    LOG_USER_ERROR(OB_ERR_WRONG_VALUE_FOR_VAR, sys_var.get_name().length(), sys_var.get_name().ptr(),
+                                               locale_val.length(), locale_val.ptr());
+  } else {
+    OX(out_val.set_string(in_val.get_type(), valid_locale));
   }
   return ret;
 }

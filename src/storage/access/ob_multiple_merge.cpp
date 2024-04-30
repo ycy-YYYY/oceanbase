@@ -583,7 +583,7 @@ int ObMultipleMerge::get_next_normal_rows(int64_t &count, int64_t capacity)
             scan_state_ = ScanState::BATCH;
             continue;
           } else if (OB_ITER_END != ret) {
-            LOG_WARN("Fail to inner get next row, ", K(ret), KP(this));
+            LOG_WARN("Fail to inner get next row, ", K(ret), K(tables_), KP(this));
           }
         } else if (need_read_lob_columns(unprojected_row_)) {
           if (OB_FAIL(handle_lob_before_fuse_row())) {
@@ -1319,9 +1319,9 @@ int ObMultipleMerge::prepare_tables_from_iterator(ObTableStoreIterator &table_it
         LOG_DEBUG("cur table is empty", K(ret), KPC(table_ptr));
         continue;
       } else if (table_ptr->is_memtable()) {
-        read_released_memtable = read_released_memtable ||
-            memtable::ObMemtableFreezeState::RELEASED == (static_cast<memtable::ObMemtable*>(table_ptr))->get_freeze_state();
         ++memtable_cnt;
+        read_released_memtable = read_released_memtable ||
+            TabletMemtableFreezeState::RELEASED == (static_cast<ObITabletMemtable *>(table_ptr))->get_freeze_state();
       }
       if (OB_FAIL(tables_.push_back(table_ptr))) {
         LOG_WARN("add table fail", K(ret), K(*table_ptr));
@@ -1359,9 +1359,11 @@ int ObMultipleMerge::refresh_table_on_demand()
     STORAGE_LOG(WARN, "ObMultipleMerge has not been inited", K(ret));
   } else if (ScanState::NONE == scan_state_) {
     STORAGE_LOG(DEBUG, "skip refresh table");
-  } else if (get_table_param_->sample_info_.is_block_sample()) {
+  } else if (get_table_param_->sample_info_.is_block_sample() ||
+             (nullptr != block_row_store_ && !block_row_store_->can_refresh())) {
     // TODO : @yuanzhe refactor block sample for table refresh
-    STORAGE_LOG(DEBUG, "skip refresh table for block sample");
+    STORAGE_LOG(DEBUG, "skip refresh table for block sample or aggregated in prefetch",
+        K(get_table_param_->sample_info_.is_block_sample()), KPC(block_row_store_));
   } else if (OB_FAIL(check_need_refresh_table(need_refresh))) {
     STORAGE_LOG(WARN, "fail to check need refresh table", K(ret));
   } else if (need_refresh) {
@@ -1559,6 +1561,26 @@ void ObMultipleMerge::reuse_lob_locator()
     access_ctx_->lob_locator_helper_->reuse();
   }
   lob_reader_.reuse();
+}
+
+int ObMultipleMerge::handle_4377(const char* func)
+{
+  int ret = OB_ERR_DEFENSIVE_CHECK;
+  // check whether txn is aborted
+  if (access_ctx_->store_ctx_->is_uncommitted_data_rollbacked()) {
+    STORAGE_LOG(WARN, "transaction has been aborted", KPC(access_ctx_->store_ctx_));
+    ret = OB_TRANS_KILLED;
+  } else {
+    ObString func_name = ObString::make_string(func);
+    LOG_USER_ERROR(OB_ERR_DEFENSIVE_CHECK, func_name.length(), func_name.ptr());
+    LOG_DBA_ERROR(OB_ERR_DEFENSIVE_CHECK, "msg",
+                  "Fatal Error!!! Catch a defensive error! index lookup: row not found in data-table",
+                  K(ret), KPC(access_ctx_->store_ctx_));
+    concurrency_control::ObDataValidationService::set_delay_resource_recycle(access_ctx_->ls_id_);
+    dump_table_statistic_for_4377();
+    dump_tx_statistic_for_4377(access_ctx_->store_ctx_);
+  }
+  return ret;
 }
 
 void ObMultipleMerge::dump_tx_statistic_for_4377(ObStoreCtx *store_ctx)

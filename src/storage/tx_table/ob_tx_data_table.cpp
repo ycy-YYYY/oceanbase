@@ -228,7 +228,8 @@ int ObTxDataTable::online()
                                                handle))) {
     LOG_WARN("get tablet failed", K(ret));
   } else if (FALSE_IT(tablet = handle.get_obj())) {
-  } else if (OB_FAIL(ls_tablet_svr->create_memtable(LS_TX_DATA_TABLET, 0 /* schema_version */))) {
+  } else if (OB_FAIL(ls_tablet_svr->create_memtable(
+                 LS_TX_DATA_TABLET, 0 /* schema_version */, false /* for_inc_direct_load */, false /*for_replay*/))) {
     LOG_WARN("failed to create memtable", K(ret));
   } else {
     // load tx data table succeed
@@ -807,14 +808,14 @@ int ObTxDataTable::self_freeze_task()
 {
   int ret = OB_SUCCESS;
 
-  STORAGE_LOG(INFO, "start tx data table self freeze task", K(get_ls_id()));
+  STORAGE_LOG(DEBUG, "start tx data table self freeze task", K(get_ls_id()));
 
   if (OB_FAIL(memtable_mgr_->flush(SCN::max_scn(), checkpoint::INVALID_TRACE_ID, true))) {
     share::ObLSID ls_id = get_ls_id();
     STORAGE_LOG(WARN, "self freeze of tx data memtable failed.", KR(ret), K(ls_id), KPC(memtable_mgr_));
   }
 
-  STORAGE_LOG(INFO, "finish tx data table self freeze task", KR(ret), K(get_ls_id()));
+  STORAGE_LOG(DEBUG, "finish tx data table self freeze task", KR(ret), K(get_ls_id()));
   return ret;
 }
 

@@ -21,6 +21,7 @@
 
 #include "storage/tx/ob_trans_service.h"
 #include "storage/tx/ob_trans_part_ctx.h"
+#include "storage/tx/ob_tx_log_operator.h"
 #include "storage/tx/ob_tx_replay_executor.h"
 #include "storage/tx/ob_timestamp_service.h"
 #include "storage/tx/ob_trans_id_service.h"
@@ -224,6 +225,18 @@ int ObTxReplayExecutor::replay_tx_log_(const ObTxLogType log_type)
     }
     break;
   }
+  case ObTxLogType::TX_DIRECT_LOAD_INC_LOG: {
+    ObTxDirectLoadIncLog::ReplayArg replay_arg;
+    replay_arg.part_log_no_ = tx_part_log_no_;
+    replay_arg.ddl_log_handler_ptr_ = ls_->get_ddl_log_handler();
+    ObTxDirectLoadIncLog::TempRef temp_ref;
+    ObTxDirectLoadIncLog::ConstructArg  construct_arg(temp_ref);
+    ObTxCtxLogOperator<ObTxDirectLoadIncLog> dli_log_op(ctx_, &log_block_, &construct_arg, replay_arg, log_ts_ns_, lsn_);
+    if (OB_FAIL(dli_log_op(ObTxLogOpType::REPLAY))) {
+      TRANS_LOG(WARN, "[Replay Tx] replay direct load inc log error", KR(ret));
+    }
+    break;
+  }
   case ObTxLogType::TX_RECORD_LOG: {
     if (OB_FAIL(replay_record_())) {
       TRANS_LOG(WARN, "[Replay Tx] replay record log error", KR(ret));
@@ -240,8 +253,6 @@ int ObTxReplayExecutor::replay_tx_log_(const ObTxLogType log_type)
     ret = OB_ERR_UNEXPECTED;
     TRANS_LOG(ERROR, "[Replay Tx] Unknown Log Type in replay buf",
               K(log_type), KPC(this));
-    usleep(100000);
-    ob_abort();
   }
   }
   return ret;
@@ -618,6 +629,12 @@ int ObTxReplayExecutor::replay_redo_in_memtable_(ObTxRedoLog &redo, const bool s
         }
       } else if (FALSE_IT(row_head = mmi_ptr_->get_row_head())) {
         // do nothing
+      } else if (MutatorType::MUTATOR_ROW_EXT_INFO == row_head.mutator_type_) {
+        // ext info redo log is only used for obcdc, no need replay
+        if (EXECUTE_COUNT_PER_SEC(8)) {
+          TRANS_LOG(INFO, "ext info redo log no need replay", K(row_head), K(redo));
+        }
+        TRANS_LOG(DEBUG, "ext info redo log no need replay", K(row_head), K(redo));
       } else if (OB_FAIL(replay_one_row_in_memtable_(row_head, mmi_ptr_))) {
         if (OB_MINOR_FREEZE_NOT_ALLOW == ret) {
           if (TC_REACH_TIME_INTERVAL(1000 * 1000)) {
@@ -637,7 +654,9 @@ int ObTxReplayExecutor::replay_redo_in_memtable_(ObTxRedoLog &redo, const bool s
         if (OB_UNLIKELY(!seq_no.is_valid())) {
           ret = OB_ERR_UNEXPECTED;
           TRANS_LOG(ERROR, "seq no is invalid in mutator row", K(seq_no), KPC(this));
+#ifdef ENABLE_DEBUG_LOG
           ob_abort();
+#endif
         }
         if (seq_no.get_seq() > max_seq_no.get_seq()) {
           max_seq_no = seq_no;
@@ -740,6 +759,10 @@ int ObTxReplayExecutor::replay_one_row_in_memtable_(ObMutatorRowHeader &row_head
       } else {
         table_lock_row_count_++;
       }
+      break;
+    }
+    case MutatorType::MUTATOR_ROW_EXT_INFO: {
+      TRANS_LOG(DEBUG, "[Replay Tx] ignore replay row ext info", K(row_head));
       break;
     }
     default: {

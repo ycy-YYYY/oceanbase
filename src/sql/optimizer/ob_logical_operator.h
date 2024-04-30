@@ -1165,9 +1165,9 @@ public:
    * get cur_op's expected_ordering
    */
   inline void set_is_local_order(bool is_local_order) { is_local_order_ = is_local_order; }
-  inline bool get_is_local_order() { return is_local_order_; }
+  inline bool get_is_local_order() const { return is_local_order_; }
   inline void set_is_range_order(bool is_range_order) { is_range_order_ = is_range_order; }
-  inline bool get_is_range_order() { return is_range_order_; }
+  inline bool get_is_range_order() const { return is_range_order_; }
 
   inline void set_is_at_most_one_row(bool is_at_most_one_row) { is_at_most_one_row_ = is_at_most_one_row; }
   inline bool get_is_at_most_one_row() { return is_at_most_one_row_; }
@@ -1959,6 +1959,33 @@ int ObLogicalOperator::init_all_traverse_ctx(Allocator &alloc)
   }
   return ret;
 }
+
+// json table default value struct
+struct ObColumnDefault
+{
+public:
+  ObColumnDefault()
+    : column_id_(common::OB_NOT_EXIST_COLUMN_ID),
+      default_error_expr_(nullptr),
+      default_empty_expr_(nullptr)
+  {}
+  ObColumnDefault(int64_t column_id)
+    : column_id_(column_id),
+      default_error_expr_(nullptr),
+      default_empty_expr_(nullptr)
+  {}
+  void reset()
+  {
+    column_id_ = common::OB_NOT_EXIST_COLUMN_ID;
+    default_error_expr_ = nullptr;
+    default_empty_expr_ = nullptr;
+  }
+
+  TO_STRING_KV(K_(column_id), KPC_(default_error_expr), KPC_(default_empty_expr));
+  int64_t column_id_;
+  ObRawExpr* default_error_expr_;
+  ObRawExpr* default_empty_expr_;
+};
 
 } // end of namespace sql
 } // end of namespace oceanbase

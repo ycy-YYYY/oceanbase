@@ -36,6 +36,7 @@
 #include "sql/resolver/dml/ob_select_stmt.h"
 #include "sql/resolver/dml/ob_select_resolver.h"
 #include "sql/resolver/dml/ob_merge_stmt.h"
+#include "sql/resolver/dml/ob_delete_stmt.h"
 #include "sql/resolver/dml/ob_merge_resolver.h"
 #include "sql/resolver/dml/ob_update_stmt.h"
 #include "sql/rewrite/ob_expand_aggregate_utils.h"
@@ -77,6 +78,15 @@ int ObTransformPreProcess::transform_one_stmt(common::ObIArray<ObParentDMLStmt> 
     OPT_TRACE("adjust duplicated table name", is_happened);
     LOG_TRACE("succeed to adjust duplicated table name", K(is_happened), K(ret));
 
+    if (OB_SUCC(ret)) {
+      if (OB_FAIL(expand_materialized_view(stmt, is_happened))) {
+        LOG_WARN("failed to expand materialized view", K(ret));
+      } else {
+        trans_happened |= is_happened;
+        OPT_TRACE("expand materialized view:", is_happened);
+        LOG_TRACE("succeed to expand materialized view",K(is_happened), K(ret));
+      }
+    }
     if (OB_SUCC(ret)) {
       if (OB_FAIL(flatten_conditions(stmt, is_happened))) {
         LOG_WARN("failed to flatten_condition", K(ret));
@@ -309,6 +319,19 @@ int ObTransformPreProcess::transform_one_stmt(common::ObIArray<ObParentDMLStmt> 
       }
     }
     if (OB_SUCC(ret)) {
+      if (lib::is_mysql_mode() && stmt->get_match_exprs().count() > 0 &&
+          OB_FAIL(preserve_order_for_fulltext_search(stmt, is_happened))) {
+        LOG_WARN("failed to preserve order for fulltext search", K(ret));
+      } else {
+        trans_happened |= is_happened;
+        LOG_TRACE("succeed to transform for preserve order for fulltext search",K(is_happened), K(ret));
+      }
+    }
+    if (OB_SUCC(ret) && OB_FAIL(disable_complex_dml_for_fulltext_index(stmt))) {
+      LOG_WARN("disable complex dml for fulltext index", K(ret));
+      // jinmao TODO: table scan 能吐出正确的 doc_id 后，可删除此限制
+    }
+    if (OB_SUCC(ret)) {
       LOG_DEBUG("transform pre process succ", K(*stmt));
      if (OB_FAIL(stmt->formalize_stmt(ctx_->session_info_))) {
         LOG_WARN("failed to formalize stmt", K(ret));
@@ -330,6 +353,49 @@ int ObTransformPreProcess::need_transform(const common::ObIArray<ObParentDMLStmt
   UNUSED(stmt);
   need_trans = true;
   return OB_SUCCESS;
+}
+
+// for realtime view, replace basic table as generated view
+int ObTransformPreProcess::expand_materialized_view(ObDMLStmt *stmt, bool &trans_happened)
+{
+  int ret = OB_SUCCESS;
+  trans_happened = false;
+  const ObHint *hint = NULL;
+  if (OB_ISNULL(stmt) || OB_ISNULL(ctx_) || OB_ISNULL(ctx_->session_info_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpect null", K(ret), K(stmt), K(ctx_));
+  } else if (ctx_->session_info_->is_inner()) {
+    // when refresh mview, do not expand rt-mv
+  } else if (NULL != (hint = stmt->get_stmt_hint().get_normal_hint(T_MV_REWRITE))
+             && hint->is_disable_hint()) {
+    // use no_mv_rewrite to disable expand rt mview
+  } else {
+    ObIArray<TableItem*> &tables = stmt->get_table_items();
+    TableItem *table_item = NULL;
+    bool is_modified = false;
+    for (int64_t i = 0; OB_SUCC(ret) && i < tables.count(); ++i) {
+      if (OB_ISNULL(table_item = tables.at(i))) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpect null", K(ret), K(table_item));
+      } else if (MATERIALIZED_VIEW != table_item->table_type_
+                 || !table_item->need_expand_rt_mv_) {
+        /* do nothing */
+      } else if (OB_FAIL(stmt->check_table_be_modified(table_item->ref_id_, is_modified))) {
+        LOG_WARN("fail to check table be modified", K(ret));
+      } else if (is_modified) {
+        /* do nothing */
+      } else if (OB_UNLIKELY(!table_item->part_ids_.empty())) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "access some partitions of real-time materialized view now");
+        LOG_WARN("access some partitions of real-time materialized view is not supported now", K(ret));
+      } else if (OB_FAIL(ObTransformUtils::expand_mview_table(ctx_, stmt, table_item))) {
+        LOG_WARN("fail to expand mview table", K(ret));
+      } else {
+        trans_happened = true;
+      }
+    }
+  }
+  return ret;
 }
 
 int ObTransformPreProcess::add_all_rowkey_columns_to_stmt(ObDMLStmt *stmt, bool &trans_happened)
@@ -9544,6 +9610,23 @@ int ObTransformPreProcess::check_is_correlated_cte(ObSelectStmt *stmt, ObIArray<
   }
   if (!is_correlated) {
     // add flag to mark the exec param refer the same table
+    for (int64_t i = 0; OB_SUCC(ret) && i < stmt->get_table_items().count(); ++i) {
+      TableItem *table_item = stmt->get_table_items().at(i);
+      if (OB_ISNULL(table_item)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("get unexpected null", K(ret));
+      } else if (table_item->is_lateral_table()) {
+        for (int64_t j = 0; OB_SUCC(ret) && j < table_item->exec_params_.count(); ++j) {
+          ObRawExpr *exec_param = table_item->exec_params_.at(j);
+          if (OB_ISNULL(exec_param)) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("exec param is null", K(ret));
+          } else if (OB_FAIL(exec_param->add_flag(BE_USED))) {
+            LOG_WARN("failed to add flag", K(ret));
+          }
+        }
+      }
+    }
     for (int64_t i = 0; OB_SUCC(ret) && i < stmt->get_subquery_expr_size(); ++i) {
       ObQueryRefRawExpr *query_ref = stmt->get_subquery_exprs().at(i);
       if (OB_ISNULL(query_ref)) {
@@ -9583,6 +9666,23 @@ int ObTransformPreProcess::check_is_correlated_cte(ObSelectStmt *stmt, ObIArray<
     }
 
     // clear flag
+    for (int64_t i = 0; OB_SUCC(ret) && i < stmt->get_table_items().count(); ++i) {
+      TableItem *table_item = stmt->get_table_items().at(i);
+      if (OB_ISNULL(table_item)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("get unexpected null", K(ret));
+      } else if (table_item->is_lateral_table()) {
+        for (int64_t j = 0; OB_SUCC(ret) && j < table_item->exec_params_.count(); ++j) {
+          ObRawExpr *exec_param = table_item->exec_params_.at(j);
+          if (OB_ISNULL(exec_param)) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("exec param is null", K(ret));
+          } else if (OB_FAIL(exec_param->clear_flag(BE_USED))) {
+            LOG_WARN("failed to add flag", K(ret));
+          }
+        }
+      }
+    }
     for (int64_t i = 0; OB_SUCC(ret) && i < stmt->get_subquery_expr_size(); ++i) {
       ObQueryRefRawExpr *query_ref = stmt->get_subquery_exprs().at(i);
       if (OB_ISNULL(query_ref)) {
@@ -9738,6 +9838,38 @@ int ObTransformPreProcess::check_can_transform_insert_only_merge_into(const ObMe
       } else if (expr->is_static_const_expr()) {
         is_valid = false;
       }
+    }
+  }
+  return ret;
+}
+
+// full-text index queries on a single base table are processed with order preservation.
+// (Order is not preserved in multi-table join scenarios.)
+int ObTransformPreProcess::preserve_order_for_fulltext_search(ObDMLStmt *stmt, bool& trans_happened)
+{
+  int ret = OB_SUCCESS;
+  trans_happened = false;
+  TableItem *table_item = NULL;
+  ObMatchFunRawExpr *match_expr = NULL;
+  if (OB_ISNULL(stmt)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null", K(ret));
+  } else if (stmt->get_table_items().count() != 1 || stmt->get_order_item_size() != 0) {
+    // do nothing
+  } else if (OB_ISNULL(table_item = stmt->get_table_item(0))) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null", K(ret));
+  } else if (!table_item->is_basic_table()) {
+    // do nothing
+  } else if (OB_FAIL(stmt->get_match_expr_on_table(table_item->table_id_, match_expr))) {
+    LOG_WARN("failed to get fulltext search expr on table", K(table_item->table_id_), K(ret));
+  } else if (OB_ISNULL(match_expr)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null", K(ret));
+  } else {
+    OrderItem item(match_expr, default_desc_direction());
+    if (OB_FAIL(stmt->add_order_item(item))) {
+      LOG_WARN("failed to add order item", K(ret), K(item));
     }
   }
   return ret;
@@ -9981,6 +10113,75 @@ int ObTransformPreProcess::get_rowkey_for_single_table(ObSelectStmt* stmt,
     LOG_WARN("failed to generate unique key", K(ret));
   } else {
     is_valid = true;
+  }
+  return ret;
+}
+
+int ObTransformPreProcess::disable_complex_dml_for_fulltext_index(ObDMLStmt *stmt)
+{
+  int ret = OB_SUCCESS;
+  ObSEArray<TableItem*, 4> tables_to_check;
+  bool has_table_with_fulltext_index = false;
+  if (OB_ISNULL(stmt) || OB_ISNULL(ctx_) || OB_ISNULL(ctx_->schema_checker_) ||
+      OB_ISNULL(ctx_->session_info_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null", K(ret));
+  } else if (stmt->is_insert_stmt()) {
+    ObInsertStmt *insert_stmt = static_cast<ObInsertStmt*>(stmt);
+    ObInsertTableInfo table_info = insert_stmt->get_insert_table_info();
+    if (table_info.is_replace_ || table_info.assignments_.count() != 0) {
+      TableItem* table = stmt->get_table_item_by_id(table_info.table_id_);
+      if (OB_FAIL(tables_to_check.push_back(table))) {
+        LOG_WARN("failed to push back table", K(ret));
+      }
+    }
+  } else if (stmt->is_delete_stmt() || stmt->is_update_stmt()) {
+    ObDelUpdStmt *del_upd_stmt = static_cast<ObDelUpdStmt*>(stmt);
+    ObSEArray<ObDmlTableInfo*, 4> table_infos;
+    TableItem* table = NULL;
+    if (OB_FAIL(del_upd_stmt->get_dml_table_infos(table_infos))) {
+      LOG_WARN("failed to get dml table infos", K(ret));
+    } else if (table_infos.count() == 1) {
+      if (OB_ISNULL(table_infos.at(0))) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected null", K(ret));
+      } else if (OB_ISNULL(table = stmt->get_table_item_by_id(table_infos.at(0)->table_id_))) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected null", K(ret));
+      } else if (!table->is_generated_table() && !table->is_temp_table()) {
+        // do nothing
+      } else if (OB_FAIL(tables_to_check.push_back(table))) {
+        LOG_WARN("failed to push back table", K(ret));
+      }
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && i < table_infos.count(); ++i) {
+        if (OB_ISNULL(table_infos.at(i))) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("unexpected null", K(ret));
+        } else if (OB_ISNULL(table = stmt->get_table_item_by_id(table_infos.at(i)->table_id_))) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("unexpected null", K(ret));
+        } else if (OB_FAIL(tables_to_check.push_back(table))) {
+          LOG_WARN("failed to push back table", K(ret));
+        }
+      }
+    }
+  }
+  if (OB_FAIL(ret)) {
+    // do nothing
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && !has_table_with_fulltext_index && i < tables_to_check.count(); ++i) {
+      if (OB_FAIL(ObTransformUtils::check_table_with_fts_or_multivalue_recursively(tables_to_check.at(i),
+                                                                          ctx_->schema_checker_,
+                                                                          ctx_->session_info_,
+                                                                          has_table_with_fulltext_index))) {
+        LOG_WARN("failed to check table with fulltext or mutivalue recursively", K(ret));
+      } else if (has_table_with_fulltext_index) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "complex dml operations on table with fulltext or multivalue index");
+        LOG_WARN("not supported complex dml operations on table with fulltext or mutivalue index", K(ret));
+      }
+    }
   }
   return ret;
 }

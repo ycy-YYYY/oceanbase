@@ -378,7 +378,10 @@ public:
                "rowid_mode", rowid_mode_,
                "view_column_filled_flag", view_column_filled_flag_,
                "mv_container_table_flag", mv_container_table_flag_,
-               "mv_available_flag", mv_available_flag_);
+               "mv_available_flag", mv_available_flag_,
+               "table_referenced_by_mv_flag", table_referenced_by_mv_flag_,
+               "mv_enable_query_rewrite_flag", mv_enable_query_rewrite_flag_,
+               "mv_on_query_computation_flag", mv_on_query_computation_flag_);
   union {
     int32_t mode_;
     struct {
@@ -392,6 +395,9 @@ public:
       uint32_t view_column_filled_flag_ : TM_VIEW_COLUMN_FILLED_BITS;
       uint32_t mv_container_table_flag_ : TM_MV_CONTAINER_TABLE_BITS;
       uint32_t mv_available_flag_ : TM_MV_AVAILABLE_BITS;
+      uint32_t table_referenced_by_mv_flag_ : TM_TABLE_REFERENCED_BY_MV_BITS;
+      uint32_t mv_enable_query_rewrite_flag_ : TM_MV_ENABLE_QUERY_REWRITE_BITS;
+      uint32_t mv_on_query_computation_flag_ : TM_MV_ON_QUERY_COMPUTATION_BITS;
       uint32_t reserved_ :TM_RESERVED;
     };
   };
@@ -705,6 +711,18 @@ public:
   { return IS_MV_AVAILABLE == (enum ObMVAvailableFlag)table_mode_.mv_available_flag_; }
   inline void set_mv_available(const ObMVAvailableFlag flag)
   { table_mode_.mv_available_flag_ = flag; }
+  inline bool table_referenced_by_mv() const
+  { return IS_REFERENCED_BY_MV == (enum ObTableReferencedByMVFlag)table_mode_.table_referenced_by_mv_flag_; }
+  inline void set_table_referenced_by_mv(const ObTableReferencedByMVFlag flag)
+  { table_mode_.table_referenced_by_mv_flag_ = flag; }
+  inline bool mv_enable_query_rewrite() const
+  { return IS_MV_ENABLE_QUERY_REWRITE == (enum ObMVEnableQueryRewriteFlag)table_mode_.mv_enable_query_rewrite_flag_; }
+  inline void set_mv_enable_query_rewrite(const ObMVEnableQueryRewriteFlag flag)
+  { table_mode_.mv_enable_query_rewrite_flag_ = flag; }
+  inline bool mv_on_query_computation() const
+  { return IS_MV_ON_QUERY_COMPUTATION == (enum ObMVOnQueryComputationFlag)table_mode_.mv_on_query_computation_flag_; }
+  inline void set_mv_on_query_computation(const ObMVOnQueryComputationFlag flag)
+  { table_mode_.mv_on_query_computation_flag_ = flag; }
 
   inline void set_session_id(const uint64_t id)  { session_id_ = id; }
   inline uint64_t get_session_id() const { return session_id_; }
@@ -881,15 +899,24 @@ public:
   { return MATERIALIZED_VIEW_LOG == table_type; }
   inline bool is_in_recyclebin() const
   { return common::OB_RECYCLEBIN_SCHEMA_ID == database_id_; }
-  inline bool is_external_table() const { return EXTERNAL_TABLE == table_type_; }
+  virtual inline bool is_external_table() const override { return EXTERNAL_TABLE == table_type_; }
   inline ObTenantTableId get_tenant_table_id() const
   { return ObTenantTableId(tenant_id_, table_id_); }
   inline ObTenantTableId get_tenant_data_table_id() const
   { return ObTenantTableId(tenant_id_, data_table_id_); }
   inline bool should_not_validate_data_index_ckm() const;
   inline bool should_check_major_merge_progress() const;
+  inline bool is_multivalue_index() const;
+  inline bool is_multivalue_index_aux() const;
   inline bool is_spatial_index() const;
-  inline static bool is_spatial_index(ObIndexType index_type);
+  inline static bool is_spatial_index(const ObIndexType index_type);
+  inline bool is_fts_index() const;
+  inline bool is_built_in_fts_index() const;
+  inline bool is_rowkey_doc_id() const;
+  inline bool is_doc_id_rowkey() const;
+  inline bool is_fts_index_aux() const;
+  inline bool is_fts_doc_word_aux() const;
+  inline bool is_fts_or_multivalue_index() const;
   inline bool is_normal_index() const;
   inline bool is_unique_index() const;
   inline static bool is_unique_index(ObIndexType index_type);
@@ -901,7 +928,7 @@ public:
   inline static bool is_global_unique_index_table(const ObIndexType index_type);
   inline bool is_local_unique_index_table() const;
   inline bool is_domain_index() const;
-  inline static bool is_domain_index(ObIndexType index_type);
+  inline static bool is_domain_index(const ObIndexType index_type);
   inline bool is_index_local_storage() const;
   virtual bool has_tablet() const override;
   inline bool has_partition() const
@@ -994,6 +1021,7 @@ protected:
   ObObjectStatus object_status_;
   bool is_force_view_; // only record in create view path, do not persist to disk
 };
+
 class ObTableSchema : public ObSimpleTableSchemaV2
 {
   OB_UNIS_VERSION(1);
@@ -1063,6 +1091,7 @@ public:
   void reset_partition_schema() override;
   void reset_column_part_key_info();
   int assign(const ObTableSchema &src_schema);
+  int get_view_column_comment(ObIArray<ObString> &column_comments);
   //part splitting filter is needed during physical splitting
   bool need_part_filter() const
   {
@@ -1134,6 +1163,7 @@ public:
   int set_external_file_location_access_info(const common::ObString &access_info) { return deep_copy_str(access_info, external_file_location_access_info_); }
   int set_external_file_format(const common::ObString &format) { return deep_copy_str(format, external_file_format_); }
   int set_external_file_pattern(const common::ObString &pattern) { return deep_copy_str(pattern, external_file_pattern_); }
+  inline void set_user_specified_partition_for_external_table() { table_flags_ |= EXTERNAL_TABLE_USER_SPECIFIED_PARTITION_FLAG; }
   template<typename ColumnType>
   int add_column(const ColumnType &column);
   int delete_column(const common::ObString &column_name);
@@ -1280,6 +1310,7 @@ public:
   }
   inline ObNameGeneratedType get_name_generated_type() const { return name_generated_type_; }
   bool is_sys_generated_name(bool check_unknown) const;
+  inline bool is_user_specified_partition_for_external_table() const { return (table_flags_ & EXTERNAL_TABLE_USER_SPECIFIED_PARTITION_FLAG) != 0; }
   inline bool is_index_visible() const
   {
     return 0 == (index_attributes_set_ & ((uint64_t)(1) << INDEX_VISIBILITY));
@@ -1359,6 +1390,7 @@ public:
       const bool no_virtual = false) const;
   int get_spatial_geo_column_id(uint64_t &geo_column_id) const;
   int get_spatial_index_column_ids(common::ObIArray<uint64_t> &column_ids) const;
+  int get_fulltext_column_ids(uint64_t &doc_id_col_id, uint64_t &ft_col_id) const;
 
   // get columns for building rowid
   int get_column_ids_serialize_to_rowid(common::ObIArray<uint64_t> &col_ids,
@@ -1616,6 +1648,8 @@ public:
   int sort_column_array_by_column_id();
   int check_column_array_sorted_by_column_id(const bool skip_rowkey) const;
   int check_has_local_index(ObSchemaGetterGuard &schema_guard, bool &has_local_index) const;
+  int check_has_fts_index(ObSchemaGetterGuard &schema_guard, bool &has_fts_index) const;
+  int check_has_multivalue_index(ObSchemaGetterGuard &schema_guard, bool &has_multivalue_index) const;
   int is_real_unique_index_column(ObSchemaGetterGuard &schema_guard,
                                   uint64_t column_id,
                                   bool &is_uni) const;
@@ -1625,8 +1659,10 @@ public:
   int is_multiple_key_column(ObSchemaGetterGuard &schema_guard,
                              uint64_t column_id,
                              bool &is_mul) const;
+  int get_doc_id_rowkey_tid(uint64_t &doc_id_rowkey_tid) const;
   void set_aux_lob_meta_tid(const uint64_t& table_id) { aux_lob_meta_tid_ = table_id; }
   void set_aux_lob_piece_tid(const uint64_t& table_id) { aux_lob_piece_tid_ = table_id; }
+  int get_rowkey_doc_tid(uint64_t &index_table_id) const;
   uint64_t get_aux_lob_meta_tid() const { return aux_lob_meta_tid_; }
   uint64_t get_aux_lob_piece_tid() const { return aux_lob_piece_tid_; }
   bool has_lob_column() const;
@@ -1873,15 +1909,7 @@ private:
 inline bool ObSimpleTableSchemaV2::is_index_local_storage() const
 {
   return USER_INDEX == table_type_
-        // && schema::is_index_local_storage(index_type_); TODO(wangzhennan.wzn): use is_index_local_storage later
-         && (INDEX_TYPE_NORMAL_LOCAL == index_type_
-             || INDEX_TYPE_UNIQUE_LOCAL == index_type_
-             || INDEX_TYPE_NORMAL_GLOBAL_LOCAL_STORAGE == index_type_
-             || INDEX_TYPE_UNIQUE_GLOBAL_LOCAL_STORAGE == index_type_
-             || INDEX_TYPE_PRIMARY == index_type_
-             || INDEX_TYPE_DOMAIN_CTXCAT == index_type_
-             || INDEX_TYPE_SPATIAL_LOCAL == index_type_
-             || INDEX_TYPE_SPATIAL_GLOBAL_LOCAL_STORAGE == index_type_);
+         && schema::is_index_local_storage(index_type_);
 }
 
 inline bool ObSimpleTableSchemaV2::is_global_index_table() const
@@ -1893,7 +1921,8 @@ inline bool ObSimpleTableSchemaV2::is_global_index_table(const ObIndexType index
 {
   return INDEX_TYPE_NORMAL_GLOBAL == index_type
         || INDEX_TYPE_UNIQUE_GLOBAL == index_type
-        || INDEX_TYPE_SPATIAL_GLOBAL == index_type;
+        || INDEX_TYPE_SPATIAL_GLOBAL == index_type
+        || is_global_fts_index(index_type);
 }
 
 inline bool ObSimpleTableSchemaV2::is_global_normal_index_table() const
@@ -1922,10 +1951,11 @@ inline bool ObSimpleTableSchemaV2::is_global_local_index_table() const
 {
   return INDEX_TYPE_NORMAL_GLOBAL_LOCAL_STORAGE == index_type_
          || INDEX_TYPE_UNIQUE_GLOBAL_LOCAL_STORAGE == index_type_
-         || INDEX_TYPE_SPATIAL_GLOBAL_LOCAL_STORAGE == index_type_;
+         || INDEX_TYPE_SPATIAL_GLOBAL_LOCAL_STORAGE == index_type_
+         || is_global_local_fts_index(index_type_);
 }
 
-inline bool ObSimpleTableSchemaV2::is_spatial_index(ObIndexType index_type)
+inline bool ObSimpleTableSchemaV2::is_spatial_index(const ObIndexType index_type)
 {
   return INDEX_TYPE_SPATIAL_LOCAL == index_type
          || INDEX_TYPE_SPATIAL_GLOBAL == index_type
@@ -1935,6 +1965,46 @@ inline bool ObSimpleTableSchemaV2::is_spatial_index(ObIndexType index_type)
 inline bool ObSimpleTableSchemaV2::is_spatial_index() const
 {
   return is_spatial_index(index_type_);
+}
+
+inline bool ObSimpleTableSchemaV2::is_multivalue_index() const
+{
+  return share::schema::is_multivalue_index(index_type_);
+}
+
+inline bool ObSimpleTableSchemaV2::is_multivalue_index_aux() const
+{
+  return share::schema::is_multivalue_index_aux(index_type_);
+}
+
+inline bool ObSimpleTableSchemaV2::is_fts_index() const
+{
+  return share::schema::is_fts_index(index_type_);
+}
+
+inline bool ObSimpleTableSchemaV2::is_built_in_fts_index() const
+{
+  return share::schema::is_built_in_fts_index(index_type_);
+}
+
+inline bool ObSimpleTableSchemaV2::is_rowkey_doc_id() const
+{
+  return share::schema::is_rowkey_doc_aux(index_type_);
+}
+
+inline bool ObSimpleTableSchemaV2::is_doc_id_rowkey() const
+{
+  return share::schema::is_doc_rowkey_aux(index_type_);
+}
+
+inline bool ObSimpleTableSchemaV2::is_fts_index_aux() const
+{
+  return share::schema::is_fts_index_aux(index_type_);
+}
+
+inline bool ObSimpleTableSchemaV2::is_fts_doc_word_aux() const
+{
+  return share::schema::is_fts_doc_word_aux(index_type_);
 }
 
 inline bool ObSimpleTableSchemaV2::is_normal_index() const
@@ -1953,7 +2023,8 @@ inline bool ObSimpleTableSchemaV2::is_unique_index(ObIndexType index_type)
 {
   return INDEX_TYPE_UNIQUE_LOCAL == index_type
          || INDEX_TYPE_UNIQUE_GLOBAL == index_type
-         || INDEX_TYPE_UNIQUE_GLOBAL_LOCAL_STORAGE == index_type;
+         || INDEX_TYPE_UNIQUE_GLOBAL_LOCAL_STORAGE == index_type
+         || INDEX_TYPE_UNIQUE_MULTIVALUE_LOCAL == index_type;
 }
 
 inline bool ObSimpleTableSchemaV2::is_domain_index() const
@@ -1961,15 +2032,25 @@ inline bool ObSimpleTableSchemaV2::is_domain_index() const
   return is_domain_index(index_type_);
 }
 
-inline bool ObSimpleTableSchemaV2::is_domain_index(ObIndexType index_type)
+inline bool ObSimpleTableSchemaV2::is_domain_index(const ObIndexType index_type)
 {
-  return INDEX_TYPE_DOMAIN_CTXCAT == index_type;
+  return is_spatial_index(index_type) ||
+         share::schema::is_fts_index_aux(index_type) ||
+         share::schema::is_fts_doc_word_aux(index_type) ||
+         share::schema::is_multivalue_index_aux(index_type);
+}
+
+inline bool ObSimpleTableSchemaV2::is_fts_or_multivalue_index() const
+{
+  return share::schema::is_fts_or_multivalue_index(index_type_);
 }
 
 inline bool ObSimpleTableSchemaV2::should_not_validate_data_index_ckm() const
 {
   // spatial index column is different from data table column, should not validate data & index column checksum
-  return is_spatial_index();
+  // fulltext index cannot validate data by simply column checksum comparision
+  // multi-value index column is different from data table column, should not validate data & index column checksum
+  return is_domain_index();
 }
 
 inline bool ObSimpleTableSchemaV2::should_check_major_merge_progress() const
@@ -2172,6 +2253,7 @@ int ObTableSchema::add_column(const ColumnType &column)
           index_column.type_ = column.get_meta_type();
           index_column.fulltext_flag_ = column.is_fulltext_column();
           index_column.spatial_flag_ = column.is_spatial_generated_column();
+          index_column.multivalue_flag_ = column.is_multivalue_generated_column();
           if (index_column.type_.is_decimal_int()) {
             index_column.type_.set_scale(column.get_accuracy().get_scale());
           }

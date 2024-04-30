@@ -127,12 +127,12 @@ ObTxNode::ObTxNode(const int64_t ls_id,
   ObTenantEnv::set_tenant(&tenant_);
   ObTableHandleV2 lock_memtable_handle;
   lock_memtable_handle.set_table(&lock_memtable_, &t3m_, ObITable::LOCK_MEMTABLE);
-  fake_lock_table_.is_inited_ = true;
-  fake_lock_table_.parent_ = &fake_ls_;
   lock_memtable_.key_.table_type_ = ObITable::LOCK_MEMTABLE;
   fake_ls_.ls_tablet_svr_.lock_memtable_mgr_.t3m_ = &t3m_;
-  fake_ls_.ls_tablet_svr_.lock_memtable_mgr_.table_type_ = ObITable::TableType::LOCK_MEMTABLE;
   fake_ls_.ls_tablet_svr_.lock_memtable_mgr_.add_memtable_(lock_memtable_handle);
+  fake_lock_table_.is_inited_ = true;
+  fake_lock_table_.parent_ = &fake_ls_;
+  fake_lock_table_.lock_mt_mgr_ = &(fake_ls_.ls_tablet_svr_.lock_memtable_mgr_);
   fake_tenant_freezer_.is_inited_ = true;
   fake_tenant_freezer_.tenant_info_.is_loaded_ = true;
   fake_tenant_freezer_.tenant_info_.mem_memstore_limit_ = INT64_MAX;
@@ -150,6 +150,10 @@ ObTxNode::ObTxNode(const int64_t ls_id,
                &schema_service_,
                &server_tracer_));
   tenant_.set(&txs_);
+  OZ(fake_opt_stat_mgr_.init(tenant_id_));
+  tenant_.set(&fake_opt_stat_mgr_);
+  OZ(fake_lock_wait_mgr_.init());
+  tenant_.set(&fake_lock_wait_mgr_);
   OZ (create_memtable_(100000, memtable_));
   {
     ObColDesc col_desc;
@@ -661,7 +665,7 @@ int ObTxNode::write(ObTxDesc &tx,
   param.read_info_ = &read_info;
 
   context.init(query_flag, write_store_ctx, allocator, trans_version_range);
-  OZ(memtable_->set(param, context, columns_, row, encrypt_meta));
+  OZ(memtable_->set(param, context, columns_, row, encrypt_meta, false));
   OZ(txs_.revert_store_ctx(write_store_ctx));
   delete iter;
   return ret;
@@ -699,7 +703,7 @@ int ObTxNode::write_one_row(ObStoreCtx& write_store_ctx, const int64_t key, cons
   read_info.init(allocator, 2, 1, false, columns_, nullptr/*storage_cols_index*/);
   ObStoreRow row;
   ObObj cols[2] = {ObObj(key), ObObj(value)};
-  row.flag_ = blocksstable::ObDmlFlag::DF_INSERT;
+  row.flag_ = blocksstable::ObDmlFlag::DF_UPDATE;
   row.row_val_.cells_ = cols;
   row.row_val_.count_ = 2;
 
@@ -722,7 +726,7 @@ int ObTxNode::write_one_row(ObStoreCtx& write_store_ctx, const int64_t key, cons
 
   OZ(context.init(query_flag, write_store_ctx, allocator, trans_version_range));
 
-  OZ(memtable_->set(param, context, columns_, row, encrypt_meta));
+  OZ(memtable_->set(param, context, columns_, row, encrypt_meta, false));
 
   return ret;
 }

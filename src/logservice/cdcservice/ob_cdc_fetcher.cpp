@@ -104,7 +104,7 @@ int ObCdcFetcher::fetch_log(const ObCdcLSFetchLogReq &req,
     const ObLSID &ls_id = req.get_ls_id();
     const LSN &start_lsn = req.get_start_lsn();
     PalfHandleGuard palf_handle_guard;
-    PalfGroupBufferIterator group_iter;
+    PalfGroupBufferIterator group_iter(ls_id.id(), palf::LogIOUser::CDC);
     const ObCdcRpcId &rpc_id = req.get_client_id();
 
     ClientLSCtx *ls_ctx = NULL;
@@ -508,7 +508,7 @@ int ObCdcFetcher::ls_fetch_log_(const ObLSID &ls_id,
 {
   int ret = OB_SUCCESS;
   const int64_t start_ls_fetch_log_time = ObTimeUtility::current_time();
-  PalfGroupBufferIterator palf_iter;
+  PalfGroupBufferIterator palf_iter(ls_id.id(), palf::LogIOUser::CDC);
   PalfHandleGuard palf_guard;
   int64_t version = 0;
   // use cached remote_iter
@@ -620,6 +620,7 @@ int ObCdcFetcher::ls_fetch_log_(const ObLSID &ls_id,
           ret = OB_SUCCESS;
         } else if (OB_ALREADY_IN_NOARCHIVE_MODE == ret || OB_ENTRY_NOT_EXIST == ret) {
           // archive is not on or lsn less than the start_lsn in archive
+          ctx.set_fetch_mode(FetchMode::FETCHMODE_ONLINE, "LSReplicaMayMigrate");
           ret = OB_ERR_OUT_OF_LOWER_BOUND;
         } else {
           // other error code, retry because various error code would be returned, retry could fix some problem
@@ -631,6 +632,8 @@ int ObCdcFetcher::ls_fetch_log_(const ObLSID &ls_id,
             retry_count++;
             need_init_iter = true;
             ret = OB_SUCCESS;
+          } else {
+            ctx.set_fetch_mode(FetchMode::FETCHMODE_ONLINE, "LSReplicaMayMigrate");
           }
         }
       } else { // OB_SUCCESS
@@ -921,11 +924,11 @@ int ObCdcFetcher::do_fetch_missing_log_(const obrpc::ObCdcLSFetchMissLogReq &req
     } else {
       for (int64_t idx = 0; OB_SUCC(ret) && ! frt.is_stopped() && idx < miss_log_array.count(); idx++) {
         // need_init_iter should always be true, declared here to ensure need init iter be true in each loop
-        PalfBufferIterator palf_iter;
+        PalfBufferIterator palf_iter(ls_id.id(), palf::LogIOUser::CDC);
         ObRemoteLogpEntryIterator remote_iter(get_source_func);
         const obrpc::ObCdcLSFetchMissLogReq::MissLogParam &miss_log_info = miss_log_array[idx];
         const LSN &missing_lsn = miss_log_info.miss_lsn_;
-        palf::PalfBufferIterator log_entry_iter;
+        palf::PalfBufferIterator log_entry_iter(ls_id.id(), palf::LogIOUser::CDC);
         LogEntry log_entry;
         LSN lsn;
         resp.set_next_miss_lsn(missing_lsn);

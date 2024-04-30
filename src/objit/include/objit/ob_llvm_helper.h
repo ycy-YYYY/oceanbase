@@ -18,6 +18,7 @@
 #include "lib/container/ob_fast_array.h"
 #include "lib/string/ob_string.h"
 #include "common/object/ob_object.h"
+#include "share/rc/ob_tenant_base.h"
 
 namespace llvm
 {
@@ -351,9 +352,10 @@ public:
 
 public:
   ObLLVMHelper(common::ObIAllocator &allocator)
-    : allocator_(allocator),
+    : is_inited_(false),
+      allocator_(allocator),
       jc_(NULL),
-      jit_(NULL){}
+      jit_(NULL) {}
   virtual ~ObLLVMHelper();
   int init();
   void final();
@@ -367,6 +369,10 @@ public:
   static void add_symbol(const common::ObString &name, void *value);
 
   ObDIRawData get_debug_info() const;
+
+  const ObString &get_compiled_object();
+
+  int add_compiled_object(size_t length, const char *ptr);
 
 public:
   //指令
@@ -452,6 +458,7 @@ private:
   static int init_llvm();
 
 private:
+  bool is_inited_;
   common::ObIAllocator &allocator_;
   core::JitContext *jc_;
   core::ObOrcJit *jit_;

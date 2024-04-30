@@ -30,6 +30,7 @@
 #include "sql/ob_sql.h"
 #include "share/scheduler/ob_tenant_dag_scheduler.h"
 #include "storage/tx/ob_trans_service.h"
+#include "sql/engine/expr/ob_expr_last_refresh_scn.h"
 
 namespace oceanbase
 {
@@ -169,7 +170,7 @@ int ObRemoteBaseExecuteP<T>::base_before_process(int64_t tenant_schema_version,
     exec_ctx_.set_mem_attr(ObMemAttr(tenant_id, ObModIds::OB_SQL_EXEC_CONTEXT, ObCtxIds::EXECUTE_CTX_ID));
     ObPhysicalPlanCtx *plan_ctx = GET_PHY_PLAN_CTX(exec_ctx_);
     plan_ctx->set_rich_format(session_info->use_rich_format());
-
+    exec_ctx_.hide_session(); // don't show remote session in show processlist
     vt_ctx.session_ = session_info;
     vt_ctx.vt_iter_factory_ = &vt_iter_factory_;
     vt_ctx.schema_guard_ = &schema_guard_;
@@ -273,6 +274,7 @@ int ObRemoteBaseExecuteP<T>::sync_send_result(ObExecContext &exec_ctx,
     if (OB_ISNULL(spec = plan.get_root_op_spec())
         || OB_ISNULL(kit = exec_ctx.get_kit_store().get_operator_kit(spec->id_))
         || OB_ISNULL(se_op = kit->op_)) {
+      ret = OB_INVALID_ARGUMENT;
       LOG_WARN("root op spec is null", K(ret));
     }
   }
@@ -462,6 +464,14 @@ int ObRemoteBaseExecuteP<T>::execute_remote_plan(ObExecContext &exec_ctx,
           LOG_WARN("created operator is NULL", K(ret));
         } else if (OB_FAIL(plan_ctx->reserve_param_space(plan.get_param_count()))) {
           LOG_WARN("reserve rescan param space failed", K(ret), K(plan.get_param_count()));
+        } else if (!plan.get_mview_ids().empty() && plan_ctx->get_mview_ids().empty()
+                   && OB_FAIL(ObExprLastRefreshScn::set_last_refresh_scns(plan.get_mview_ids(),
+                                                                          exec_ctx.get_sql_proxy(),
+                                                                          exec_ctx.get_my_session(),
+                                                                          exec_ctx.get_das_ctx().get_snapshot().core_.version_,
+                                                                          plan_ctx->get_mview_ids(),
+                                                                          plan_ctx->get_last_refresh_scns()))) {
+          LOG_WARN("fail to set last_refresh_scns", K(ret), K(plan.get_mview_ids()));
         } else {
           if (OB_FAIL(se_op->open())) {
             LOG_WARN("fail open task", K(ret));

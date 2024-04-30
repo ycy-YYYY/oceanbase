@@ -226,11 +226,8 @@ int ObMPConnect::init_process_single_stmt(const ObMultiStmtItem &multi_stmt_item
   } else if (OB_FAIL(set_session_active(sql, session, ObTimeUtil::current_time()))) {
     LOG_WARN("fail to set session active", K(ret));
   } else {
-    const bool enable_trace_log = lib::is_trace_log_enabled();
-    if (enable_trace_log) {
-      //set session log_level.Must use ObThreadLogLevelUtils::clear() in pair
-      ObThreadLogLevelUtils::init(session.get_log_id_level_map());
-    }
+    //set session log_level.Must use ObThreadLogLevelUtils::clear() in pair
+    ObThreadLogLevelUtils::init(session.get_log_id_level_map());
     ctx.retry_times_ = 0; // 这里是建立连接的时候的初始化sql的执行，不重试
     ctx.schema_guard_ = &schema_guard;
     HEAP_VAR(ObMySQLResultSet, result, session, allocator) {
@@ -253,9 +250,7 @@ int ObMPConnect::init_process_single_stmt(const ObMultiStmtItem &multi_stmt_item
         }
         ret = (open_ret != OB_SUCCESS) ? open_ret : ret;
       }
-      if (enable_trace_log) {
-        ObThreadLogLevelUtils::clear();
-      }
+      ObThreadLogLevelUtils::clear();
     }
 
     //对于tracelog的处理，不影响正常逻辑，错误码无须赋值给ret
@@ -365,6 +360,7 @@ int ObMPConnect::process()
       session->set_client_sessid_support(conn->proxy_cap_flags_.is_client_sessid_support()
         || (conn->proxy_sessid_ == 0));
       session->set_session_sync_support(conn->proxy_cap_flags_.is_session_sync_support());
+      session->set_feedback_proxy_info_support(conn->proxy_cap_flags_.is_feedback_proxy_info_support());
       session->get_control_info().support_show_trace_ = conn->proxy_cap_flags_.is_flt_show_trace_support();
       LOG_TRACE("setup user resource group OK",
                "user_id", session->get_user_id(),
@@ -1708,7 +1704,12 @@ int ObMPConnect::check_update_proxy_capability(ObSMConnection &conn) const
     } else {
       server_proxy_cap_flag.cap_flags_.OB_CAP_PROXY_CLIENT_SESSION_ID = 0;
     }
-    conn.proxy_cap_flags_.capability_ = (server_proxy_cap_flag.capability_ & client_proxy_cap);//if old java client, set it 0
+    if (GET_MIN_CLUSTER_VERSION() >= CLUSTER_VERSION_4_3_1_0) {
+      server_proxy_cap_flag.cap_flags_.OB_CAP_FEEDBACK_PROXY_SHIFT = 1;
+    } else {
+      server_proxy_cap_flag.cap_flags_.OB_CAP_FEEDBACK_PROXY_SHIFT = 0;
+    }
+    conn.proxy_cap_flags_.capability_ = (server_proxy_cap_flag.capability_ & client_proxy_cap);  // if old java client, set it 0
 
     LOG_DEBUG("Negotiated capability",
               K(conn.proxy_cap_flags_.is_proxy_reroute_support()),

@@ -30,6 +30,8 @@
 #include "share/schema/ob_sys_variable_mgr.h" // ObSimpleSysVariableSchema
 #include "sql/resolver/ob_stmt_resolver.h"
 #include "pl/ob_pl_stmt.h"
+#include "sql/privilege_check/ob_privilege_check.h"
+#include "sql/session/ob_sql_session_info.h"
 
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
@@ -292,7 +294,8 @@ int ObSchemaChecker::check_table_or_index_exists(
     const uint64_t tenant_id,
     const uint64_t database_id,
     const ObString &table_name,
-    const bool is_hidden,
+    const bool with_hidden_flag,
+    const bool is_built_in_index,
     bool &is_exist)
 {
   int ret = OB_SUCCESS;
@@ -305,13 +308,13 @@ int ObSchemaChecker::check_table_or_index_exists(
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid arguments", K(tenant_id), K(database_id), K(table_name), K(ret));
   } else if (OB_FAIL(check_table_exists(tenant_id, database_id, table_name,
-                                        is_index_table, is_hidden, is_exist))) {
+                                        is_index_table, with_hidden_flag, is_exist))) {
     LOG_WARN("check table exist failed", K(tenant_id), K(database_id), K(table_name), K(ret));
   } else if(!is_exist) {
     is_index_table = true;
     if (OB_FAIL(check_table_exists(tenant_id, database_id, table_name,
-                                   is_index_table, is_hidden, is_exist))) {
-      LOG_WARN("check index exist failed", K(tenant_id), K(database_id), K(table_name), K(ret));
+                                   is_index_table, with_hidden_flag, is_exist, is_built_in_index))) {
+      LOG_WARN("check index exist failed", K(tenant_id), K(database_id), K(table_name), K(ret), K(is_built_in_index));
     }
   }
   return ret;
@@ -321,8 +324,9 @@ int ObSchemaChecker::check_table_exists(const uint64_t tenant_id,
                                         const uint64_t database_id,
                                         const ObString &table_name,
                                         const bool is_index_table,
-                                        const bool is_hidden,
-                                        bool &is_exist)
+                                        const bool with_hidden_flag,
+                                        bool &is_exist,
+                                        const bool is_built_in_index)
 {
   int ret = OB_SUCCESS;
 
@@ -336,9 +340,9 @@ int ObSchemaChecker::check_table_exists(const uint64_t tenant_id,
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid arguments", K(tenant_id), K(database_id), K(table_name), K(ret));
   } else {
-    if (OB_FAIL(schema_mgr_->get_table_id(tenant_id, database_id, table_name,
-                                          is_index_table, is_hidden ? ObSchemaGetterGuard::USER_HIDDEN_TABLE_TYPE : ObSchemaGetterGuard::ALL_NON_HIDDEN_TYPES, table_id))) {
-
+    if (OB_FAIL(schema_mgr_->get_table_id(tenant_id, database_id, table_name, is_index_table,
+            with_hidden_flag ? ObSchemaGetterGuard::USER_HIDDEN_TABLE_TYPE : ObSchemaGetterGuard::ALL_NON_HIDDEN_TYPES,
+            table_id, is_built_in_index))) {
       LOG_WARN("get table id failed", K(ret), K(tenant_id), K(database_id),
                K(table_name), K(is_index_table));
     } else {
@@ -372,8 +376,9 @@ int ObSchemaChecker::check_table_exists(const uint64_t tenant_id,
                                         const ObString &database_name,
                                         const ObString &table_name,
                                         const bool is_index_table,
-                                        const bool is_hidden,
-                                        bool &is_exist)
+                                        const bool with_hidden_flag,
+                                        bool &is_exist,
+                                        const bool is_built_in_index)
 {
   int ret = OB_SUCCESS;
 
@@ -386,8 +391,9 @@ int ObSchemaChecker::check_table_exists(const uint64_t tenant_id,
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid arguments", K(tenant_id), K(database_name), K(table_name), K(ret));
   } else {
-    if (OB_FAIL(schema_mgr_->get_table_id(tenant_id, database_name, table_name,
-                                          is_index_table, is_hidden ? ObSchemaGetterGuard::USER_HIDDEN_TABLE_TYPE : ObSchemaGetterGuard::ALL_NON_HIDDEN_TYPES, table_id))) {
+    if (OB_FAIL(schema_mgr_->get_table_id(tenant_id, database_name, table_name, is_index_table,
+            with_hidden_flag ? ObSchemaGetterGuard::USER_HIDDEN_TABLE_TYPE : ObSchemaGetterGuard::ALL_NON_HIDDEN_TYPES,
+            table_id, is_built_in_index))) {
       LOG_WARN("fail to check table exist", K(tenant_id), K(database_name), K(table_name),
                K(is_index_table), K(ret));
     } else {
@@ -569,9 +575,12 @@ int ObSchemaChecker::get_user_info(const uint64_t tenant_id,
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("schema checker is not inited", K(is_inited_), K(ret));
-  } else if (OB_UNLIKELY(OB_INVALID_ID == tenant_id || user_name.empty())) {
+  } else if (OB_UNLIKELY(OB_INVALID_ID == tenant_id)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid arguments", K(tenant_id), K(user_name), K(ret));
+  } else if (OB_UNLIKELY(user_name.empty())) {
+    ret = OB_USER_NOT_EXIST;
+    LOG_WARN("user is not exist", K(tenant_id), K(user_name), K(host_name), K(ret));
   } else if (OB_FAIL(schema_mgr_->get_user_id(tenant_id, user_name, host_name, user_id))) {
     LOG_WARN("get user id failed", K(tenant_id), K(user_name), K(host_name), K(ret));
   } else if (OB_FAIL(get_user_info(tenant_id, user_id, user_info))) {
@@ -769,8 +778,9 @@ int ObSchemaChecker::get_table_schema(const uint64_t tenant_id,
                                       const ObString &table_name,
                                       const bool is_index_table,
                                       const bool cte_table_fisrt,
-                                      const bool is_hidden,
-                                      const ObTableSchema *&table_schema)
+                                      const bool with_hidden_flag,
+                                      const ObTableSchema *&table_schema,
+                                      const bool is_built_in_index/*= false*/)
 {
   int ret = OB_SUCCESS;
   table_schema = NULL;
@@ -785,9 +795,9 @@ int ObSchemaChecker::get_table_schema(const uint64_t tenant_id,
     LOG_WARN("invalid arguments", K(tenant_id), K(database_id), K(table_name), K(ret));
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(schema_mgr_->get_table_schema(tenant_id, database_id, table_name,
-        is_index_table, table, is_hidden))) {
+        is_index_table, table, with_hidden_flag, is_built_in_index))) {
     LOG_WARN("get table schema failed", K(tenant_id), K(database_id), K(table_name),
-             K(is_index_table), K(ret));
+             K(with_hidden_flag), K(is_built_in_index), K(is_index_table), K(ret));
   } else {
     // 也有可能是临时cte递归表schema与已有表重名，
     // 这个时候必须由cte递归表schema优先(same with oracle)
@@ -2748,9 +2758,9 @@ int ObSchemaChecker::check_ora_grant_obj_priv(
     const uint64_t obj_id,
     const uint64_t obj_type,
     const share::ObRawObjPrivArray &table_priv_array,
-    const ObSEArray<uint64_t, 4> &ins_col_ids,
-    const ObSEArray<uint64_t, 4> &upd_col_ids,
-    const ObSEArray<uint64_t, 4> &ref_col_ids,
+    const ObIArray<uint64_t> &ins_col_ids,
+    const ObIArray<uint64_t> &upd_col_ids,
+    const ObIArray<uint64_t> &ref_col_ids,
     uint64_t &grantor_id_out,
     const ObIArray<uint64_t> &role_id_array)
 {
@@ -3137,6 +3147,32 @@ int ObSchemaChecker::get_udt_attribute_id(const uint64_t udt_id, const ObString 
   return ret;
 }
 
+bool ObSchemaChecker::enable_mysql_pl_priv_check(int64_t tenant_id, ObSchemaGetterGuard &schema_guard)
+{
+  bool enable = false;
+  uint64_t compat_version = 0;
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(GET_MIN_DATA_VERSION(tenant_id, compat_version))) {
+    LOG_WARN("fail to get data version", K(tenant_id));
+  } else if (lib::is_mysql_mode() && sql::ObSQLUtils::is_data_version_ge_422_or_431(compat_version)) {
+    const ObSysVarSchema *sys_var = NULL;
+    ObMalloc alloc(ObModIds::OB_TEMP_VARIABLES);
+    ObObj val;
+    if (OB_FAIL(schema_guard.get_tenant_system_variable(tenant_id, share::SYS_VAR__ENABLE_MYSQL_PL_PRIV_CHECK, sys_var))) {
+      LOG_WARN("fail to get tenant var schema", K(ret));
+    } else if (OB_ISNULL(sys_var)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("sys variable schema is null", KR(ret));
+    } else if (OB_FAIL(sys_var->get_value(&alloc, NULL, val))) {
+      LOG_WARN("fail to get charset var value", K(ret));
+    } else {
+      enable = val.get_bool();
+    }
+  }
+  LOG_DEBUG("show enabale mysql routine priv enable", K(enable));
+  return enable;
+}
+
 int ObSchemaChecker::remove_tmp_cte_schemas(const ObString& cte_table_name)
 {
   int ret = OB_SUCCESS;
@@ -3149,6 +3185,97 @@ int ObSchemaChecker::remove_tmp_cte_schemas(const ObString& cte_table_name)
       }
     }
   }
+  return ret;
+}
+
+int ObSchemaChecker::check_mysql_grant_role_priv(
+    const ObSqlCtx &sql_ctx,
+    const ObIArray<uint64_t> &granting_role_ids)
+{
+  int ret = OB_SUCCESS;
+
+  //check SUPER or ROLE_ADMIN [TODO PRIV]
+  ObArenaAllocator alloc;
+  ObStmtNeedPrivs stmt_need_privs(alloc);
+  ObNeedPriv need_priv("", "", OB_PRIV_USER_LEVEL, OB_PRIV_SUPER, false);
+  OZ (stmt_need_privs.need_privs_.init(1));
+  OZ (stmt_need_privs.need_privs_.push_back(need_priv));
+
+  if (OB_SUCC(ret) && OB_FAIL(ObPrivilegeCheck::check_privilege(sql_ctx, stmt_need_privs))) {
+    int ret_bak = ret;
+    ret = OB_SUCCESS;
+    const ObUserInfo *user_info = NULL;
+    uint64_t user_id = sql_ctx.session_info_->get_priv_user_id();
+    OZ (get_user_info(sql_ctx.session_info_->get_effective_tenant_id(), user_id, user_info));
+    for (int i = 0; OB_SUCC(ret) && i < granting_role_ids.count(); i++) {
+      int64_t idx = -1;
+      if (!has_exist_in_array(user_info->get_role_id_array(), granting_role_ids.at(i), &idx)
+          || ADMIN_OPTION != user_info->get_admin_option(user_info->get_role_id_option_array().at(idx))) {
+        ret = ret_bak;
+      }
+    }
+  }
+
+  return ret;
+}
+
+int ObSchemaChecker::check_mysql_revoke_role_priv(
+    const ObSqlCtx &sql_ctx,
+    const ObIArray<uint64_t> &granting_role_ids)
+{
+  int ret = OB_SUCCESS;
+
+  //check SUPER or ROLE_ADMIN [TODO PRIV]
+  ObArenaAllocator alloc;
+  ObStmtNeedPrivs stmt_need_privs(alloc);
+  ObNeedPriv need_priv("", "", OB_PRIV_USER_LEVEL, OB_PRIV_SUPER, false);
+
+  CK (OB_NOT_NULL(sql_ctx.session_info_));
+  OZ (stmt_need_privs.need_privs_.init(1));
+  OZ (stmt_need_privs.need_privs_.push_back(need_priv));
+
+  if (OB_SUCC(ret) && OB_FAIL(ObPrivilegeCheck::check_privilege(sql_ctx, stmt_need_privs))) {
+    if (sql_ctx.session_info_->is_read_only()) {
+      //SUPER or CONNECTION_ADMIN [TODO PRIV]
+    } else {
+      int ret_bak = ret;
+      ret = OB_SUCCESS;
+      const ObUserInfo *user_info = NULL;
+      uint64_t user_id = sql_ctx.session_info_->get_priv_user_id();
+      OZ (get_user_info(sql_ctx.session_info_->get_effective_tenant_id(), user_id, user_info));
+      for (int i = 0; OB_SUCC(ret) && i < granting_role_ids.count(); i++) {
+        int64_t idx = -1;
+        if (!has_exist_in_array(user_info->get_role_id_array(), granting_role_ids.at(i), &idx)
+            || ADMIN_OPTION != user_info->get_admin_option(user_info->get_role_id_option_array().at(idx))) {
+          ret = ret_bak;
+        }
+      }
+    }
+  }
+
+  return ret;
+}
+
+int ObSchemaChecker::check_set_default_role_priv(
+    const ObSqlCtx &sql_ctx)
+{
+  int ret = OB_SUCCESS;
+  ObArenaAllocator alloc;
+  ObStmtNeedPrivs stmt_need_privs(alloc);
+  ObNeedPriv need_priv("mysql", "", OB_PRIV_DB_LEVEL, OB_PRIV_UPDATE, false);
+
+  OZ (stmt_need_privs.need_privs_.init(1));
+  OZ (stmt_need_privs.need_privs_.push_back(need_priv));
+
+  //check CREATE USER or UPDATE privilege on mysql
+  if (OB_SUCC(ret) && OB_FAIL(ObPrivilegeCheck::check_privilege(sql_ctx, stmt_need_privs))) {
+    stmt_need_privs.need_privs_.at(0) =
+        ObNeedPriv("", "", OB_PRIV_USER_LEVEL, OB_PRIV_CREATE_USER, false);
+    if (OB_FAIL(ObPrivilegeCheck::check_privilege(sql_ctx, stmt_need_privs))) {
+      LOG_WARN("no priv", K(ret));
+    }
+  }
+
   return ret;
 }
 

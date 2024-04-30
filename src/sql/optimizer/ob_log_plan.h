@@ -72,7 +72,7 @@ class ObOptimizerContext;
 class ObLogJoin;
 struct JoinInfo;
 struct ConflictDetector;
-struct FunctionTableDependInfo;
+struct TableDependInfo;
 class ObLogSort;
 class ObLogJoinFilter;
 class ObLogSubPlanFilter;
@@ -88,7 +88,7 @@ class ValuesTablePath;
 class ObSelectLogPlan;
 class ObThreeStageAggrInfo;
 
-struct FunctionTableDependInfo {
+struct TableDependInfo {
   TO_STRING_KV(
     K_(depend_table_set),
     K_(table_idx)
@@ -96,7 +96,6 @@ struct FunctionTableDependInfo {
   ObRelIds depend_table_set_;  //function table expr所依赖的表
   int64_t table_idx_; //function table的bit index
 };
-typedef struct FunctionTableDependInfo JsonTableDependInfo;
 
 #undef KYES_DEF
 
@@ -201,7 +200,7 @@ public:
 
   /*
    * plan root will be set after we generate raw plan (see function generate_raw_plan())
-   * do not involve this function during generate_row_plan()
+   * do not involve this function during generate_raw_plan()
    */
   inline ObLogicalOperator *get_plan_root() const { return root_; }
 
@@ -890,6 +889,11 @@ public:
                                       const bool need_sort,
                                       const bool is_local_order);
 
+  int allocate_dist_range_sort_for_select_into(ObLogicalOperator *&top,
+                                      const ObIArray<OrderItem> &sort_keys,
+                                      const bool need_sort,
+                                      const bool is_local_order);
+
   int try_allocate_sort_as_top(ObLogicalOperator *&top,
                                const ObIArray<OrderItem> &sort_keys,
                                const bool need_sort,
@@ -986,6 +990,8 @@ public:
   /** @brief allocate select into as new top(parent)**/
 
   int allocate_select_into_as_top(ObLogicalOperator *&old_top);
+
+  int check_select_into(bool &has_select_into, bool &is_single, bool &has_order_by);
 
   int allocate_expr_values_as_top(ObLogicalOperator *&top,
                                   const ObIArray<ObRawExpr*> *filter_exprs = NULL);
@@ -1295,14 +1301,9 @@ public:
                                     const EqualSets &equal_sets,
                                     ObShardingInfo *&cached_sharding);
 
-  inline const common::ObIArray<FunctionTableDependInfo> &get_function_table_depend_infos() const
+  inline const common::ObIArray<TableDependInfo> &get_table_depend_infos() const
   {
-    return function_table_depend_infos_;
-  }
-
-  inline const common::ObIArray<JsonTableDependInfo> &get_json_table_depend_infos() const
-  {
-    return json_table_depend_infos_;
+    return table_depend_infos_;
   }
 
   int allocate_output_expr_for_values_op(ObLogicalOperator &values_op);
@@ -1421,6 +1422,16 @@ public:
 
   int construct_startup_filter_for_limit(ObRawExpr *limit_expr, ObLogicalOperator *log_op);
 
+  int prepare_text_retrieval_scan(const ObIArray<ObRawExpr*> &exprs, ObLogicalOperator *scan);
+  int prepare_multivalue_retrieval_scan(ObLogicalOperator *scan);
+  int try_push_topn_into_text_retrieval_scan(ObLogicalOperator *&top,
+                                             ObRawExpr *topn_expr,
+                                             ObRawExpr *limit_expr,
+                                             ObRawExpr *offset_expr,
+                                             bool is_fetch_with_ties,
+                                             bool need_exchange,
+                                             const ObIArray<OrderItem> &sort_keys,
+                                             bool &need_further_sort);
 protected:
   virtual int generate_normal_raw_plan() = 0;
   virtual int generate_dblink_raw_plan();
@@ -1535,7 +1546,12 @@ protected:
   int init_function_table_depend_info(const ObIArray<TableItem*> &table_items);
 
   int init_json_table_depend_info(const ObIArray<TableItem*> &table_items);
-
+  // init json_table non_const default value
+  int init_json_table_column_depend_info(ObRelIds& depend_table_set,
+                                                   TableItem* json_table,
+                                                   const ObDMLStmt *stmt);
+  int init_default_val_json(ObRelIds& depend_table_set,
+                            ObRawExpr*& default_expr);
   int check_need_bushy_tree(common::ObIArray<JoinOrderArray> &join_rels,
                             const int64_t join_level,
                             bool &need);
@@ -1748,6 +1764,8 @@ protected:
   int create_hash_sortkey(const int64_t part_cnt,
                           const common::ObIArray<OrderItem> &order_keys,
                           OrderItem &hash_sortkey);
+
+  int init_lateral_table_depend_info(const ObIArray<TableItem*> &table_items);
 private: // member functions
   static int strong_select_replicas(const common::ObAddr &local_server,
                                     common::ObIArray<ObCandiTableLoc*> &phy_tbl_loc_info_list,
@@ -1784,7 +1802,7 @@ private: // member functions
                      const common::ObIArray<LocationConstraint> &base_location_cons,
                      ObStrictPwjComparer &pwj_comparer,
                      PWJTabletIdMap &pwj_map) const;
-  bool has_depend_function_table(const ObRelIds& table_ids);
+  bool has_depend_table(const ObRelIds& table_ids);
   int get_histogram_by_join_exprs(ObOptimizerContext &optimizer_ctx,
                                   const ObDMLStmt *stmt,
                                   const ObRawExpr &expr,
@@ -1792,7 +1810,6 @@ private: // member functions
   int get_popular_values_hash(common::ObIAllocator &allocator,
                               ObOptColumnStatHandle &handle,
                               common::ObIArray<ObObj> &popular_values) const;
-  bool has_depend_json_table(const ObRelIds& table_ids);
   int adjust_expr_properties_for_external_table(ObRawExpr *col_expr, ObRawExpr *&expr) const;
 
   int compute_duplicate_table_replicas(ObLogicalOperator *op);
@@ -1902,8 +1919,7 @@ private:
   uint64_t outline_print_flags_; // used print outline
   common::ObSEArray<ObRelIds, 8, common::ModulePageAllocator, true> bushy_tree_infos_;
   common::ObSEArray<ObRawExpr *, 8, common::ModulePageAllocator, true> onetime_exprs_; // allocated onetime exprs
-  common::ObSEArray<FunctionTableDependInfo, 8, common::ModulePageAllocator, true> function_table_depend_infos_;
-  common::ObSEArray<JsonTableDependInfo, 8, common::ModulePageAllocator, true> json_table_depend_infos_;
+  common::ObSEArray<TableDependInfo, 8, common::ModulePageAllocator, true> table_depend_infos_;
   common::ObSEArray<ConflictDetector*, 8, common::ModulePageAllocator, true> conflict_detectors_;
   ObJoinOrder *join_order_;
   IdOrderMapAllocer id_order_map_allocer_;

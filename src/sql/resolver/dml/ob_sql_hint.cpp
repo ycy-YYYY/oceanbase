@@ -39,6 +39,9 @@ void ObQueryHint::reset()
   used_trans_hints_.reuse();
   qb_name_map_.reuse();
   stmt_id_map_.reuse();
+  sel_start_id_ = 1;
+  set_start_id_ = 1;
+  other_start_id_ = 1;
 }
 
 int ObQueryHint::create_hint_table(ObIAllocator *allocator, ObTableInHint *&table)
@@ -313,7 +316,7 @@ int ObQueryHint::init_query_hint(ObIAllocator *allocator,
     LOG_WARN("failed to create qb name map", K(ret));
   } else if (OB_FAIL(reset_duplicate_qb_name())) {
     LOG_WARN("failed to reset duplicate qb name", K(ret));
-  } else if (OB_FAIL(generate_orig_stmt_qb_name(*allocator))) {
+  } else if (OB_FAIL(generate_orig_stmt_qb_name(*allocator, 0))) {
     LOG_WARN("failed to generate stmt name after resolve", K(ret));
   } else if (OB_FAIL(distribute_hint_to_orig_stmt(stmt))) {
     LOG_WARN("faild to distribute hint to orig stmt", K(ret));
@@ -387,17 +390,13 @@ int ObQueryHint::adjust_qb_name_for_stmt(ObIAllocator &allocator,
   return ret;
 }
 
-int ObQueryHint::generate_orig_stmt_qb_name(ObIAllocator &allocator)
+int ObQueryHint::generate_orig_stmt_qb_name(ObIAllocator &allocator, int64_t inited_stmt_count)
 {
   int ret = OB_SUCCESS;
-  int64_t sel_start_id = 1;
-  int64_t set_start_id = 1;
-  int64_t other_start_id = 1;
   char buf[OB_MAX_QB_NAME_LENGTH];
   int64_t buf_len = OB_MAX_QB_NAME_LENGTH;
   ObString qb_name;
-  qb_name_map_.reuse();
-  for (int64_t idx = 0; OB_SUCC(ret) && idx < stmt_id_map_.count(); ++idx) {
+  for (int64_t idx = inited_stmt_count; OB_SUCC(ret) && idx < stmt_id_map_.count(); ++idx) {
     QbNames &qb_names = stmt_id_map_.at(idx);
     const char *stmt_name = get_dml_stmt_name(qb_names.stmt_type_, qb_names.is_set_stmt_);
     int64_t pos = 0;
@@ -415,8 +414,8 @@ int ObQueryHint::generate_orig_stmt_qb_name(ObIAllocator &allocator)
       LOG_WARN("failed print buf stmt_name", K(ret));
     } else {
       int64_t &id_start = stmt::T_SELECT == qb_names.stmt_type_
-                          ? (qb_names.is_set_stmt_ ? set_start_id : sel_start_id)
-                          : other_start_id;
+                          ? (qb_names.is_set_stmt_ ? set_start_id_ : sel_start_id_)
+                          : other_start_id_;
       int64_t old_pos = pos;
       int64_t cnt = 0;
       qb_name.reset();
@@ -1270,7 +1269,7 @@ int ObStmtHint::replace_name_for_single_table_view(ObIAllocator *allocator,
   const ObDMLStmt *child_stmt = NULL;
   if (OB_ISNULL(query_hint_)
       || OB_ISNULL(stmt.get_table_item_by_id(view_table.table_id_))
-      || OB_UNLIKELY(!view_table.is_generated_table())
+      || OB_UNLIKELY(!view_table.is_generated_table() && !view_table.is_lateral_table())
       || OB_ISNULL(child_stmt = view_table.ref_query_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected params", K(ret), K(query_hint_), K(target_table), K(child_stmt));
@@ -2344,7 +2343,7 @@ int LogTableHint::init_index_hints(ObSqlSchemaGuard &schema_guard)
                  OB_ISNULL(index_schema)) {
         ret = OB_SCHEMA_ERROR;
         LOG_WARN("fail to get table schema", K(index_id), K(ret));
-      } else if (index_schema->is_domain_index()) {
+      } else if (index_schema->is_fts_index()) {
         // just ignore domain index
       } else if (OB_FAIL(index_schema->get_index_name(index_name))) {
         LOG_WARN("fail to get index name", K(index_name), K(ret));

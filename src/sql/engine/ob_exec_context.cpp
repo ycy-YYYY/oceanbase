@@ -130,7 +130,7 @@ ObExecContext::ObExecContext(ObIAllocator &allocator)
     table_direct_insert_ctx_(),
     errcode_(OB_SUCCESS),
     dblink_snapshot_map_(),
-    cur_row_num_(-1),
+    user_logging_ctx_(),
     is_online_stats_gathering_(false)
 {
 }
@@ -258,16 +258,6 @@ int ObExecContext::init_phy_op(const uint64_t phy_op_size)
       LOG_WARN("init operator kit store failed", K(ret));
     }
   }
-  if (OB_SUCC(ret)) {
-    if (OB_ISNULL(gi_task_map_)) {
-      // Do nothing.
-    } else if (gi_task_map_->created()) {
-      // Do nothing. If this map has been created, it means this plan is trying to reopen.
-    } else if (OB_FAIL(gi_task_map_->create(PARTITION_WISE_JOIN_TSC_HASH_BUCKET_NUM, /* assume no more than 8 table scan in a plan */
-        ObModIds::OB_SQL_PX))) {
-      LOG_WARN("create gi task map failed", K(ret));
-    }
-  }
   return ret;
 }
 
@@ -353,7 +343,10 @@ int ObExecContext::build_temp_expr_ctx(const ObTempExpr &temp_expr, ObTempExprCt
   char **frames = NULL;
   char *mem = static_cast<char*>(get_allocator().alloc(sizeof(ObTempExprCtx)));
   ObArray<char *> tmp_param_frame_ptrs;
-  CK(OB_NOT_NULL(mem));
+  if (OB_ISNULL(mem)) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    LOG_WARN("no more memory to create temp expr ctx", K(ret));
+  }
   OX(temp_expr_ctx = new(mem)ObTempExprCtx(*this));
   OZ(temp_expr.alloc_frame(get_allocator(), tmp_param_frame_ptrs, frame_cnt, frames));
   OX(temp_expr_ctx->frames_ = frames);
@@ -863,7 +856,7 @@ int ObExecContext::get_pwj_map(PWJTabletIdMap *&pwj_map)
   return ret;
 }
 
-int ObExecContext::get_local_var_array(int64_t local_var_array_id, const ObLocalSessionVar *&var_array)
+int ObExecContext::get_local_var_array(int64_t local_var_array_id, const ObSolidifiedVarsContext *&var_array)
 {
   int ret = OB_SUCCESS;
   var_array = NULL;

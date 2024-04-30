@@ -205,6 +205,10 @@ public:
   static bool is_list_values_equal(
        const common::ObRowkey &fir_values,
        const common::ObIArray<common::ObNewRow> &sed_values);
+
+  int update_default_partition_part_idx_for_external_table(const ObTableSchema &orig_table_schema,
+                                        const ObTableSchema &new_table_schema,
+                                        ObMySQLTransaction &trans);
   int add_table_partitions(const share::schema::ObTableSchema &orig_table_schema,
                            share::schema::ObTableSchema &inc_table_schema,
                            const int64_t schema_version,
@@ -358,6 +362,14 @@ public:
                                        const ObIndexStatus *new_index_status,
                                        common::ObMySQLTransaction &trans,
                                        share::schema::ObTableSchema &new_index_table_schema);
+  int alter_table_rename_index_with_origin_index_name(
+      const uint64_t tenant_id,
+      const uint64_t index_table_id,
+      const ObString &new_index_name, // Attention!!! origin index name, don't use table name. For example, __idx_500005_{index_name}, please using index_name!!!
+      const ObIndexStatus &new_index_status,
+      common::ObMySQLTransaction &trans,
+      share::schema::ObTableSchema &new_index_table_schema);
+
   virtual int alter_index_table_parallel(const uint64_t tenant_id,
                                          const uint64_t data_table_id,
                                          const uint64_t database_id,
@@ -617,6 +629,23 @@ public:
                            const share::schema::ObObjPrivSortKey &obj_priv_key,
                            const share::ObRawObjPrivArray &obj_priv_array,
                            const bool revoke_all_ora);
+
+  virtual int grant_routine(const ObRoutinePrivSortKey &routine_priv_key,
+                            const ObPrivSet priv_set,
+                            common::ObMySQLTransaction &trans,
+                            const uint64_t option,
+                            const bool gen_ddl_stmt = true);
+  virtual int revoke_routine(const ObRoutinePrivSortKey &routine_priv_key,
+                            const ObPrivSet priv_set,
+                            common::ObMySQLTransaction &trans,
+                            const bool report_error = true,
+                            const bool gen_ddl_stmt = true);
+  virtual int grant_column(ObSchemaGetterGuard &schema_guard,
+                           const ObColumnPrivSortKey &column_priv_key,
+                           const ObPrivSet priv_set,
+                           const ObString *ddl_stmt_str,
+                           common::ObMySQLTransaction &trans,
+                           const bool is_grant);
   virtual int grant_revoke_role(const uint64_t tenant_id,
                                 const share::schema::ObUserInfo &user_info,
                                 const common::ObIArray<uint64_t> &role_ids,
@@ -1006,6 +1035,32 @@ public:
                         const share::schema::ObTableSchema *table);
   int try_add_dep_info_for_synonym(const ObSimpleSynonymSchema *synonym_info,
                                    common::ObMySQLTransaction &trans);
+  int exchange_table_partitions(const share::schema::ObTableSchema &orig_table_schema,
+                                share::schema::ObTableSchema &inc_table_schema,
+                                share::schema::ObTableSchema &del_table_schema,
+                                common::ObMySQLTransaction &trans);
+  int exchange_table_subpartitions(const share::schema::ObTableSchema &orig_table_schema,
+                                share::schema::ObTableSchema &inc_table_schema,
+                                share::schema::ObTableSchema &del_table_schema,
+                                common::ObMySQLTransaction &trans);
+  int get_target_auto_inc_sequence_value(const uint64_t tenant_id,
+                                         const uint64_t table_id,
+                                         const uint64_t column_id,
+                                         uint64_t &sequence_value,
+                                         common::ObMySQLTransaction &trans);
+  int set_target_auto_inc_sync_value(const uint64_t tenant_id,
+                                     const uint64_t table_id,
+                                     const uint64_t column_id,
+                                     const uint64_t new_sequence_value,
+                                     const uint64_t new_sync_value,
+                                     common::ObMySQLTransaction &trans);
+  int get_target_sequence_sync_value(const uint64_t tenant_id,
+                                     const uint64_t sequence_id,
+                                     common::ObMySQLTransaction &trans,
+                                     ObIAllocator &allocator,
+                                     common::number::ObNumber &next_value);
+  int alter_target_sequence_start_with(const ObSequenceSchema &sequence_schema,
+                                       common::ObMySQLTransaction &trans);
 private:
   virtual int set_need_flush_ora(
       share::schema::ObSchemaGetterGuard &schema_guard,
@@ -1098,6 +1153,25 @@ private:
                            int64_t routine_id);
 
 private:
+  int alter_table_rename_built_in_fts_index_(
+      const uint64_t tenant_id,
+      const uint64_t data_table_id,
+      const uint64_t database_id,
+      const ObString &index_name,
+      const ObString &new_index_name,
+      const ObIndexStatus *new_index_status,
+      share::schema::ObSchemaGetterGuard &schema_guard,
+      common::ObMySQLTransaction &trans,
+      ObArenaAllocator &allocator);
+
+  int inner_alter_table_rename_index_(
+      const uint64_t tenant_id,
+      const share::schema::ObTableSchema *index_table_schema,
+      const ObString &new_index_table_name,
+      const ObIndexStatus *new_index_status,
+      common::ObMySQLTransaction &trans,
+      share::schema::ObTableSchema &new_index_table_schema);
+
   int drop_fk_cascade(
       uint64_t tenant_id,
       share::schema::ObSchemaGetterGuard &schema_guard,

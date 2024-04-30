@@ -40,7 +40,6 @@
 #include "share/ob_tablet_replica_checksum_operator.h" // ObTabletReplicaChecksumItem
 #include "share/rc/ob_tenant_base.h"
 
-#include "storage/ob_partition_component_factory.h"
 #include "storage/ob_i_table.h"
 #include "storage/tx/ob_trans_service.h"
 #include "sql/optimizer/ob_storage_estimator.h"
@@ -731,6 +730,7 @@ int ObService::backup_completing_log(const obrpc::ObBackupComplLogArg &arg)
   SCN start_scn = arg.start_scn_;
   SCN end_scn = arg.end_scn_;
   ObLSID ls_id = arg.ls_id_;
+  const bool is_only_calc_stat = arg.is_only_calc_stat_;
   ObMySQLProxy *sql_proxy = GCTX.sql_proxy_;
   if (!arg.is_valid() || OB_ISNULL(sql_proxy)) {
     ret = OB_INVALID_ARGUMENT;
@@ -738,7 +738,7 @@ int ObService::backup_completing_log(const obrpc::ObBackupComplLogArg &arg)
   } else if (OB_FAIL(ObBackupStorageInfoOperator::get_backup_dest(*sql_proxy, tenant_id, arg.backup_path_, backup_dest))) {
     LOG_WARN("failed to get backup dest", KR(ret), K(arg));
   } else if (OB_FAIL(ObBackupHandler::schedule_backup_complement_log_dag(
-      job_desc, backup_dest, tenant_id, backup_set_desc, ls_id, start_scn, end_scn))) {
+      job_desc, backup_dest, tenant_id, backup_set_desc, ls_id, start_scn, end_scn, is_only_calc_stat))) {
     LOG_WARN("failed to schedule backup data dag", KR(ret), K(arg));
   } else {
     SERVER_EVENT_ADD("backup_data", "schedule_backup_complement_log",
@@ -2125,15 +2125,20 @@ int ObService::set_tracepoint(const obrpc::ObAdminSetTPArg &arg)
     ret = OB_NOT_INIT;
     LOG_WARN("not init", K(ret));
   } else {
+    EventItem item;
+    item.error_code_ = arg.error_code_;
+    item.occur_ = arg.occur_;
+    item.trigger_freq_ = arg.trigger_freq_;
+    item.cond_ = arg.cond_;
     if (arg.event_name_.length() > 0) {
       ObSqlString str;
       if (OB_FAIL(str.assign(arg.event_name_))) {
         LOG_WARN("string assign failed", K(ret));
-      } else {
-        TP_SET_EVENT(str.ptr(), arg.error_code_, arg.occur_, arg.trigger_freq_, arg.cond_);
+      } else if (OB_FAIL(EventTable::instance().set_event(str.ptr(), item))) {
+        LOG_WARN("Failed to set tracepoint event, tp_name does not exist.", K(ret), K(arg.event_name_));
       }
-    } else {
-      TP_SET_EVENT(arg.event_no_, arg.error_code_, arg.occur_, arg.trigger_freq_, arg.cond_);
+    } else if (OB_FAIL(EventTable::instance().set_event(arg.event_no_, item))) {
+      LOG_WARN("Failed to set tracepoint event, tp_no does not exist.", K(ret), K(arg.event_no_));
     }
     LOG_INFO("set event", K(arg));
   }

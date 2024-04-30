@@ -94,10 +94,13 @@ ob_set_subtarget(ob_server mysql
   mysql/obmp_stmt_send_long_data.cpp
   mysql/obmp_stmt_send_piece_data.cpp
   mysql/obmp_utils.cpp
+  mysql/obmp_auth_response.cpp
   mysql/obsm_conn_callback.cpp
   mysql/obsm_handler.cpp
   mysql/obsm_row.cpp
   mysql/obsm_utils.cpp
+  mysql/obmp_set_option.cpp
+  mysql/ob_feedback_proxy_utils.cpp
 )
 
 ob_set_subtarget(ob_server net
@@ -175,6 +178,14 @@ ob_set_subtarget(ob_server table_load
   table_load/control/ob_table_load_control_rpc_executor.cpp
   table_load/control/ob_table_load_control_rpc_proxy.cpp
   table_load/control/ob_table_load_control_rpc_struct.cpp
+  table_load/resource/ob_table_load_resource_manager.cpp
+  table_load/resource/ob_table_load_resource_processor.cpp
+  table_load/resource/ob_table_load_resource_rpc_executor.cpp
+  table_load/resource/ob_table_load_resource_rpc_proxy.cpp
+  table_load/resource/ob_table_load_resource_rpc_struct.cpp
+  table_load/resource/ob_table_load_resource_service.cpp
+  table_load/ob_table_load_assigned_memory_manager.cpp
+  table_load/ob_table_load_assigned_task_manager.cpp
   table_load/ob_table_load_autoinc_nextval.cpp
   table_load/ob_table_load_bucket.cpp
   table_load/ob_table_load_client_service.cpp
@@ -197,6 +208,7 @@ ob_set_subtarget(ob_server table_load
   table_load/ob_table_load_store_ctx.cpp
   table_load/ob_table_load_store_trans.cpp
   table_load/ob_table_load_store.cpp
+  table_load/ob_table_load_struct.cpp
   table_load/ob_table_load_table_compactor.cpp
   table_load/ob_table_load_table_ctx.cpp
   table_load/ob_table_load_task_scheduler.cpp
@@ -252,6 +264,7 @@ ob_set_subtarget(ob_server virtual_table
   virtual_table/ob_all_virtual_ls_info.cpp
   virtual_table/ob_all_virtual_ls_snapshot.cpp
   virtual_table/ob_all_virtual_timestamp_service.cpp
+  virtual_table/ob_all_virtual_tracepoint_info.cpp
   virtual_table/ob_all_virtual_transaction_freeze_checkpoint.cpp
   virtual_table/ob_all_virtual_transaction_checkpoint.cpp
   virtual_table/ob_all_virtual_checkpoint.cpp
@@ -350,6 +363,7 @@ ob_set_subtarget(ob_server virtual_table
   virtual_table/ob_information_triggers_table.cpp
   virtual_table/ob_information_user_privileges_table.cpp
   virtual_table/ob_information_query_response_time.cpp
+  virtual_table/ob_information_schema_enable_roles_table.cpp
   virtual_table/ob_iterate_private_virtual_table.cpp
   virtual_table/ob_iterate_virtual_table.cpp
   virtual_table/ob_mem_leak_checker_info.cpp
@@ -404,10 +418,15 @@ ob_set_subtarget(ob_server virtual_table
   virtual_table/ob_all_virtual_cgroup_config.cpp
   virtual_table/ob_virtual_flt_config.cpp
   virtual_table/ob_all_virtual_kv_connection.cpp
+  virtual_table/ob_all_virtual_tenant_resource_limit.cpp
+  virtual_table/ob_all_virtual_tenant_resource_limit_detail.cpp
   virtual_table/ob_all_virtual_activity_metrics.cpp
   virtual_table/ob_all_virtual_checkpoint_diagnose_info.cpp
   virtual_table/ob_all_virtual_checkpoint_diagnose_memtable_info.cpp
   virtual_table/ob_all_virtual_nic_info.cpp
+  virtual_table/ob_all_virtual_storage_ha_error_diagnose.cpp
+  virtual_table/ob_all_virtual_storage_ha_perf_diagnose.cpp
+  virtual_table/ob_all_virtual_sys_variable_default_value.cpp
 )
 
 ob_server_add_target(ob_server)

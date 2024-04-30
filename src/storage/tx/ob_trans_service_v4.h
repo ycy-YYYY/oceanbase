@@ -260,7 +260,7 @@ int abort_participants_(const ObTxDesc &tx_desc);
 int acquire_local_snapshot_(const share::ObLSID &ls_id,
                             share::SCN &snapshot,
                             const bool is_read_only,
-                            bool &acquire_from_follower);
+                            ObRole &role);
 int sync_acquire_global_snapshot_(ObTxDesc &tx,
                                   const int64_t expire_ts,
                                   share::SCN &snapshot,
@@ -268,8 +268,7 @@ int sync_acquire_global_snapshot_(ObTxDesc &tx,
 int acquire_global_snapshot__(const int64_t expire_ts,
                               const int64_t gts_ahead,
                               share::SCN &snapshot,
-                              int64_t &uncertain_bound,
-                              ObFunction<bool()> interrupt_checker);
+                              int64_t &uncertain_bound);
 int batch_post_rollback_savepoint_msg_(ObTxDesc &tx,
                                        ObTxRollbackSPMsg &msg,
                                        const ObTxRollbackParts &list,

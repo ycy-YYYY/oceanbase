@@ -13,7 +13,6 @@
 #ifndef OCEANBASE_STORAGE_OB_LS_TABLET_SERVICE
 #define OCEANBASE_STORAGE_OB_LS_TABLET_SERVICE
 
-#include "storage/meta_mem/ob_tablet_handle.h"
 #include "common/ob_tablet_id.h"
 #include "lib/container/ob_array_serialization.h"
 #include "lib/container/ob_iarray.h"
@@ -286,7 +285,8 @@ public:
   int create_memtable(
       const common::ObTabletID &tablet_id,
       const int64_t schema_version,
-      const bool for_replay = false,
+      const bool for_direct_load,
+      const bool for_replay,
       const share::SCN clog_checkpoint_scn = share::SCN::min_scn());
   int get_read_tables(
       const common::ObTabletID tablet_id,
@@ -657,6 +657,10 @@ private:
       ObObj &old_obj,
       ObLobLocatorV2 &delta_lob,
       ObObj &obj);
+  static int register_ext_info_commit_cb(
+      ObDMLRunningCtx &run_ctx,
+      ObObj &col_data,
+      ObObj &ext_info_data);
   static int set_lob_storage_params(
       ObDMLRunningCtx &run_ctx,
       const ObColDesc &column,
@@ -744,6 +748,7 @@ private:
       ObStoreRow &store_row,
       const bool need_copy_cells);
   static int insert_row_to_tablet(
+      const bool check_exist,
       ObTabletHandle &tablet_handle,
       ObDMLRunningCtx &run_ctx,
       ObStoreRow &tbl_row);

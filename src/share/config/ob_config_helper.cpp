@@ -405,6 +405,47 @@ bool ObConfigCompressOptionChecker::check(const ObConfigItem &t) const
   return is_valid;
 }
 
+bool ObConfigMaxSyslogFileCountChecker::check(const ObConfigItem &t) const
+{
+  bool is_valid = false;
+  int64_t max_count = ObConfigIntParser::get(t.str(), is_valid);
+  if (is_valid) {
+    int64_t uncompressed_count = GCONF.syslog_file_uncompressed_count;
+    if (max_count == 0 || max_count >= uncompressed_count) {
+      is_valid = true;
+    } else {
+      is_valid = false;
+    }
+  }
+  return is_valid;
+}
+
+bool ObConfigSyslogCompressFuncChecker::check(const ObConfigItem &t) const
+{
+  bool is_valid = false;
+  for (int i = 0; i < ARRAYSIZEOF(common::syslog_compress_funcs) && !is_valid; ++i) {
+    if (0 == ObString::make_string(syslog_compress_funcs[i]).case_compare(t.str())) {
+      is_valid = true;
+    }
+  }
+  return is_valid;
+}
+
+bool ObConfigSyslogFileUncompressedCountChecker::check(const ObConfigItem &t) const
+{
+  bool is_valid = false;
+  int64_t uncompressed_count = ObConfigIntParser::get(t.str(), is_valid);
+  if (is_valid) {
+    int64_t max_count = GCONF.max_syslog_file_count;
+    if (uncompressed_count >= 0 && (max_count == 0 || uncompressed_count <= max_count)) {
+      is_valid = true;
+    } else {
+      is_valid = false;
+    }
+  }
+  return is_valid;
+}
+
 bool ObConfigLogLevelChecker::check(const ObConfigItem &t) const
 {
   const ObString tmp_str(t.str());
@@ -647,7 +688,8 @@ int64_t ObConfigIntParser::get(const char *str, bool &valid)
 }
 
 int64_t ObConfigCapacityParser::get(const char *str, bool &valid,
-                                    bool check_unit /* = true */)
+                                    bool check_unit /* = true */,
+                                    bool use_byte /* = false*/)
 {
   char *p_unit = NULL;
   int64_t value = 0;
@@ -665,33 +707,26 @@ int64_t ObConfigCapacityParser::get(const char *str, bool &valid,
     } else if ('\0' == *p_unit) {
       if (check_unit) {
         valid = false;
-      } else {
+      } else if (!use_byte) {
         value <<= CAP_MB;
       }
-    } else if (0 == STRCASECMP("b", p_unit)
-        || 0 == STRCASECMP("byte", p_unit)) {
+    } else if (0 == STRCASECMP("b", p_unit) || 0 == STRCASECMP("byte", p_unit)) {
       // do nothing
-    } else if (0 == STRCASECMP("kb", p_unit)
-        || 0 == STRCASECMP("k", p_unit)) {
+    } else if (0 == STRCASECMP("kb", p_unit) || 0 == STRCASECMP("k", p_unit)) {
       value <<= CAP_KB;
-    } else if (0 == STRCASECMP("mb", p_unit)
-        || 0 == STRCASECMP("m", p_unit)) {
+    } else if (0 == STRCASECMP("mb", p_unit) || 0 == STRCASECMP("m", p_unit)) {
       value <<= CAP_MB;
-    } else if (0 == STRCASECMP("gb", p_unit)
-        || 0 == STRCASECMP("g", p_unit)) {
+    } else if (0 == STRCASECMP("gb", p_unit) || 0 == STRCASECMP("g", p_unit)) {
       value <<= CAP_GB;
-    } else if (0 == STRCASECMP("tb", p_unit)
-        || 0 == STRCASECMP("t", p_unit)) {
+    } else if (0 == STRCASECMP("tb", p_unit) || 0 == STRCASECMP("t", p_unit)) {
       value <<= CAP_TB;
-    } else if (0 == STRCASECMP("pb", p_unit)
-        || 0 == STRCASECMP("p", p_unit)) {
+    } else if (0 == STRCASECMP("pb", p_unit) || 0 == STRCASECMP("p", p_unit)) {
       value <<= CAP_PB;
     } else {
       valid = false;
-      OB_LOG_RET(WARN, OB_ERR_UNEXPECTED, "set capacity error", K(str), K(p_unit));
+      OB_LOG_RET(WARN, OB_ERR_UNEXPECTED, "get capacity error", K(str), K(p_unit));
     }
   }
-
   return value;
 }
 

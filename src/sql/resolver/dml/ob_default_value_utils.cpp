@@ -18,6 +18,7 @@
 #include "sql/resolver/dml/ob_insert_stmt.h"
 #include "sql/resolver/expr/ob_raw_expr_util.h"
 #include "sql/session/ob_sql_session_info.h"
+#include "sql/resolver/dml/ob_del_upd_resolver.h"
 namespace oceanbase
 {
 using namespace common;
@@ -372,11 +373,21 @@ int ObDefaultValueUtils::build_default_expr_strict(const ColumnItem *column, ObR
   } else if (NULL != column->default_value_expr_) {
     if (OB_FAIL(build_expr_default_expr(column, const_cast<ColumnItem *>(column)->default_value_expr_, expr))) {
       LOG_WARN("fail to build expr_default expr", K(ret));
+    } else {
+      ObDelUpdResolver* del_upd_resolver = dynamic_cast<ObDelUpdResolver *>(resolver_);
+      if (OB_ISNULL(del_upd_resolver)) {
+        // do nothing
+      } else if (OB_FAIL(del_upd_resolver->recursive_search_sequence_expr(expr))) {
+        LOG_WARN("fail to search sequence expr", K(ret));
+      }
     }
   } else if (column->base_cid_ == OB_HIDDEN_PK_INCREMENT_COLUMN_ID) {
     if (OB_FAIL(resolver_->build_heap_table_hidden_pk_expr(expr, column->get_expr()))) {
       LOG_WARN("failed to build next_val expr", K(ret), KPC(column->get_expr()));
     }
+  } else if (OB_ISNULL(column->get_expr())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected error, column expr is nullptr", K(ret), KPC(column));
   } else if (column->is_auto_increment()) {
     if (OB_FAIL(resolver_->build_autoinc_nextval_expr(expr,
                                                       column->base_tid_,

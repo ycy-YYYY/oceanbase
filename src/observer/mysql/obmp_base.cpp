@@ -352,7 +352,6 @@ int ObMPBase::init_process_var(sql::ObSqlCtx &ctx,
                                sql::ObSQLSessionInfo &session) const
 {
   int ret = OB_SUCCESS;
-  bool enable_udr = false;
   if (!packet_sender_.is_conn_valid()) {
     ret = OB_CONNECT_ERROR;
     LOG_WARN("connection already disconnected", K(ret));
@@ -377,13 +376,9 @@ int ObMPBase::init_process_var(sql::ObSqlCtx &ctx,
     }
     ctx.is_protocol_weak_read_ = pkt.is_weak_read();
     ctx.set_enable_strict_defensive_check(GCONF.enable_strict_defensive_check());
-    omt::ObTenantConfigGuard tenant_config(TENANT_CONF(session.get_effective_tenant_id()));
-    if (tenant_config.is_valid()) {
-      enable_udr = tenant_config->enable_user_defined_rewrite_rules;
-    }
-    ctx.set_enable_user_defined_rewrite(enable_udr);
-    LOG_TRACE("protocol flag info", K(ctx.can_reroute_sql_), K(ctx.is_protocol_weak_read_),
-        K(ctx.get_enable_strict_defensive_check()), K(enable_udr));
+    ctx.set_enable_user_defined_rewrite(session.enable_udr());
+    LOG_DEBUG("protocol flag info", K(ctx.can_reroute_sql_), K(ctx.is_protocol_weak_read_),
+        K(ctx.get_enable_strict_defensive_check()), "enable_udr", session.enable_udr());
   }
   return ret;
 }
@@ -395,7 +390,12 @@ int ObMPBase::do_after_process(sql::ObSQLSessionInfo &session,
                                bool async_resp_used) const
 {
   int ret = OB_SUCCESS;
-
+  if (session.get_is_in_retry()) {
+    // do nothing.
+  } else {
+    session.set_is_request_end(true);
+    session.set_retry_active_time(0);
+  }
   // reset warning buffers
   // 注意，此处req_has_wokenup_可能为true，不能再访问req对象
   // @todo 重构wb逻辑
@@ -616,7 +616,7 @@ int ObMPBase::process_extra_info(sql::ObSQLSessionInfo &session,
 {
   int ret = OB_SUCCESS;
   SessionInfoVerifacation sess_info_verification;
-  LOG_TRACE("process extra info", K(ret),K(pkt.get_extra_info().exist_sess_info_veri()));
+  LOG_DEBUG("process extra info", K(ret),K(pkt.get_extra_info().exist_sess_info_veri()));
   if (FALSE_IT(session.set_has_query_executed(true))) {
   } else if (pkt.get_extra_info().exist_sync_sess_info()
               && OB_FAIL(ObMPUtils::sync_session_info(session,
@@ -690,6 +690,77 @@ int ObMPBase::update_charset_sys_vars(ObSMConnection &conn, ObSQLSessionInfo &se
       SQL_ENG_LOG(WARN, "failed to update sys var", K(ret));
     } else if (OB_FAIL(sess_info.update_sys_variable(SYS_VAR_COLLATION_CONNECTION, cs_type))) {
       SQL_ENG_LOG(WARN, "failed to update sys var", K(ret));
+    }
+  }
+  return ret;
+}
+
+int ObMPBase::load_privilege_info_for_change_user(sql::ObSQLSessionInfo *session)
+{
+  int ret = OB_SUCCESS;
+
+  ObSchemaGetterGuard schema_guard;
+  ObSMConnection *conn = NULL;
+  if (OB_ISNULL(session) || OB_ISNULL(gctx_.schema_service_)) {
+    ret = OB_INVALID_ARGUMENT;
+    OB_LOG(WARN,"invalid argument", K(session), K(gctx_.schema_service_));
+  } else if (OB_ISNULL(conn = get_conn())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_ERROR("null conn", K(ret));
+  } else if (OB_FAIL(gctx_.schema_service_->get_tenant_schema_guard(
+                                  session->get_effective_tenant_id(), schema_guard))) {
+    OB_LOG(WARN,"fail get schema guard", K(ret));
+  } else {
+    SSL *ssl_st = SQL_REQ_OP.get_sql_ssl_st(req_);
+    share::schema::ObUserLoginInfo login_info = session->get_login_info();
+    share::schema::ObSessionPrivInfo session_priv;
+    // disconnect previous user connection first.
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(session->on_user_disconnect())) {
+      LOG_WARN("user disconnect failed", K(ret));
+    }
+    const ObUserInfo *user_info = NULL;
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(schema_guard.check_user_access(login_info, session_priv,
+                ssl_st, user_info))) {
+      OB_LOG(WARN, "User access denied", K(login_info), K(ret));
+    } else if (OB_FAIL(session->on_user_connect(session_priv, user_info))) {
+      OB_LOG(WARN, "user connect failed", K(ret), K(session_priv));
+    } else {
+      uint64_t db_id = OB_INVALID_ID;
+      const ObSysVariableSchema *sys_variable_schema = NULL;
+      session->set_user(session_priv.user_name_, session_priv.host_name_, session_priv.user_id_);
+      session->set_user_priv_set(session_priv.user_priv_set_);
+      session->set_db_priv_set(session_priv.db_priv_set_);
+      session->set_enable_role_array(session_priv.enable_role_id_array_);
+      if (OB_FAIL(session->set_tenant(login_info.tenant_name_, session_priv.tenant_id_))) {
+        OB_LOG(WARN, "fail to set tenant", "tenant name", login_info.tenant_name_, K(ret));
+      } else if (OB_FAIL(session->set_real_client_ip_and_port(login_info.client_ip_, session->get_client_addr_port()))) {
+          LOG_WARN("failed to set_real_client_ip", K(ret));
+      } else if (OB_FAIL(schema_guard.get_sys_variable_schema(session_priv.tenant_id_, sys_variable_schema))) {
+        LOG_WARN("get sys variable schema failed", K(ret));
+      } else if (OB_ISNULL(sys_variable_schema)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("sys variable schema is null", K(ret));
+      } else if (OB_FAIL(session->load_all_sys_vars(*sys_variable_schema, true))) {
+        LOG_WARN("load system variables failed", K(ret));
+      } else if (OB_FAIL(session->update_database_variables(&schema_guard))) {
+        OB_LOG(WARN, "failed to update database variables", K(ret));
+      } else if (!session->get_database_name().empty() &&
+                  OB_FAIL(schema_guard.get_database_id(session->get_effective_tenant_id(),
+                                                      session->get_database_name(),
+                                                      db_id))) {
+        OB_LOG(WARN, "failed to get database id", K(ret));
+      } else if (OB_FAIL(update_transmission_checksum_flag(*session))) {
+        LOG_WARN("update transmisson checksum flag failed", K(ret));
+      } else if (OB_FAIL(update_proxy_sys_vars(*session))) {
+        LOG_WARN("update_proxy_sys_vars failed", K(ret));
+      } else if (OB_FAIL(update_charset_sys_vars(*conn, *session))) {
+        LOG_WARN("fail to update charset sys vars", K(ret));
+      } else {
+        session->set_database_id(db_id);
+        session->reset_user_var();
+      }
     }
   }
   return ret;

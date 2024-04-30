@@ -36,6 +36,9 @@
 #include "share/rc/ob_tenant_base.h"
 #include "pl/sys_package/ob_dbms_sql.h"
 #include "pl/ob_pl_package_state.h"
+#ifdef OB_BUILD_ORACLE_PL
+#include "pl/opaque/ob_pl_json_type.h"
+#endif
 #include "rpc/obmysql/ob_sql_sock_session.h"
 #include "sql/engine/expr/ob_expr_regexp_context.h"
 
@@ -94,6 +97,7 @@ ObBasicSessionInfo::ObBasicSessionInfo(const uint64_t tenant_id)
       package_info_allocator_(sizeof(pl::ObPLPackageState), common::OB_MALLOC_NORMAL_BLOCK_SIZE - 32,
                               ObMalloc(lib::ObMemAttr(orig_tenant_id_, "SessPackageInfo"))),
       name_pool_(lib::ObMemAttr(orig_tenant_id_, ObModIds::OB_SQL_SESSION), OB_MALLOC_NORMAL_BLOCK_SIZE),
+      json_pl_mngr_(0),
       trans_flags_(),
       sql_scope_flags_(),
       need_reset_package_(false),
@@ -106,7 +110,7 @@ ObBasicSessionInfo::ObBasicSessionInfo(const uint64_t tenant_id)
       influence_plan_var_indexs_(),
       is_first_gen_(true),
       is_first_gen_config_(true),
-      sys_var_fac_(),
+      sys_var_fac_(orig_tenant_id_),
       next_frag_mem_point_(OB_MALLOC_NORMAL_BLOCK_SIZE), // 8KB
       sys_vars_encode_max_size_(0),
       consistency_level_(INVALID_CONSISTENCY),
@@ -153,6 +157,7 @@ ObBasicSessionInfo::ObBasicSessionInfo(const uint64_t tenant_id)
       process_query_time_(0),
       last_update_tz_time_(0),
       is_client_sessid_support_(false),
+      is_feedback_proxy_info_support_(false),
       use_rich_vector_format_(false),
       last_refresh_schema_version_(OB_INVALID_VERSION),
       force_rich_vector_format_(ForceRichFormatStatus::Disable),
@@ -180,7 +185,7 @@ ObBasicSessionInfo::~ObBasicSessionInfo()
 bool ObBasicSessionInfo::is_server_status_in_transaction() const
 {
   bool in_txn = OB_NOT_NULL(tx_desc_) && tx_desc_->in_tx_for_free_route();
-  LOG_TRACE("decide flag: server in transaction", K(in_txn));
+  LOG_DEBUG("decide flag: server in transaction", K(in_txn));
   return in_txn;
 }
 
@@ -286,6 +291,9 @@ void ObBasicSessionInfo::destroy()
   }
   total_stmt_tables_.reset();
   cur_stmt_tables_.reset();
+#ifdef OB_BUILD_ORACLE_PL
+  pl::ObPlJsonTypeManager::release(get_json_pl_mngr());
+#endif
 }
 
 void ObBasicSessionInfo::clean_status()
@@ -441,6 +449,7 @@ void ObBasicSessionInfo::reset(bool skip_sys_var)
   process_query_time_ = 0;
   last_update_tz_time_ = 0;
   is_client_sessid_support_ = false;
+  is_feedback_proxy_info_support_ = false;
   use_rich_vector_format_ = true;
   force_rich_vector_format_ = ForceRichFormatStatus::Disable;
   sess_bt_buff_pos_ = 0;
@@ -472,7 +481,8 @@ int ObBasicSessionInfo::reset_timezone()
   }
 
   ObObj tmp_obj2;
-  if (OB_FAIL(get_sys_variable(SYS_VAR_ERROR_ON_OVERLAP_TIME, tmp_obj2))) {
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(get_sys_variable(SYS_VAR_ERROR_ON_OVERLAP_TIME, tmp_obj2))) {
     LOG_WARN("get sys var failed", K(ret));
   } else if (OB_FAIL(process_session_overlap_time_value(tmp_obj2))) {
     LOG_WARN("process session overlap time value failed", K(ret), K(tmp_obj2));
@@ -2329,6 +2339,12 @@ OB_INLINE int ObBasicSessionInfo::process_session_variable(ObSysVarClassType var
       OX (sys_vars_cache_.set_tx_read_only(int_val != 0));
       break;
     }
+    case SYS_VAR_OB_ENABLE_PL_CACHE: {
+      int64_t int_val = 0;
+      OZ (val.get_int(int_val), val);
+      OX (sys_vars_cache_.set_ob_enable_pl_cache(int_val != 0));
+      break;
+    }
     case SYS_VAR_OB_ENABLE_PLAN_CACHE: {
       int64_t int_val = 0;
       OZ (val.get_int(int_val), val);
@@ -2822,6 +2838,12 @@ int ObBasicSessionInfo::fill_sys_vars_cache_base_value(
       int64_t int_val = 0;
       OZ (val.get_int(int_val), val);
       OX (sys_vars_cache.set_base_tx_read_only(int_val != 0));
+      break;
+    }
+    case SYS_VAR_OB_ENABLE_PL_CACHE: {
+      int64_t int_val = 0;
+      OZ (val.get_int(int_val), val);
+      OX (sys_vars_cache.set_base_ob_enable_pl_cache(int_val != 0));
       break;
     }
     case SYS_VAR_OB_ENABLE_PLAN_CACHE: {
@@ -3514,9 +3536,34 @@ int ObBasicSessionInfo::get_init_connect(ObString &str) const
   return get_string_sys_var(SYS_VAR_INIT_CONNECT, str);
 }
 
+int ObBasicSessionInfo::get_locale_name(common::ObString &str) const
+{
+  int ret = OB_SUCCESS;
+  if (lib::is_mysql_mode()) {
+    if(OB_FAIL(get_string_sys_var(SYS_VAR_LC_TIME_NAMES, str))) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("failed to load sys variables", "var_name",SYS_VAR_LC_TIME_NAMES, K(ret));
+    }
+   } else {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("oracle mode does not support lc_time_names", K(lib::is_oracle_mode()), K(ret));
+  }
+  return ret;
+}
+
 int ObBasicSessionInfo::is_transformation_enabled(bool &transformation_enabled) const
 {
   return get_bool_sys_var(SYS_VAR_OB_ENABLE_TRANSFORMATION, transformation_enabled);
+}
+
+int ObBasicSessionInfo::get_query_rewrite_enabled(int64_t &query_rewrite_enabled) const
+{
+  return get_int64_sys_var(SYS_VAR_QUERY_REWRITE_ENABLED, query_rewrite_enabled);
+}
+
+int ObBasicSessionInfo::get_query_rewrite_integrity(int64_t &query_rewrite_integrity) const
+{
+  return get_int64_sys_var(SYS_VAR_QUERY_REWRITE_INTEGRITY, query_rewrite_integrity);
 }
 
 int ObBasicSessionInfo::is_serial_set_order_forced(bool &force_set_order, bool is_oracle_mode) const
@@ -4043,7 +4090,7 @@ int ObBasicSessionInfo::deserialize_sync_sys_vars(int64_t &deserialize_sys_var_c
       }
     }
     if (OB_SUCC(ret) && !is_error_sync) {
-      if (OB_FAIL(sync_default_sys_vars(sys_var_inc_info_, tmp_sys_var_inc_info,
+      if (OB_FAIL(sync_default_sys_vars(tmp_sys_var_inc_info,
                                         is_influence_plan_cache_sys_var))) {
         LOG_WARN("fail to sync default sys vars",K(ret));
       } else if (OB_FAIL(sys_var_inc_info_.assign(tmp_sys_var_inc_info))) {
@@ -4066,8 +4113,7 @@ int ObBasicSessionInfo::deserialize_sync_sys_vars(int64_t &deserialize_sys_var_c
 }
 
 // Deserialization scenario, synchronization of default system variables
-int ObBasicSessionInfo::sync_default_sys_vars(SysVarIncInfo sys_var_inc_info_,
-                                              SysVarIncInfo tmp_sys_var_inc_info,
+int ObBasicSessionInfo::sync_default_sys_vars(SysVarIncInfo &tmp_sys_var_inc_info,
                                               bool &is_influence_plan_cache_sys_var)
 {
   int ret = OB_SUCCESS;
@@ -4100,6 +4146,8 @@ int ObBasicSessionInfo::sync_default_sys_vars(SysVarIncInfo sys_var_inc_info_,
         LOG_TRACE("sync sys var set default value", K(sys_var_id),
         K(sessid_), K(proxy_sessid_));
       }
+    } else if (OB_FAIL(tmp_sys_var_inc_info.add_sys_var_id(sys_var_id))) {
+      LOG_WARN("fail to add sys var id", K(sys_var_id), K(ret));
     }
   }
 
@@ -5133,6 +5181,7 @@ int ObBasicSessionInfo::is_sys_var_actully_changed(const ObSysVarClassType &sys_
       case SYS_VAR_AUTO_INCREMENT_OFFSET:
       case SYS_VAR_LAST_INSERT_ID:
       case SYS_VAR_TX_READ_ONLY:
+      case SYS_VAR_OB_ENABLE_PL_CACHE:
       case SYS_VAR_OB_ENABLE_PLAN_CACHE:
       case SYS_VAR_OB_ENABLE_SQL_AUDIT:
       case SYS_VAR_AUTOCOMMIT:
@@ -5495,6 +5544,11 @@ int ObBasicSessionInfo::get_regexp_session_vars(ObExprRegexpSessionVariables &va
   return ret;
 }
 
+int ObBasicSessionInfo::get_activate_all_role_on_login(bool &v) const
+{
+  return get_bool_sys_var(SYS_VAR_ACTIVATE_ALL_ROLES_ON_LOGIN, v);
+}
+
 void ObBasicSessionInfo::reset_tx_variable(bool reset_next_scope)
 {
   LOG_DEBUG("reset tx variable", K(lbt()));
@@ -5768,7 +5822,6 @@ int ObBasicSessionInfo::is_timeout(bool &is_timeout)
 int ObBasicSessionInfo::is_trx_commit_timeout(transaction::ObITxCallback *&callback, int &retcode)
 {
   int ret = OB_SUCCESS;
-  int64_t cur_time = ::oceanbase::common::ObTimeUtility::current_time();
   if (is_in_transaction() && tx_desc_->is_committing()) {
     if (tx_desc_->is_tx_timeout()) {
       callback = tx_desc_->cancel_commit_cb();
@@ -5862,8 +5915,13 @@ int ObBasicSessionInfo::set_session_state_(ObSQLSessionState state)
       LOG_WARN("session state is unknown", K(ret), K(sessid_), K(proxy_sessid_), K(state));
     }
   } else {
+    bool is_state_change = is_active_state_change(thread_data_.state_, state);
     thread_data_.state_ = state;
-    thread_data_.cur_state_start_time_ = ::oceanbase::common::ObClockGenerator::getClock();
+    int64_t current_time = ::oceanbase::common::ObTimeUtility::current_time();
+    if (is_state_change) {
+      thread_data_.retry_active_time_ += (current_time - thread_data_.cur_state_start_time_);
+    }
+    thread_data_.cur_state_start_time_ = current_time;
   }
   return ret;
 }
@@ -5910,6 +5968,7 @@ int ObBasicSessionInfo::set_session_active(const ObString &sql,
     thread_data_.cur_query_start_time_ = query_receive_ts;
     thread_data_.mysql_cmd_ = cmd;
     thread_data_.last_active_time_ = last_active_time_ts;
+    thread_data_.is_request_end_ = false;
     ObActiveSessionGuard::setup_ash(ash_stat_);
   }
   return ret;
@@ -5926,6 +5985,7 @@ int ObBasicSessionInfo::set_session_active(const ObString &label,
     LOG_WARN("fail to set session state", K(ret));
   } else {
     thread_data_.mysql_cmd_ = cmd;
+    thread_data_.is_request_end_ = false;
     ObActiveSessionGuard::setup_ash(ash_stat_);
   }
   return ret;
@@ -6178,7 +6238,7 @@ int ObBasicSessionInfo::set_time_zone(const ObString &str_val, const bool is_ora
   if (OB_ERR_UNKNOWN_TIME_ZONE == ret) {
     ObTZMapWrap tz_map_wrap;
     ObTimeZoneInfoManager *tz_info_mgr = NULL;
-    if (OB_FAIL(OTTZ_MGR.get_tenant_timezone(tenant_id_, tz_map_wrap, tz_info_mgr))) {
+    if (OB_FAIL(OTTZ_MGR.get_tenant_timezone(effective_tenant_id_, tz_map_wrap, tz_info_mgr))) {
       LOG_WARN("get tenant timezone with lock failed", K(ret));
     } else if (OB_ISNULL(tz_info_mgr)) {
       ret = OB_ERR_UNEXPECTED;
@@ -6230,11 +6290,11 @@ int ObBasicSessionInfo::update_timezone_info()
 {
   int ret = OB_SUCCESS;
   const int64_t UPDATE_PERIOD = 1000 * 1000 * 5; //5s
-  int64_t cur_time = ObTimeUtility::current_time();
+  int64_t cur_time = ObClockGenerator::getClock();
   if (cur_time - last_update_tz_time_ > UPDATE_PERIOD) {
     ObTZMapWrap tz_map_wrap;
     ObTimeZoneInfoManager *tz_info_mgr = NULL;
-    if (OB_FAIL(OTTZ_MGR.get_tenant_timezone(tenant_id_, tz_map_wrap, tz_info_mgr))) {
+    if (OB_FAIL(OTTZ_MGR.get_tenant_timezone(effective_tenant_id_, tz_map_wrap, tz_info_mgr))) {
       LOG_WARN("get tenant timezone with lock failed", K(ret));
     } else if (OB_ISNULL(tz_info_mgr)) {
       ret = OB_ERR_UNEXPECTED;
@@ -6631,5 +6691,48 @@ observer::ObSMConnection *ObBasicSessionInfo::get_sm_connection()
   }
   return conn;
 }
+
+void ObBasicSessionInfo::destory_json_pl_mngr()
+{
+#ifdef OB_BUILD_ORACLE_PL
+  if (json_pl_mngr_) {
+    pl::ObPlJsonTypeManager* handle = reinterpret_cast<pl::ObPlJsonTypeManager*>(json_pl_mngr_);
+    handle->destroy();
+    common::ObIAllocator& allocator = get_session_allocator();
+    allocator.free(handle);
+    json_pl_mngr_ = 0;
+  }
+#endif
+}
+
+intptr_t ObBasicSessionInfo::get_json_pl_mngr()
+{
+  int ret = OB_SUCCESS;
+#ifdef OB_BUILD_ORACLE_PL
+  if (!json_pl_mngr_) {
+    common::ObIAllocator& allocator = get_session_allocator();
+    pl::ObPlJsonTypeManager* handle = static_cast<pl::ObPlJsonTypeManager*>(
+                                        allocator.alloc(sizeof(pl::ObPlJsonTypeManager)));
+    if (OB_ISNULL(handle)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("failed to allocate handle", K(ret));
+    } else {
+      handle = new (handle) pl::ObPlJsonTypeManager(orig_tenant_id_);
+      if (OB_FAIL(handle->init())) {
+        allocator.free(handle);
+        LOG_WARN("failed to init json pl type manager", K(ret));
+      } else {
+        json_pl_mngr_ = reinterpret_cast<intptr_t>(handle);
+      }
+    }
+  }
+#else
+  ret = OB_NOT_SUPPORTED;
+  LOG_WARN("failed to create json pl type manager", K(ret));
+#endif
+
+  return json_pl_mngr_;
+}
+
 }//end of namespace sql
 }//end of namespace oceanbase

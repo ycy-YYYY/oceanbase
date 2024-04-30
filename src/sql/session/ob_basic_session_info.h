@@ -466,6 +466,7 @@ public:
   uint64_t get_local_auto_increment_increment() const;
   uint64_t get_local_auto_increment_offset() const;
   uint64_t get_local_last_insert_id() const;
+  bool get_local_ob_enable_pl_cache() const;
   bool get_local_ob_enable_plan_cache() const;
   bool get_local_ob_enable_sql_audit() const;
   bool get_local_cursor_sharing_mode() const;
@@ -591,8 +592,8 @@ public:
   const common::ObLogIdLevelMap *get_log_id_level_map() const;
   const common::ObString &get_client_version() const { return client_version_; }
   const common::ObString &get_driver_version() const { return driver_version_; }
-
-
+  void destory_json_pl_mngr();
+  intptr_t get_json_pl_mngr();
   int get_tx_timeout(int64_t &tx_timeout) const
   {
     tx_timeout = sys_vars_cache_.get_ob_trx_timeout();
@@ -694,6 +695,7 @@ public:
   int get_regexp_stack_limit(int64_t &v) const;
   int get_regexp_time_limit(int64_t &v) const;
   int get_regexp_session_vars(ObExprRegexpSessionVariables &vars) const;
+  int get_activate_all_role_on_login(bool &v) const;
   int update_timezone_info();
   const common::ObTimeZoneInfo *get_timezone_info() const { return tz_info_wrap_.get_time_zone_info(); }
   const common::ObTimeZoneInfoWrap &get_tz_info_wrap() const { return tz_info_wrap_; }
@@ -853,6 +855,18 @@ public:
   bool get_is_in_retry_for_dup_tbl() {
     return SESS_IN_RETRY_FOR_DUP_TBL == thread_data_.is_in_retry_;
   }
+  void set_retry_active_time(int64_t time)
+  {
+    LockGuard lock_guard(thread_data_mutex_);
+    thread_data_.retry_active_time_ = time;
+  }
+  int64_t get_retry_active_time() const { return thread_data_.retry_active_time_; }
+  void set_is_request_end(bool is_request_end)
+  {
+    LockGuard lock_guard(thread_data_mutex_);
+    thread_data_.is_request_end_ = is_request_end;
+  }
+  bool get_is_request_end() const { return thread_data_.is_request_end_; }
   obmysql::ObMySQLCmd get_mysql_cmd() const { return thread_data_.mysql_cmd_; }
   char const *get_mysql_cmd_str() const { return obmysql::get_mysql_cmd_str(thread_data_.mysql_cmd_); }
   int store_query_string(const common::ObString &stmt);
@@ -1010,6 +1024,8 @@ public:
   // 以下helper函数是为了方便查看某系统变量的值
   int if_aggr_pushdown_allowed(bool &aggr_pushdown_allowed) const;
   int is_transformation_enabled(bool &transformation_enabled) const;
+  int get_query_rewrite_enabled(int64_t &query_rewrite_enabled) const;
+  int get_query_rewrite_integrity(int64_t &query_rewrite_integrity) const;
   int is_serial_set_order_forced(bool &force_set_order, bool is_oracle_mode) const;
   int is_storage_estimation_enabled(bool &storage_estimation_enabled) const;
   bool is_use_trace_log() const
@@ -1020,6 +1036,7 @@ public:
   int is_select_index_enabled(bool &select_index_enabled) const;
   int get_name_case_mode(common::ObNameCaseMode &case_mode) const;
   int get_init_connect(common::ObString &str) const;
+  int get_locale_name(common::ObString &str) const;
   /// @}
 
   ///@{ user variables related:
@@ -1295,12 +1312,20 @@ public:
   int serialize_sync_sys_vars(common::ObIArray<share::ObSysVarClassType> &sys_var_delta_ids, char *buf, const int64_t &buf_len, int64_t &pos);
   int deserialize_sync_sys_vars(int64_t &deserialize_sys_var_count, const char *buf, const int64_t &data_len, int64_t &pos, bool is_error_sync = false);
   int deserialize_sync_error_sys_vars(int64_t &deserialize_sys_var_count, const char *buf, const int64_t &data_len, int64_t &pos);
-  int sync_default_sys_vars(SysVarIncInfo sys_var_inc_info_, SysVarIncInfo tmp_sys_var_inc_info, bool &is_influence_plan_cache_sys_var);
+  int sync_default_sys_vars(SysVarIncInfo &tmp_sys_var_inc_info, bool &is_influence_plan_cache_sys_var);
   int get_sync_sys_vars(common::ObIArray<share::ObSysVarClassType> &sys_var_delta_ids) const;
   int get_error_sync_sys_vars(ObIArray<share::ObSysVarClassType> &sys_var_delta_ids) const;
   int get_sync_sys_vars_size(common::ObIArray<share::ObSysVarClassType> &sys_var_delta_ids, int64_t &len) const;
   bool is_sync_sys_var(share::ObSysVarClassType sys_var_id) const;
   bool is_exist_error_sync_var(share::ObSysVarClassType sys_var_id) const;
+  // record session state from active to anothe state. for record total_cpu_time.
+  bool is_active_state_change(ObSQLSessionState last_state, ObSQLSessionState curr_state) {
+    if (last_state == QUERY_ACTIVE && curr_state != QUERY_ACTIVE) {
+      return true;
+    } else {
+      return false;
+    }
+  }
 
   // nested session and sql execute for foreign key.
   bool is_nested_session() const { return nested_count_ > 0; }
@@ -1370,6 +1395,8 @@ public:
   inline void set_client_sessid_support(bool is_client_sessid_support)
               { is_client_sessid_support_ = is_client_sessid_support; }
   inline bool is_client_sessid_support() { return is_client_sessid_support_; }
+  inline void set_feedback_proxy_info_support(const bool is_feedback_proxy_info_support) { is_feedback_proxy_info_support_ = is_feedback_proxy_info_support; }
+  inline bool is_feedback_proxy_info_support() { return is_feedback_proxy_info_support_; }
   int replace_new_session_label(uint64_t policy_id, const share::ObLabelSeSessionLabel &new_session_label);
   int load_default_sys_variable(common::ObIAllocator &allocator, int64_t var_idx);
 
@@ -1492,7 +1519,9 @@ protected:
                          client_addr_port_(0),
                          is_mark_killed_(false),
                          proxy_user_name_(),
-                         proxy_host_name_()
+                         proxy_host_name_(),
+                         retry_active_time_(0),
+                         is_request_end_(true)
     {
       CHAR_CARRAY_INIT(database_name_);
     }
@@ -1533,6 +1562,8 @@ protected:
       is_mark_killed_ = false;
       proxy_user_name_.reset();
       proxy_host_name_.reset();
+      retry_active_time_ = 0;
+      is_request_end_ = true;
     }
     ~MultiThreadData ()
     {
@@ -1570,6 +1601,13 @@ protected:
     bool is_mark_killed_; // Mark the current session as delayed kill
     common::ObString proxy_user_name_;
     common::ObString proxy_host_name_;
+    // In the retry scenario, record the cumulative active time except the current state,
+    // and use it to count the CPU time. For example, 1. The current request status is Sleep,
+    // waiting for retry, it will record the cumulative time of Active during previous execution.
+    // 2. The current request status is Active, and it is retrying. It will ignore the active time
+    // of the current status and record the cumulative time of Active during previous execution.
+    int64_t retry_active_time_;
+    bool is_request_end_; // This flag is used to distinguish whether the current request is over.
   };
 
 public:
@@ -1589,6 +1627,7 @@ public:
         foreign_key_checks_(0),
         default_password_lifetime_(0),
         tx_read_only_(false),
+        ob_enable_pl_cache_(false),
         ob_enable_plan_cache_(false),
         optimizer_use_sql_plan_baselines_(false),
         optimizer_capture_sql_plan_baselines_(false),
@@ -1646,6 +1685,7 @@ public:
       foreign_key_checks_ = 0;
       default_password_lifetime_ = 0;
       tx_read_only_ = false;
+      ob_enable_pl_cache_ = false;
       ob_enable_plan_cache_ = false;
       optimizer_use_sql_plan_baselines_ = false;
       optimizer_capture_sql_plan_baselines_ = false;
@@ -1701,6 +1741,7 @@ public:
             foreign_key_checks_ == other.foreign_key_checks_ &&
             default_password_lifetime_ == other.default_password_lifetime_ &&
             tx_read_only_ == other.tx_read_only_ &&
+            ob_enable_pl_cache_ == other.ob_enable_pl_cache_ &&
             ob_enable_plan_cache_ == other.ob_enable_plan_cache_ &&
             optimizer_use_sql_plan_baselines_ == other.optimizer_use_sql_plan_baselines_ &&
             optimizer_capture_sql_plan_baselines_ == other.optimizer_capture_sql_plan_baselines_ &&
@@ -1866,6 +1907,7 @@ public:
     int64_t foreign_key_checks_;
     uint64_t default_password_lifetime_;
     bool tx_read_only_;
+    bool ob_enable_pl_cache_;
     bool ob_enable_plan_cache_;
     bool optimizer_use_sql_plan_baselines_;
     bool optimizer_capture_sql_plan_baselines_;
@@ -1987,6 +2029,7 @@ private:
     DEF_SYS_VAR_CACHE_FUNCS(int64_t, foreign_key_checks);
     DEF_SYS_VAR_CACHE_FUNCS(uint64_t, default_password_lifetime);
     DEF_SYS_VAR_CACHE_FUNCS(bool, tx_read_only);
+    DEF_SYS_VAR_CACHE_FUNCS(bool, ob_enable_pl_cache);
     DEF_SYS_VAR_CACHE_FUNCS(bool, ob_enable_plan_cache);
     DEF_SYS_VAR_CACHE_FUNCS(bool, optimizer_use_sql_plan_baselines);
     DEF_SYS_VAR_CACHE_FUNCS(bool, optimizer_capture_sql_plan_baselines);
@@ -2097,6 +2140,7 @@ private:
         bool inc_enable_rich_vector_format_:1;
         bool inc_ncharacter_set_connection_:1;
         bool inc_default_lob_inrow_threshold_:1;
+        bool inc_ob_enable_pl_cache_:1;
       };
     };
   };
@@ -2172,6 +2216,7 @@ protected:
   common::ObSmallBlockAllocator<> cursor_info_allocator_; // for alloc memory of PS CURSOR/SERVER REF CURSOR
   common::ObSmallBlockAllocator<> package_info_allocator_; // for alloc memory of session package state
   common::ObStringBuf name_pool_; // for variables names and statement names
+  intptr_t json_pl_mngr_; // for pl json manage
   TransFlags trans_flags_;
   SqlScopeFlags sql_scope_flags_;
   bool need_reset_package_; // for dbms_session.reset_package
@@ -2336,6 +2381,7 @@ private:
   int64_t process_query_time_;
   int64_t last_update_tz_time_; //timestamp of last attempt to update timezone info
   bool is_client_sessid_support_; //client session id support flag
+  bool is_feedback_proxy_info_support_; // to confirm whether obproxy supports feedback_proxy_info
   bool use_rich_vector_format_;
   int64_t last_refresh_schema_version_;
   // rich format specified hint, e.g. `select /*+opt_param('enable_rich_vector_format', 'true')*/ * from t`
@@ -2413,6 +2459,11 @@ inline uint64_t ObBasicSessionInfo::get_local_auto_increment_offset() const
 inline uint64_t ObBasicSessionInfo::get_local_last_insert_id() const
 {
   return sys_vars_cache_.get_last_insert_id();
+}
+
+inline bool ObBasicSessionInfo::get_local_ob_enable_pl_cache() const
+{
+  return sys_vars_cache_.get_ob_enable_pl_cache();
 }
 
 inline bool ObBasicSessionInfo::get_local_ob_enable_plan_cache() const

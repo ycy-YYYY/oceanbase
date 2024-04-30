@@ -227,18 +227,7 @@ class ObPLCompileUnit : public ObPLCacheObject
 {
   friend class ::test::MockCacheObjectFactory;
 public:
-  ObPLCompileUnit(sql::ObLibCacheNameSpace ns, lib::MemoryContext &mem_context)
-  : ObPLCacheObject(ns, mem_context),
-    routine_table_(allocator_),
-    type_table_(),
-    helper_(allocator_),
-    di_helper_(allocator_),
-    can_cached_(true)
-  {
-#ifndef USE_MCJIT
-    helper_.init();
-#endif
-  }
+  ObPLCompileUnit(sql::ObLibCacheNameSpace ns, lib::MemoryContext &mem_context);
   virtual ~ObPLCompileUnit();
 
   inline bool get_can_cached() { return can_cached_; }
@@ -497,6 +486,8 @@ public:
   * test -> oceanbase, we see oceanbase in interface but can't see test.
   */
   int is_special_pkg_invoke_right(ObSchemaGetterGuard &guard, bool &flag);
+
+  int gen_action_from_precompiled(const ObString &name, size_t length, const char *ptr);
 
   common::ObFixedArray<ObPLSqlInfo, common::ObIAllocator>& get_sql_infos()
   {
@@ -861,6 +852,8 @@ public:
     is_function_or_trigger_ = false;
     last_insert_id_ = 0;
     trace_id_.reset();
+    old_user_priv_set_ = OB_PRIV_SET_EMPTY;
+    old_db_priv_set_ = OB_PRIV_SET_EMPTY;
   }
 
   int is_inited() { return session_info_ != NULL; }
@@ -1010,6 +1003,8 @@ private:
   uint64_t database_id_;
   common::ObSEArray<uint64_t, 8> old_role_id_array_;
   uint64_t old_priv_user_id_;
+  ObPrivSet old_user_priv_set_;
+  ObPrivSet old_db_priv_set_;
   bool old_in_definer_;
   bool need_reset_default_database_;
   bool need_reset_role_id_array_;
@@ -1114,6 +1109,7 @@ public:
               bool is_called_from_sql = false,
               uint64_t dblink_id = OB_INVALID_ID);
   int check_exec_priv(sql::ObExecContext &ctx,
+                      const ObString &database_name,
                       ObPLFunction *routine);
 private:
   // for normal routine

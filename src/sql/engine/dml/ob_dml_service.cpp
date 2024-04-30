@@ -149,13 +149,15 @@ int ObDMLService::check_column_type(const ExprFixedArray &dml_row,
   int ret = OB_SUCCESS;
   CK(dml_row.count() >= column_infos.count());
   ObArenaAllocator tmp_allocator(ObModIds::OB_LOB_ACCESS_BUFFER, OB_MALLOC_NORMAL_BLOCK_SIZE, MTL_ID());
+  ObUserLoggingCtx::Guard logging_ctx_guard(*dml_op.get_exec_ctx().get_user_logging_ctx());
   dml_op.get_exec_ctx().set_cur_rownum(row_num);
   for (int64_t i = 0; OB_SUCC(ret) && i < column_infos.count(); ++i) {
     const ColumnContent &column_info = column_infos.at(i);
+    common::ObString column_name = column_infos.at(i).column_name_;
+    dml_op.get_exec_ctx().set_cur_column_name(&column_name);
     ObExpr *expr = dml_row.at(column_info.projector_index_);
     ObDatum *datum = nullptr;
     if (OB_FAIL(expr->eval(dml_op.get_eval_ctx(), datum))) {
-      common::ObString column_name = column_infos.at(i).column_name_;
       ret = ObDMLService::log_user_error_inner(ret, row_num, column_name, dml_op.get_exec_ctx());
     } else if (!datum->is_null() && expr->obj_meta_.is_geometry()) {
       // geo column type
@@ -351,7 +353,11 @@ int ObDMLService::check_lob_column_changed(ObEvalCtx &eval_ctx,
       cmp_params.compare_len_ = UINT64_MAX;
       cmp_params.timeout_ = timeout;
       cmp_params.tx_desc_ = eval_ctx.exec_ctx_.get_my_session()->get_tx_desc();
-      if(OB_FAIL(lob_mngr->equal(old_lob, new_lob, cmp_params, is_equal))) {
+      if (old_lob.is_persist_lob() && new_lob.is_delta_temp_lob()) {
+        if (OB_FAIL(ObDeltaLob::has_diff(new_lob, result))) {
+          LOG_WARN("delata lob has_diff fail", K(ret), K(old_lob), K(new_lob));
+        }
+      } else if(OB_FAIL(lob_mngr->equal(old_lob, new_lob, cmp_params, is_equal))) {
         LOG_WARN("fail to compare lob", K(ret), K(old_lob), K(new_lob));
       } else {
         result = is_equal ? 0 : 1;
@@ -1178,6 +1184,7 @@ int ObDMLService::init_dml_param(const ObDASDMLBaseCtDef &base_ctdef,
                                  transaction::ObTxReadSnapshot &snapshot,
                                  const int16_t write_branch_id,
                                  ObIAllocator &das_alloc,
+                                 storage::ObStoreCtxGuard &store_ctx_gurad,
                                  storage::ObDMLBaseParam &dml_param)
 {
   int ret = OB_SUCCESS;
@@ -1194,6 +1201,7 @@ int ObDMLService::init_dml_param(const ObDASDMLBaseCtDef &base_ctdef,
   dml_param.dml_allocator_ = &das_alloc;
   dml_param.snapshot_ = snapshot;
   dml_param.branch_id_ = write_branch_id;
+  dml_param.store_ctx_guard_ = &store_ctx_gurad;
   if (base_ctdef.is_batch_stmt_) {
     dml_param.write_flag_.set_is_dml_batch_opt();
   }
@@ -1224,6 +1232,7 @@ int ObDMLService::init_das_dml_rtdef(ObDMLRtCtx &dml_rtctx,
   ObDASCtx &das_ctx = dml_rtctx.get_exec_ctx().get_das_ctx();
   uint64_t table_loc_id = das_ctdef.table_id_;
   uint64_t ref_table_id = das_ctdef.index_tid_;
+  das_rtdef.ctdef_ = &das_ctdef;
   das_rtdef.timeout_ts_ = plan_ctx->get_ps_timeout_timestamp();
   das_rtdef.prelock_ = my_session->get_prelock();
   das_rtdef.tenant_schema_version_ = plan_ctx->get_tenant_schema_version();
@@ -2015,7 +2024,7 @@ int ObDMLService::check_local_index_affected_rows(int64_t table_affected_rows,
   int ret = OB_SUCCESS;
   if (GCONF.enable_defensive_check()) {
     if (table_affected_rows != index_affected_rows
-        && !related_ctdef.table_param_.get_data_table().is_spatial_index()
+        && !related_ctdef.table_param_.get_data_table().is_domain_index()
         && !related_ctdef.table_param_.get_data_table().is_mlog_table()) {
       ret = OB_ERR_DEFENSIVE_CHECK;
       ObString func_name = ObString::make_string("check_local_index_affected_rows");

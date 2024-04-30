@@ -84,7 +84,7 @@ public:
     return is_compact_ ? compact_store_.get_mem_hold() : datum_store_.get_mem_hold();
   }
 
-  int reset()
+  int reset_iter()
   {
     int ret = OB_SUCCESS;
     if (is_compact_) {
@@ -246,6 +246,7 @@ public:
   static const int64_t INMEMORY_MERGE_SORT_WARN_WAYS = 10000;
 
   explicit ObSortOpImpl(ObMonitorNode &op_monitor_info);
+  ObSortOpImpl();
   virtual ~ObSortOpImpl();
 
   // if rewind id not needed, we will release the resource after iterate end.
@@ -263,7 +264,8 @@ public:
       const int64_t default_block_size = ObChunkDatumStore::BLOCK_SIZE,
       const common::ObCompressorType compressor_type = common::NONE_COMPRESSOR,
       const ExprFixedArray *exprs = nullptr,
-      const int64_t est_rows = 0);
+      const int64_t est_rows = 0,
+      const bool use_compact_format = false);
 
   virtual int64_t get_prefix_pos() const { return 0;  }
   // keep initialized, can sort same rows (same cell type, cell count, projector) after reuse.
@@ -401,16 +403,16 @@ public:
   void set_operator_id(uint64_t op_id) { op_id_ = op_id; }
   void collect_memory_dump_info(ObMonitorNode &info)
   {
-    info.otherstat_1_id_ = op_monitor_info_.otherstat_1_id_;
-    info.otherstat_1_value_ = op_monitor_info_.otherstat_1_value_;
-    info.otherstat_2_id_ = op_monitor_info_.otherstat_2_id_;
-    info.otherstat_2_value_ = op_monitor_info_.otherstat_2_value_;
-    info.otherstat_3_id_ = op_monitor_info_.otherstat_3_id_;
-    info.otherstat_3_value_ = op_monitor_info_.otherstat_3_value_;
-    info.otherstat_4_id_ = op_monitor_info_.otherstat_4_id_;
-    info.otherstat_4_value_ = op_monitor_info_.otherstat_4_value_;
-    info.otherstat_6_id_ = op_monitor_info_.otherstat_6_id_;
-    info.otherstat_6_value_ = op_monitor_info_.otherstat_6_value_;
+    info.otherstat_1_id_ = op_monitor_info_->otherstat_1_id_;
+    info.otherstat_1_value_ = op_monitor_info_->otherstat_1_value_;
+    info.otherstat_2_id_ = op_monitor_info_->otherstat_2_id_;
+    info.otherstat_2_value_ = op_monitor_info_->otherstat_2_value_;
+    info.otherstat_3_id_ = op_monitor_info_->otherstat_3_id_;
+    info.otherstat_3_value_ = op_monitor_info_->otherstat_3_value_;
+    info.otherstat_4_id_ = op_monitor_info_->otherstat_4_id_;
+    info.otherstat_4_value_ = op_monitor_info_->otherstat_4_value_;
+    info.otherstat_6_id_ = op_monitor_info_->otherstat_6_id_;
+    info.otherstat_6_value_ = op_monitor_info_->otherstat_6_value_;
   }
   inline void set_io_event_observer(ObIOEventObserver *observer)
   {
@@ -756,7 +758,6 @@ protected:
                        const ObChunkDatumStore::StoredRow *&store_row);
   int adjust_topn_heap_with_ties(const common::ObIArray<ObExpr*> &exprs,
                                  const ObChunkDatumStore::StoredRow *&store_row);
-  //
   int copy_to_topn_row(const common::ObIArray<ObExpr*> &exprs,
                        ObIAllocator &alloc,
                        SortStoredRow *&top_row);
@@ -792,7 +793,7 @@ protected:
                           const int64_t batch_size,
                           const uint16_t selector[],
                           const int64_t size);
-  bool use_compact_store() { return compress_type_ != NONE_COMPRESSOR; }
+  bool use_compact_store() { return use_compact_format_ || compress_type_ != NONE_COMPRESSOR; }
   DISALLOW_COPY_AND_ASSIGN(ObSortOpImpl);
 
 protected:
@@ -833,7 +834,8 @@ protected:
   int64_t input_rows_;
   int64_t input_width_;
   ObSqlWorkAreaProfile profile_;
-  ObMonitorNode &op_monitor_info_;
+  ObMonitorNode self_monitor_info_;
+  ObMonitorNode *op_monitor_info_;
   ObSqlMemMgrProcessor sql_mem_processor_;
   ObPhyOperatorType op_type_;
   uint64_t op_id_;
@@ -866,6 +868,7 @@ protected:
   ObChunkDatumStore::IteratedBlockHolder default_blk_holder_;
   const ExprFixedArray *sort_exprs_;
   common::ObCompressorType compress_type_;
+  bool use_compact_format_;
 };
 
 class ObInMemoryTopnSortImpl;

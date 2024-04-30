@@ -142,7 +142,6 @@ int ObLockMemtable::lock_(
       succ_step = STEP_BEGIN;
       lock_exist = false;
       memset(lock_mode_cnt_in_same_trans, 0, sizeof(lock_mode_cnt_in_same_trans));
-      conflict_tx_set.reset();
       ObMvccWriteGuard guard;
       if (OB_FAIL(guard.write_auth(ctx))) {
         LOG_WARN("not allow lock table.", K(ret), K(ctx));
@@ -221,6 +220,7 @@ int ObLockMemtable::lock_(
       }
     }
     if (need_retry) {
+      conflict_tx_set.reset();
       ob_usleep(USLEEP_TIME);
     }
   } while (need_retry);
@@ -898,12 +898,12 @@ bool ObLockMemtable::can_be_minor_merged()
   return bool_ret;
 }
 
-bool ObLockMemtable::is_frozen_memtable() const
+bool ObLockMemtable::is_frozen_memtable()
 {
   return ATOMIC_LOAD(&is_frozen_);
 }
 
-bool ObLockMemtable::is_active_memtable() const
+bool ObLockMemtable::is_active_memtable()
 {
   return !ATOMIC_LOAD(&is_frozen_);
 }
@@ -978,7 +978,7 @@ int ObLockMemtable::replay_row(
   int ret = OB_SUCCESS;
 
   ObLockID lock_id;
-  ObTableLockOwnerID owner_id(0);
+  ObTableLockOwnerID owner_id;
   ObTableLockMode lock_mode = NO_LOCK;
   ObTableLockOpType lock_op_type = ObTableLockOpType::UNKNOWN_TYPE;
   transaction::ObTxSEQ seq_no;

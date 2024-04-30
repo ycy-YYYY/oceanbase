@@ -195,12 +195,13 @@ DEF_CAP(syslog_io_bandwidth_limit, OB_CLUSTER_PARAMETER, "30MB",
 DEF_INT(diag_syslog_per_error_limit, OB_CLUSTER_PARAMETER, "200", "[0,]",
         "DIAG syslog limitation for each error per second, exceeding syslog would be truncated",
         ObParameterAttr(Section::OBSERVER, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
-DEF_INT(max_syslog_file_count, OB_CLUSTER_PARAMETER, "0", "[0,]",
-        "specifies the maximum number of the log files "
-        "that can co-exist before the log file recycling kicks in. "
-        "Each log file can occupy at most 256MB disk space. "
-        "When this value is set to 0, no log file will be removed. Range: [0, +∞) in integer",
-        ObParameterAttr(Section::OBSERVER, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
+DEF_INT_WITH_CHECKER(max_syslog_file_count, OB_CLUSTER_PARAMETER, "0",
+                     common::ObConfigMaxSyslogFileCountChecker,
+                     "specifies the maximum number of the log files "
+                     "that can co-exist before the log file recycling kicks in. "
+                     "Each log file can occupy at most 256MB disk space. "
+                     "When this value is set to 0, no log file will be removed. Range: [0, +∞) in integer",
+                     ObParameterAttr(Section::OBSERVER, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
 DEF_BOOL(enable_async_syslog, OB_CLUSTER_PARAMETER, "True",
          "specifies whether use async log for observer.log, elec.log and rs.log",
          ObParameterAttr(Section::OBSERVER, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
@@ -212,6 +213,20 @@ DEF_BOOL(enable_syslog_recycle, OB_CLUSTER_PARAMETER, "False",
          "specifies whether log file recycling is turned on. "
          "Value: True：turned on; False: turned off",
          ObParameterAttr(Section::OBSERVER, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
+DEF_CAP(syslog_disk_size, OB_CLUSTER_PARAMETER, "0M", "[0M,)",
+        "the size of disk space used by the syslog files. Range: [0, +∞)",
+        ObParameterAttr(Section::OBSERVER, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
+DEF_STR_WITH_CHECKER(syslog_compress_func, OB_CLUSTER_PARAMETER, "none",
+                     common::ObConfigSyslogCompressFuncChecker,
+                     "compress function name for syslog files, "
+                     "values: none, zstd_1.0, zstd_1.3.8",
+                     ObParameterAttr(Section::OBSERVER, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
+DEF_INT_WITH_CHECKER(syslog_file_uncompressed_count, OB_CLUSTER_PARAMETER, "0",
+                     common::ObConfigSyslogFileUncompressedCountChecker,
+                     "specifies the minimum number of the syslog files that will not be compressed. "
+                     "Each syslog file can occupy at most 256MB disk space. "
+                     "When this value is set to 0, all syslog file may be compressed. Range: [0, +∞) in integer",
+                     ObParameterAttr(Section::OBSERVER, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
 DEF_INT(memory_limit_percentage, OB_CLUSTER_PARAMETER, "80", "[10, 95]",
         "the size of the memory reserved for internal use(for testing purpose). Range: [10, 95]",
         ObParameterAttr(Section::OBSERVER, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
@@ -684,6 +699,11 @@ DEF_STR(standby_db_preferred_upstream_log_region, OB_TENANT_PARAMETER, "",
        "when the preferred upstream log region can not fetch log because of exception etc.",
         ObParameterAttr(Section::LOGSERVICE, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
 
+DEF_BOOL(_enable_log_cache, OB_TENANT_PARAMETER, "True",
+         "specifies whether allow to fill log kv cache. "
+         "Value:  True:turned on  False: turned off",
+         ObParameterAttr(Section::LOGSERVICE, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
+
 // ========================= LogService Config End   =====================
 DEF_INT(resource_hard_limit, OB_CLUSTER_PARAMETER, "100", "[100, 10000]",
         "system utilization should not be large than resource_hard_limit",
@@ -1151,6 +1171,11 @@ ERRSIM_DEF_INT(errsim_test_tablet_id, OB_CLUSTER_PARAMETER, "0", "[0,)",
         "Range: [0,) in integer",
         ObParameterAttr(Section::OBSERVER, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
 
+ERRSIM_DEF_INT(errsim_backup_table_list_batch_size, OB_CLUSTER_PARAMETER, "20000", "[1,)",
+        "batch size of table list items in errsim mode"
+        "Range: [1,) in integer",
+        ObParameterAttr(Section::OBSERVER, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
+
 #ifdef TRANS_MODULE_TEST
 DEF_INT(module_test_trx_memory_errsim_percentage, OB_CLUSTER_PARAMETER, "0", "[0, 100]",
         "the percentage of memory errsim. Rang:[0,100]",
@@ -1318,6 +1343,9 @@ DEF_INT(_max_schema_slot_num, OB_TENANT_PARAMETER, "128", "[2,256]",
         "the max schema slot number for multi-version schema memory management, "
         "Range: [2, 256] in integer",
         ObParameterAttr(Section::OBSERVER, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
+DEF_BOOL(_enable_add_fulltext_index_to_existing_table, OB_CLUSTER_PARAMETER, "False",
+         "enable create fulltext index after table is created",
+         ObParameterAttr(Section::OBSERVER, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
 DEF_INT_WITH_CHECKER(_ob_query_rate_limit, OB_TENANT_PARAMETER, "-1",
         common::ObConfigQueryRateLimitChecker,
         "the maximun throughput allowed for a tenant per observer instance",
@@ -1661,6 +1689,9 @@ DEF_CAP(_pdml_thread_cache_size, OB_CLUSTER_PARAMETER, "2M", "[1B,)",
         "The cache size of per pdml thread."
         "Range:[1B, )",
         ObParameterAttr(Section::OBSERVER, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
+DEF_BOOL(_enable_hgby_llc_ndv_adaptive, OB_TENANT_PARAMETER, "True",
+         "specifies whether llc ndv adptive is activated",
+         ObParameterAttr(Section::TENANT, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
 DEF_BOOL(_enable_reserved_user_dcl_restriction, OB_CLUSTER_PARAMETER, "False",
          "specifies whether to forbid non-reserved user to modify reserved users",
          ObParameterAttr(Section::OBSERVER, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
@@ -1810,6 +1841,10 @@ DEF_BOOL(enable_kv_ttl, OB_TENANT_PARAMETER, "False",
 DEF_INT(ttl_thread_score, OB_TENANT_PARAMETER, "0", "[0,100]",
         "the current work thread score of ttl thread. Range: [0,100] in integer. Especially, 0 means default value",
         ObParameterAttr(Section::OBSERVER, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
+DEF_BOOL(_enable_persistent_compiled_routine, OB_CLUSTER_PARAMETER, "true",
+         "specifies whether the feature of storeing dll to disk is turned on. "
+         "The default value is TRUE. Value: TRUE: turned on FALSE: turned off",
+         ObParameterAttr(Section::OBSERVER, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
 
 DEF_STR_WITH_CHECKER(sql_protocol_min_tls_version, OB_CLUSTER_PARAMETER, "none",
                      common::ObConfigSQLTlsVersionChecker,
@@ -1820,6 +1855,12 @@ DEF_STR_WITH_CHECKER(sql_protocol_min_tls_version, OB_CLUSTER_PARAMETER, "none",
 DEF_MODE_WITH_PARSER(_obkv_feature_mode, OB_CLUSTER_PARAMETER, "", common::ObKvFeatureModeParser,
     "_obkv_feature_mode is a option list to control specified OBKV features on/off.",
     ObParameterAttr(Section::OBSERVER, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
+
+DEF_TIME(_standby_max_replay_gap_time, OB_TENANT_PARAMETER, "900s", "[10s,)",
+        "The difference in replayable_scn between log streams on standby tenants is not greater than "
+        "_standby_max_replay_gap_time, and the gap between sync_scn and replayable_scn of each log stream "
+        "is kept reasonably small. Range: [10s, )",
+        ObParameterAttr(Section::TENANT, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
 
 
 DEF_BOOL(_enable_optimizer_qualify_filter, OB_TENANT_PARAMETER, "True",
@@ -1832,6 +1873,13 @@ DEF_BOOL(_enable_range_extraction_for_not_in, OB_TENANT_PARAMETER, "True",
 // DEF_BOOL(_enable_new_query_range_extraction, OB_TENANT_PARAMETER, "True",
 //     "decide whether use new algorithm to extract query range.",
 //     ObParameterAttr(Section::TENANT, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
+DEF_TIME(_ha_diagnose_history_recycle_interval, OB_CLUSTER_PARAMETER, "7d", "[2m, 180d]",
+         "The recycle interval time of diagnostic history data. Range: [2m, 180d]",
+         ObParameterAttr(Section::OBSERVER, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
+ERRSIM_DEF_TIME(errsim_transfer_diagnose_server_wait_time, OB_CLUSTER_PARAMETER, "5m", "[1s,1h]",
+        "the wakeup wait time of the transfer diagnose server. "
+        "Range: [0s, 1h]",
+        ObParameterAttr(Section::OBSERVER, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
 ERRSIM_DEF_STR(palf_inject_receive_log_error_zone, OB_CLUSTER_PARAMETER, "", "specifies the zone name that palf module want to inject error when receive log",
     ObParameterAttr(Section::OBSERVER, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
 ERRSIM_DEF_STR(migrate_check_member_list_error_zone, OB_CLUSTER_PARAMETER, "", "specifies the zone name that migrate want to inject error when change member list",
@@ -1910,3 +1958,6 @@ DEF_BOOL(_enable_memleak_light_backtrace, OB_CLUSTER_PARAMETER, "True",
 DEF_BOOL(_enable_dbms_lob_partial_update, OB_TENANT_PARAMETER, "False",
          "Enable the capability of dbms_lob to perform partial updates on LOB",
          ObParameterAttr(Section::TENANT, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
+DEF_BOOL(_enable_dbms_job_package, OB_CLUSTER_PARAMETER, "True",
+         "Control whether can use DBMS_JOB package.",
+         ObParameterAttr(Section::OBSERVER, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));

@@ -56,6 +56,8 @@ const char* const ObSelectIntoItem::DEFAULT_LINE_TERM_STR = "\n";
 const char* const ObSelectIntoItem::DEFAULT_FIELD_TERM_STR = "\t";
 const char ObSelectIntoItem::DEFAULT_FIELD_ENCLOSED_CHAR = 0;
 const bool ObSelectIntoItem::DEFAULT_OPTIONAL_ENCLOSED = false;
+const bool ObSelectIntoItem::DEFAULT_SINGLE_OPT = true;
+const int64_t ObSelectIntoItem::DEFAULT_MAX_FILE_SIZE = 256 * 1024 * 1024;
 const char ObSelectIntoItem::DEFAULT_FIELD_ESCAPED_CHAR = '\\';
 
 //对于select .. for update 也认为是被更改
@@ -154,11 +156,11 @@ int ObSelectStmt::check_aggr_and_winfunc(ObRawExpr &expr)
   if (expr.is_aggr_expr() &&
       !ObRawExprUtils::find_expr(agg_items_, &expr)) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("aggr expr does not exist in the stmt", K(ret));
+    LOG_WARN("aggr expr does not exist in the stmt", K(ret), K(expr));
   } else if (expr.is_win_func_expr() &&
              !ObRawExprUtils::find_expr(win_func_exprs_, &expr)) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("win func expr does not exist in the stmt", K(ret));
+    LOG_WARN("win func expr does not exist in the stmt", K(ret), K(expr));
   }
   return ret;
 }
@@ -227,6 +229,7 @@ int ObSelectStmt::assign(const ObSelectStmt &other)
     is_hierarchical_query_ = other.is_hierarchical_query_;
     has_prior_ = other.has_prior_;
     has_reverse_link_ = other.has_reverse_link_;
+    is_expanded_mview_ = other.is_expanded_mview_;
   }
   return ret;
 }
@@ -318,6 +321,7 @@ int ObSelectStmt::deep_copy_stmt_struct(ObIAllocator &allocator,
     is_hierarchical_query_ = other.is_hierarchical_query_;
     has_prior_ = other.has_prior_;
     has_reverse_link_ = other.has_reverse_link_;
+    is_expanded_mview_ = other.is_expanded_mview_;
     // copy insert into statement
     if (OB_SUCC(ret) && NULL != other.into_item_) {
       ObSelectIntoItem *temp_into_item = NULL;
@@ -528,6 +532,7 @@ ObSelectStmt::ObSelectStmt()
   is_hierarchical_query_ = false;
   has_prior_ = false;
   has_reverse_link_ = false;
+  is_expanded_mview_ = false;
 }
 
 ObSelectStmt::~ObSelectStmt()
@@ -723,7 +728,8 @@ int ObSelectStmt::do_to_string(char *buf, const int64_t buf_len, int64_t &pos) c
            K_(is_hierarchical_query),
            K_(check_option),
            K_(dblink_id),
-           K_(is_reverse_link)
+           K_(is_reverse_link),
+           K_(is_expanded_mview)
              );
     }
   } else {
@@ -831,13 +837,14 @@ int ObSelectStmt::clear_sharable_expr_reference()
 }
 
 int ObSelectStmt::remove_useless_sharable_expr(ObRawExprFactory *expr_factory,
-                                               ObSQLSessionInfo *session_info)
+                                               ObSQLSessionInfo *session_info,
+                                               bool explicit_for_col)
 {
   int ret = OB_SUCCESS;
   if (OB_ISNULL(expr_factory)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected null", K(ret));
-  } else if (OB_FAIL(ObDMLStmt::remove_useless_sharable_expr(expr_factory, session_info))) {
+  } else if (OB_FAIL(ObDMLStmt::remove_useless_sharable_expr(expr_factory, session_info, explicit_for_col))) {
     LOG_WARN("failed to remove useless sharable expr", K(ret));
   } else {
     ObRawExpr *expr = NULL;

@@ -1092,8 +1092,9 @@ struct EstimateCostInfo {
     JsonTablePath()
       : Path(NULL),
         table_id_(OB_INVALID_ID),
-        value_expr_(NULL) {}
-    virtual ~JsonTablePath() { }
+        value_expr_(NULL),
+        column_param_default_exprs_() {}
+    virtual ~JsonTablePath() {}
     int assign(const JsonTablePath &other, common::ObIAllocator *allocator);
     virtual int estimate_cost() override;
     virtual int get_name_internal(char *buf, const int64_t buf_len, int64_t &pos) const
@@ -1107,6 +1108,7 @@ struct EstimateCostInfo {
   public:
     uint64_t table_id_;
     ObRawExpr* value_expr_;
+    common::ObSEArray<ObColumnDefault, 1, common::ModulePageAllocator, true> column_param_default_exprs_;
   private:
       DISALLOW_COPY_AND_ASSIGN(JsonTablePath);
   };
@@ -1392,6 +1394,10 @@ struct NullAwareAntiJoinInfo {
                               bool &is_index_back,
                               bool &is_global_index);
 
+    int get_matched_inv_index_tid(ObMatchFunRawExpr *match_expr,
+                                  uint64_t ref_table_id,
+                                  uint64_t &inv_idx_tid);
+
     inline ObTablePartitionInfo *get_table_partition_info() { return table_partition_info_; }
 
     int param_funct_table_expr(ObRawExpr* &function_table_expr,
@@ -1405,6 +1411,9 @@ struct NullAwareAntiJoinInfo {
     int param_json_table_expr(ObRawExpr* &json_table_expr,
                               ObIArray<ObExecParamRawExpr *> &nl_params,
                               ObIArray<ObRawExpr*> &subquery_exprs);
+    int generate_json_table_default_val(ObIArray<ObExecParamRawExpr *> &nl_param,
+                                        ObIArray<ObRawExpr *> &subquery_exprs,
+                                        ObRawExpr*& default_expr);
     /**
      * 为本节点增加一条路径，代价竞争过程在这里实现
      * @param path
@@ -1657,6 +1666,10 @@ struct NullAwareAntiJoinInfo {
                                               const ColumnIdInfoMap &column_schema_info,
                                               ObQueryRange *&query_range);
 
+    int extract_multivalue_preliminary_query_range(const ObIArray<ColumnItem> &range_columns,
+                                                  const ObIArray<ObRawExpr*> &predicates,
+                                                  ObQueryRange *&query_range);
+
     int extract_geo_schema_info(const uint64_t table_id,
                                 const uint64_t index_id,
                                 ObWrapperAllocator &wrap_allocator,
@@ -1682,6 +1695,12 @@ struct NullAwareAntiJoinInfo {
     int check_exprs_overlap_gis_index(const ObIArray<ObRawExpr*>& quals,
                                       const ObIArray<ObRawExpr*>& keys,
                                       bool &match);
+
+    int check_exprs_overlap_multivalue_index(const uint64_t table_id,
+                                             const uint64_t index_table_id,
+                                             const ObIArray<ObRawExpr*>& quals,
+                                             const ObIArray<ObRawExpr*>& keys,
+                                             bool &match);
 
     /**
      * 判断连接条件是否匹配索引前缀
@@ -2300,14 +2319,10 @@ struct NullAwareAntiJoinInfo {
                                       bool contain_fake_cte,
                                       ValidPathInfo &path_info);
 
-    int check_depend_function_table(const ObJoinOrder &left_tree,
-                                    const ObJoinOrder &right_tree,
-                                    const ObJoinType join_type,
-                                    ValidPathInfo &path_info);
-    int check_depend_json_table(const ObJoinOrder &left_tree,
-                                    const ObJoinOrder &right_tree,
-                                    const ObJoinType join_type,
-                                    ValidPathInfo &path_info);
+    int check_depend_table(const ObJoinOrder &left_tree,
+                           const ObJoinOrder &right_tree,
+                           const ObJoinType join_type,
+                           ValidPathInfo &path_info);
     int check_subquery_in_join_condition(const ObJoinType join_type,
                                          const ObIArray<ObRawExpr*> &join_conditions,
                                          ValidPathInfo &path_info);

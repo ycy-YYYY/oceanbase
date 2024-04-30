@@ -502,6 +502,8 @@ typedef enum ObItemType
   T_FUN_SYS_AUDIT_LOG_SET_USER = 771,
   T_FUN_SYS_AUDIT_LOG_REMOVE_USER = 772,
   T_FUN_SYS_PASSWORD = 773,
+  T_FUN_SYS_IS_ENABLED_ROLE = 774,
+  T_FUN_SYS_CAN_ACCESS_TRIGGER = 775,
   ///< @note add new mysql only function type before this line
   T_MYSQL_ONLY_SYS_MAX_OP = 800,
 
@@ -880,6 +882,12 @@ typedef enum ObItemType
   T_FUN_SYS_LAST_REFRESH_SCN = 2016,
   T_FUN_SUM_OPNSIZE = 2017,
 
+  T_FUN_SYS_GET_LOCK = 2018,
+  T_FUN_SYS_IS_FREE_LOCK = 2019,
+  T_FUN_SYS_IS_USED_LOCK = 2020,
+  T_FUN_SYS_RELEASE_LOCK = 2021,
+  T_FUN_SYS_RELEASE_ALL_LOCKS = 2022,
+
   T_MAX_OP = 3000,
 
   //pseudo column, to mark the group iterator id
@@ -1132,7 +1140,6 @@ typedef enum ObItemType
   T_DIAGNOSTICS,
   T_JSON_TABLE_EXPRESSION,
   T_JSON_TABLE_COLUMN,
-
   //pseudo_column
   T_PSEUDO_COLUMN,
   T_LEVEL,
@@ -2429,14 +2436,12 @@ typedef enum ObItemType
   T_SHOW_FUNCTION_CODE,
   T_CHANGE_EXTERNAL_STORAGE_DEST,
   T_ALTER_USER_PROXY,
-
   T_PARALLEL_DAS_DML,
   T_DISABLE_PARALLEL_DAS_DML,
   T_ENABLE_LOB_PREFETCH,
   T_MV_OPTIONS,
   T_MV_REWRITE,
   T_MV_NO_REWRITE,
-
   // select into outfile
   T_INTO_FILE_LIST,
   T_SINGLE_OPT,
@@ -2468,6 +2473,7 @@ typedef enum ObItemType
   T_ALTER_LOGFILE_GROUP,
   T_DROP_LOGFILE_GROUP,
   T_SET_UNION_ALL,
+  T_SHOW_CHECK_TABLE,
 
   T_MAX //Attention: add a new type before T_MAX
 } ObItemType;
@@ -2520,6 +2526,7 @@ typedef enum ObOutlineType
     || ((op) == T_FUN_SYS_JSON_OVERLAPS) \
     || ((op) == T_FUN_SYS_JSON_CONTAINS) \
     || ((op) == T_FUN_SYS_JSON_CONTAINS_PATH) \
+    || ((op) == T_FUN_SYS_JSON_SCHEMA_VALID) \
     || ((op) == T_FUN_SYS_JSON_EQUAL) \
     || ((op) == T_FUN_SYS_IS_JSON) \
     || ((op) == T_FUN_SYS_JSON_EXISTS) \

@@ -1216,6 +1216,7 @@ public:
   int is_preserve_order_for_pagination_enabled(bool &enabled) const;
 
   ObSessionDDLInfo &get_ddl_info() { return ddl_info_; }
+  const ObSessionDDLInfo &get_ddl_info() const { return ddl_info_; }
   void set_ddl_info(const ObSessionDDLInfo &ddl_info) { ddl_info_ = ddl_info; }
   bool is_table_name_hidden() const { return is_table_name_hidden_; }
   void set_table_name_hidden(const bool is_hidden) { is_table_name_hidden_ = is_hidden; }
@@ -1333,6 +1334,9 @@ public:
   // piece
   observer::ObPieceCache *get_piece_cache(bool need_init = false);
 
+  share::schema::ObUserLoginInfo get_login_info () { return login_info_; }
+  int set_login_info(const share::schema::ObUserLoginInfo &login_info);
+  int set_login_auth_data(const ObString &auth_data);
   void set_load_data_exec_session(bool v) { is_load_data_exec_session_ = v; }
   bool is_load_data_exec_session() const { return is_load_data_exec_session_; }
   inline ObSqlString &get_pl_exact_err_msg() { return pl_exact_err_msg_; }
@@ -1346,6 +1350,10 @@ public:
   int on_user_disconnect();
   virtual void reset_tx_variable(bool reset_next_scope = true);
   ObOptimizerTraceImpl& get_optimizer_tracer() { return optimizer_tracer_; }
+  void set_need_send_feedback_proxy_info(bool v) { need_send_feedback_proxy_info_ = v; }
+  bool is_need_send_feedback_proxy_info() const { return need_send_feedback_proxy_info_; }
+  void set_is_lock_session(bool v) { is_lock_session_ = v; }
+  bool is_lock_session() const { return is_lock_session_; }
   int64_t get_plsql_exec_time();
   void update_pure_sql_exec_time(int64_t elapsed_time);
 public:
@@ -1516,6 +1524,8 @@ private:
   bool is_send_control_info_ = false;  // whether send control info to client
   bool auto_flush_trace_ = false;
   bool coninfo_set_by_sess_ = false;
+  bool need_send_feedback_proxy_info_ = false;
+  bool is_lock_session_ = false;
 
   ObSessInfoEncoder* sess_encoders_[SESSION_SYNC_MAX_TYPE] = {
                             //&usr_var_encoder_,
@@ -1596,6 +1606,7 @@ private:
   common::ObSEArray<ObSequenceSchema*, 2> dblink_sequence_schemas_;
   bool client_non_standard_;
   bool is_session_sync_support_; // session_sync_support flag.
+  share::schema::ObUserLoginInfo login_info_;
 };
 
 inline bool ObSQLSessionInfo::is_terminate(int &ret) const

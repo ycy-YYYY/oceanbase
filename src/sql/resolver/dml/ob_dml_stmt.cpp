@@ -256,7 +256,8 @@ int TableItem::deep_copy(ObIRawExprCopier &expr_copier,
   for_update_ = other.for_update_;
   for_update_wait_us_ = other.for_update_wait_us_;
   skip_locked_ = other.skip_locked_;
-  mock_id_ = other.mock_id_;
+  need_expand_rt_mv_ = other.need_expand_rt_mv_;
+  mview_id_ = other.mview_id_;
   node_ = other.node_; // should deep copy ? seems to be unnecessary
   flashback_query_type_ = other.flashback_query_type_;
   // dblink
@@ -284,6 +285,23 @@ int TableItem::deep_copy(ObIRawExprCopier &expr_copier,
     LOG_WARN("failed to assign part names", K(ret));
   } else if (OB_FAIL(expr_copier.copy(other.table_values_, table_values_))) {
     LOG_WARN("failed to deep copy table values", K(ret));
+  } else {
+    exec_params_.reuse();
+    for (int64_t i = 0; OB_SUCC(ret) && i < other.exec_params_.count(); ++i) {
+      ObRawExpr *exec_param = other.exec_params_.at(i);
+      ObRawExpr *new_expr = NULL;
+      if (OB_FAIL(expr_copier.do_copy_expr(exec_param, new_expr))) {
+        LOG_WARN("failed to copy exec param", K(ret));
+      } else if (OB_ISNULL(new_expr) ||
+                 OB_UNLIKELY(!new_expr->is_exec_param_expr())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("exec param is invalid", K(ret), K(new_expr));
+      } else if (OB_FAIL(expr_copier.copy(static_cast<ObExecParamRawExpr *>(new_expr)->get_ref_expr()))) {
+        LOG_WARN("failed to copy expr", K(ret));
+      } else if (OB_FAIL(exec_params_.push_back(static_cast<ObExecParamRawExpr *>(new_expr)))) {
+        LOG_WARN("failed to push back exec params", K(ret));
+      }
+    }
   }
   return ret;
 }
@@ -388,7 +406,8 @@ ObDMLStmt::ObDMLStmt(stmt::StmtType type)
       user_var_exprs_(),
       check_constraint_items_(),
       dblink_id_(OB_INVALID_ID),
-      is_reverse_link_(false)
+      is_reverse_link_(false),
+      match_exprs_()
 {
 }
 
@@ -484,6 +503,8 @@ int ObDMLStmt::assign(const ObDMLStmt &other)
     LOG_WARN("assign user var exprs fail", K(ret));
   } else if (OB_FAIL(check_constraint_items_.assign(other.check_constraint_items_))) {
     LOG_WARN("faield to assign check constraint items", K(ret));
+  } else if (OB_FAIL(match_exprs_.assign(other.match_exprs_))) {
+    LOG_WARN("faield to assign fulltext search exprs", K(ret));
   } else {
     limit_count_expr_ = other.limit_count_expr_;
     limit_offset_expr_ = other.limit_offset_expr_;
@@ -635,6 +656,9 @@ int ObDMLStmt::deep_copy_stmt_struct(ObIAllocator &allocator,
     LOG_WARN("deep copy limit percent expr failed", K(ret));
   } else if (OB_FAIL(expr_copier.copy(other.user_var_exprs_,
                                       user_var_exprs_))) {
+    LOG_WARN("deep copy user var exprs failed", K(ret));
+  } else if (OB_FAIL(expr_copier.copy(other.match_exprs_,
+                                      match_exprs_))) {
     LOG_WARN("deep copy user var exprs failed", K(ret));
   } else if (OB_FAIL(deep_copy_stmt_objects<CheckConstraintItem>(expr_copier,
                                                                  other.check_constraint_items_,
@@ -832,11 +856,17 @@ int ObDMLStmt::iterate_stmt_expr(ObStmtExprVisitor &visitor)
         LOG_WARN("failed to visit temp expr", K(ret));
       }
     }
-    if (OB_SUCC(ret) && NULL != column_items_.at(i).default_value_expr_) {
+    if (OB_FAIL(ret)) {
+    } else if (NULL != column_items_.at(i).default_value_expr_) {
       if (OB_FAIL(visitor.visit(column_items_.at(i).default_value_expr_,
                                 SCOPE_BASIC_TABLE))) {
         LOG_WARN("failed to visit temp expr", K(ret));
       }
+    } else if (NULL != column_items_.at(i).default_empty_expr_) {
+      if (OB_FAIL(visitor.visit(column_items_.at(i).default_empty_expr_,
+                                SCOPE_FROM))) {
+        LOG_WARN("failed to visit temp expr", K(ret));
+      } // non_const default value
     } else { /*do nothing*/ }
   }
   for (int64_t i = 0; OB_SUCC(ret) && i < table_items_.count(); i++) {
@@ -856,9 +886,20 @@ int ObDMLStmt::iterate_stmt_expr(ObStmtExprVisitor &visitor)
                OB_FAIL(visitor.visit(table_items_.at(i)->json_table_def_->doc_expr_,
                                      SCOPE_FROM))) {
       LOG_WARN("failed to add json table doc expr", K(ret));
-     } else if (OB_FAIL(visitor.visit(table_items_.at(i)->table_values_,
-                                      SCOPE_FROM))) {
+    } else if (OB_FAIL(visitor.visit(table_items_.at(i)->table_values_,
+                                     SCOPE_FROM))) {
       LOG_WARN("failed to visit table values", K(ret));
+    } else if (table_items_.at(i)->is_lateral_table()) {
+      TableItem *table_item = table_items_.at(i);
+      for (int64_t j = 0; OB_SUCC(ret) && j < table_item->exec_params_.count(); ++j) {
+        if (OB_ISNULL(table_item->exec_params_.at(j))) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("get unexpected null", K(ret));
+        } else if (OB_FAIL(visitor.visit(table_item->exec_params_.at(j)->get_ref_expr(),
+                                         SCOPE_FROM))) {
+          LOG_WARN("failed to add lateral ref expr", K(ret));
+        }
+      }
     } else { /*do nothing*/ }
   }
 
@@ -894,6 +935,8 @@ int ObDMLStmt::iterate_stmt_expr(ObStmtExprVisitor &visitor)
     } else if (NULL != limit_percent_expr_ &&
                OB_FAIL(visitor.visit(limit_percent_expr_, SCOPE_LIMIT))) {
       LOG_WARN("failed to visit limit percent exprs", K(ret));
+    } else if (OB_FAIL(visitor.visit(match_exprs_, SCOPE_DICT_FIELDS))) {
+      LOG_WARN("failed to visit fts exprs", K(ret));
     } else {}
   }
 
@@ -1070,6 +1113,13 @@ int ObDMLStmt::update_stmt_table_id(ObIAllocator *allocator, const ObDMLStmt &ot
           K(other.table_items_.at(i)), K(ret));
     } else if (table_items_.at(i)->is_generated_table() &&
                other.table_items_.at(i)->is_generated_table() &&
+               NULL != table_items_.at(i)->ref_query_ &&
+               NULL != other.table_items_.at(i)->ref_query_ &&
+               OB_FAIL(table_items_.at(i)->ref_query_->update_stmt_table_id(allocator,
+                       *other.table_items_.at(i)->ref_query_))) {
+      LOG_WARN("failed to update table id for generated table", K(ret));
+    } else if (table_items_.at(i)->is_lateral_table() &&
+               other.table_items_.at(i)->is_lateral_table() &&
                NULL != table_items_.at(i)->ref_query_ &&
                NULL != other.table_items_.at(i)->ref_query_ &&
                OB_FAIL(table_items_.at(i)->ref_query_->update_stmt_table_id(allocator,
@@ -1760,7 +1810,8 @@ int ObDMLStmt::formalize_relation_exprs(ObSQLSessionInfo *session_info)
       if (OB_ISNULL(column_expr = column_items_.at(i).expr_)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("expr is NULL", K(ret));
-      } else if (column_expr->is_virtual_generated_column()) {
+      } else if (column_expr->is_virtual_generated_column() &&
+                 (!column_expr->is_fulltext_column() && !column_expr->is_multivalue_generated_column())) {
         ObRawExpr *dependant_expr = static_cast<ObColumnRefRawExpr *>(
                                     column_expr)->get_dependant_expr();
         if (OB_FAIL(dependant_expr->formalize(session_info))) {
@@ -1795,7 +1846,8 @@ int ObDMLStmt::formalize_relation_exprs(ObSQLSessionInfo *session_info)
 }
 
 int ObDMLStmt::formalize_stmt_expr_reference(ObRawExprFactory *expr_factory,
-                                             ObSQLSessionInfo *session_info)
+                                             ObSQLSessionInfo *session_info,
+                                             bool explicit_for_col /* default false */)
 {
   int ret = OB_SUCCESS;
   ObSEArray<ObRawExpr*, 32> stmt_exprs;
@@ -1832,18 +1884,26 @@ int ObDMLStmt::formalize_stmt_expr_reference(ObRawExprFactory *expr_factory,
       if (OB_ISNULL(column_item.expr_) ||
           OB_ISNULL(table_item = get_table_item_by_id(column_item.table_id_))) {
         ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("get unexpected null", K(column_item.expr_), K(table_item), K(ret));
+        LOG_WARN("get unexpected null", K(column_item.table_id_), K(column_item.expr_), K(table_item), K(ret));
       } else if (table_item->is_function_table() ||
                  table_item->is_json_table() ||
                  table_item->for_update_ ||
                  is_hierarchical_query()) {
         if (OB_FAIL(set_sharable_expr_reference(*column_item.expr_, ExplicitedRefType::REF_BY_NORMAL))) {
           LOG_WARN("failed to set sharable exprs reference", K(ret));
+        } else if (table_item->is_json_table()) {
+          if (NULL != column_item.default_value_expr_
+                    && OB_FAIL(set_sharable_expr_reference(*column_item.default_value_expr_, ExplicitedRefType::REF_BY_NORMAL))) {
+            LOG_WARN("failed to visit default error expr", K(ret));
+          } else if (NULL != column_item.default_empty_expr_
+                    && OB_FAIL(set_sharable_expr_reference(*column_item.default_empty_expr_, ExplicitedRefType::REF_BY_NORMAL))) {
+            LOG_WARN("failed to visit default empty expr", K(ret));
+          } else { /*do nothing*/ }
         }
       } else { /*do nothing*/ }
     }
     if (OB_SUCC(ret)) {
-      if (OB_FAIL(remove_useless_sharable_expr(expr_factory, session_info))) {
+      if (OB_FAIL(remove_useless_sharable_expr(expr_factory, session_info, explicit_for_col))) {
         LOG_WARN("failed to remove useless sharable expr", K(ret));
       } else if (OB_FAIL(check_pseudo_column_valid())) {
         LOG_WARN("failed to check pseudo column", K(ret));
@@ -1968,6 +2028,10 @@ int ObDMLStmt::set_sharable_expr_reference(ObRawExpr &expr, ExplicitedRefType re
       // SQL DEFENSIVE CODE
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("query ref expr does not exist in the stmt", K(ret), K(expr));
+    } else if (expr.is_match_against_expr() &&
+              !ObRawExprUtils::find_expr(get_match_exprs(), &expr)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("fulltext search expr does not exist in the stmt", K(ret), K(expr));
     } else if (is_select_stmt() &&
                OB_FAIL(static_cast<ObSelectStmt *>(this)->check_aggr_and_winfunc(expr))) {
       // SQL DEFENSIVE CODE
@@ -1989,7 +2053,7 @@ int ObDMLStmt::set_sharable_expr_reference(ObRawExpr &expr, ExplicitedRefType re
        expr.has_flag(CNT_WINDOW_FUNC) || expr.has_flag(CNT_SUB_QUERY) ||
        expr.has_flag(CNT_ROWNUM) || expr.has_flag(CNT_SEQ_EXPR) ||
        expr.has_flag(CNT_PSEUDO_COLUMN) || expr.has_flag(CNT_ONETIME) ||
-       expr.has_flag(CNT_DYNAMIC_PARAM))) {
+       expr.has_flag(CNT_DYNAMIC_PARAM) || expr.has_flag(CNT_MATCH_EXPR))) {
     for (int64_t i = 0; OB_SUCC(ret) && i < expr.get_param_count(); i++) {
       if (OB_ISNULL(expr.get_param_expr(i))) {
         ret = OB_ERR_UNEXPECTED;
@@ -2032,37 +2096,41 @@ int ObDMLStmt::generated_column_depend_column_is_referred(ObRawExpr *expr, bool 
 }
 
 int ObDMLStmt::remove_useless_sharable_expr(ObRawExprFactory *expr_factory,
-                                            ObSQLSessionInfo *session_info)
+                                            ObSQLSessionInfo *session_info,
+                                            bool explicit_for_col)
 {
   int ret = OB_SUCCESS;
   UNUSED(expr_factory);
   UNUSED(session_info);
   for (int64_t i = column_items_.count() - 1; OB_SUCC(ret) && i >= 0; i--) {
     ObColumnRefRawExpr *expr = NULL;
+    bool is_referred = false;
+    bool need_remove = false;
     if (OB_ISNULL(expr = column_items_.at(i).expr_)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("get unexpected null", K(ret));
-    } else if (expr->is_explicited_reference() || expr->is_rowkey_column()
-               || expr->is_spatial_generated_column()) {
-      /*do nothing*/
+    } else if (expr->is_explicited_reference()) {
+      need_remove = false;
+    } else if (explicit_for_col) {
+      need_remove = true;
+    } else if (expr->is_rowkey_column() || expr->is_spatial_generated_column()) {
+      need_remove = false;
+    } else if (OB_FAIL(is_referred_by_partitioning_expr(expr, is_referred))) {
+      LOG_WARN("failed to check whether is referred by partitioning expr", K(ret));
+    } else if (is_referred) {
+      need_remove = false;
+    } else if (OB_FAIL(generated_column_depend_column_is_referred(expr, is_referred))) {
+      //if the generate column's depend expr has columns referred.
+      LOG_WARN("generated expr has normal column depends", K(ret));
     } else {
-      bool is_referred = true;
-      if (OB_FAIL(is_referred_by_partitioning_expr(expr, is_referred))) {
-        LOG_WARN("failed to check whether is referred by partitioning expr", K(ret));
-      }
+      need_remove = !is_referred;
+    }
 
-      if (OB_FAIL(ret) || is_referred) {
-        //if the generate column's depend expr has columns referred.
-      } else if (OB_FAIL(generated_column_depend_column_is_referred(expr, is_referred))) {
-        LOG_WARN("generated expr has normal column depends", K(ret));
-      }
-
-      if (OB_SUCC(ret) && !is_referred) {
-        if (OB_FAIL(column_items_.remove(i))) {
-          LOG_WARN("failed to remove column item", K(ret));
-        } else {
-          LOG_TRACE("succeed to remove column items", K(expr), K(lbt()));
-        }
+    if (OB_SUCC(ret) && need_remove) {
+      if (OB_FAIL(column_items_.remove(i))) {
+        LOG_WARN("failed to remove column item", K(ret));
+      } else {
+        LOG_TRACE("succeed to remove column items", K(expr), K(lbt()));
       }
     }
   }
@@ -2199,7 +2267,8 @@ int ObDMLStmt::get_from_subquery_stmts(ObIArray<ObSelectStmt*> &child_stmts) con
     if (OB_ISNULL(table_item)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("table_item is null", K(i));
-    } else if (table_item->is_generated_table()) {// to remove temp table
+    } else if (table_item->is_generated_table() ||
+               table_item->is_lateral_table()) {// to remove temp table
       if (OB_FAIL(child_stmts.push_back(table_item->ref_query_))) {
         LOG_WARN("adjust parent namespace stmt failed", K(ret));
       }
@@ -3238,7 +3307,8 @@ int ObDMLStmt::get_child_stmts(ObIArray<ObSelectStmt*> &child_stmts) const
     if (OB_ISNULL(table_item)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("table_item is null", K(i));
-    } else if (table_item->is_generated_table()) {
+    } else if (table_item->is_generated_table() ||
+               table_item->is_lateral_table()) {
       if (OB_FAIL(child_stmts.push_back(table_item->ref_query_))) {
         LOG_WARN("store child stmt failed", K(ret));
       }
@@ -3278,7 +3348,8 @@ int ObDMLStmt::set_child_stmt(const int64_t child_num, ObSelectStmt* child_stmt)
       if (OB_ISNULL(table_item)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("table_item is null", K(i));
-      } else if (table_item->is_generated_table()) {
+      } else if (table_item->is_generated_table() ||
+                 table_item->is_lateral_table()) {
         if (child_num == pos) {
           is_find = true;
           table_item->ref_query_ = child_stmt;
@@ -3320,7 +3391,9 @@ bool ObDMLStmt::has_link_table() const
   bool bret = false;
   for (int i = 0; !bret && i < table_items_.count(); i++) {
     if (OB_NOT_NULL(table_items_.at(i))) {
-      if (table_items_.at(i)->is_generated_table() || table_items_.at(i)->is_temp_table()) {
+      if (table_items_.at(i)->is_generated_table() ||
+          table_items_.at(i)->is_temp_table() ||
+          table_items_.at(i)->is_lateral_table()) {
         if (OB_NOT_NULL(table_items_.at(i)->ref_query_)) {
           bret = table_items_.at(i)->ref_query_->has_link_table();
         }
@@ -3601,6 +3674,26 @@ int ObDMLStmt::has_special_expr(const ObExprInfoFlag flag, bool &has) const
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("get unexpected null", K(ret));
       } else if (exprs.at(i)->has_flag(flag)) {
+        has = true;
+      }
+    }
+  }
+  return ret;
+}
+
+int ObDMLStmt::has_special_exprs(const ObSqlBitSet<> &flags, bool &has) const
+{
+  int ret = OB_SUCCESS;
+  ObSEArray<ObRawExpr*, 16> exprs;
+  has = false;
+  if (OB_FAIL(get_relation_exprs(exprs))) {
+    LOG_WARN("failed to get relation exprs", K(ret));
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && !has && i < exprs.count(); i++) {
+      if (OB_ISNULL(exprs.at(i))) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("get unexpected null", K(ret));
+      } else if (exprs.at(i)->get_expr_info().overlap(flags)) {
         has = true;
       }
     }
@@ -4576,14 +4669,14 @@ int ObDMLStmt::disable_writing_external_table(bool basic_stmt_is_dml /* defualt 
   return ret;
 }
 
-int ObDMLStmt::disable_writing_materialized_view()
+int ObDMLStmt::disable_writing_materialized_view() const
 {
   int ret = OB_SUCCESS;
   bool disable_write_table = false;
   const TableItem *table_item = NULL;
   if (is_dml_write_stmt()) {
-    ObSEArray<ObDmlTableInfo*, 4> dml_table_infos;
-    if (OB_FAIL(static_cast<ObDelUpdStmt*>(this)->get_dml_table_infos(dml_table_infos))) {
+    ObSEArray<const ObDmlTableInfo*, 4> dml_table_infos;
+    if (OB_FAIL(static_cast<const ObDelUpdStmt*>(this)->get_dml_table_infos(dml_table_infos))) {
       LOG_WARN("failed to get dml table infos");
     }
     for (int64_t i = 0; OB_SUCC(ret) && !disable_write_table && i < dml_table_infos.count(); ++i) {
@@ -4597,7 +4690,7 @@ int ObDMLStmt::disable_writing_materialized_view()
                 || schema::MATERIALIZED_VIEW_LOG == table_item->table_type_) {
         disable_write_table = true;
       } else if (table_item->is_view_table_ && NULL != table_item->ref_query_) {
-        OZ( table_item->ref_query_->disable_writing_materialized_view() );
+        OZ( SMART_CALL(table_item->ref_query_->disable_writing_materialized_view()) );
       }
     }
   }
@@ -4611,7 +4704,7 @@ int ObDMLStmt::disable_writing_materialized_view()
       LOG_WARN("failed to get stmt's child_stmts", K(ret));
     } else {
       for (int64_t i = 0; OB_SUCC(ret) && i < child_stmts.count(); ++i) {
-        OZ( child_stmts.at(i)->disable_writing_materialized_view() );
+        OZ( SMART_CALL(child_stmts.at(i)->disable_writing_materialized_view()) );
       }
     }
   }
@@ -4644,7 +4737,6 @@ int ObDMLStmt::do_formalize_query_ref_exprs_pre()
       LOG_WARN("unexpected null", K(ret));
     }
     for (int64_t i = 0; OB_SUCC(ret) && i < ref_query->get_exec_params().count(); ++i) {
-      bool is_happened = false;
       int64_t idx = -1;
       if (OB_ISNULL(exec_param = ref_query->get_exec_param(i))) {
         ret = OB_ERR_UNEXPECTED;
@@ -4706,7 +4798,6 @@ int ObDMLStmt::formalize_query_ref_exec_params(ObStmtExecParamFormatter &formatt
                                               bool need_replace)
 {
   int ret = OB_SUCCESS;
-  ObQueryRefRawExpr *ref_query = NULL;
   ObSEArray<ObSelectStmt*, 8> subquerys;
   if (need_replace && OB_FAIL(iterate_stmt_expr(formatter))) {
     LOG_WARN("failed to iterate stmt expr");
@@ -4714,6 +4805,8 @@ int ObDMLStmt::formalize_query_ref_exec_params(ObStmtExecParamFormatter &formatt
     LOG_WARN("failed to get child stmts", K(ret));
   } else if (OB_FAIL(do_formalize_query_ref_exprs_pre())) {
     LOG_WARN("failed to do formalize query ref exprs pre", K(ret));
+  } else if (OB_FAIL(do_formalize_lateral_derived_table_pre())) {
+    LOG_WARN("failed to do formalize lateral derived table pre", K(ret));
   }
   for (int64_t i = 0; OB_SUCC(ret) && i < subquerys.count(); ++i) {
     if (OB_ISNULL(subquerys.at(i))) {
@@ -4723,8 +4816,12 @@ int ObDMLStmt::formalize_query_ref_exec_params(ObStmtExecParamFormatter &formatt
       LOG_WARN("failed to formalize subquery exec params", K(ret));
     }
   }
-  if (OB_SUCC(ret) && OB_FAIL(do_formalize_query_ref_exprs_post())) {
-    LOG_WARN("failed to do formalize query ref exprs post", K(ret));
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(do_formalize_query_ref_exprs_post())) {
+      LOG_WARN("failed to do formalize query ref exprs post", K(ret));
+    } else if (OB_FAIL(do_formalize_lateral_derived_table_post())) {
+      LOG_WARN("failed to do formalize lateral derived table post", K(ret));
+    }
   }
   return ret;
 }
@@ -4751,6 +4848,71 @@ bool ObDMLStmt::is_values_table_query() const
          table_items_.count() == 1 &&
          table_items_.at(0) != NULL &&
          table_items_.at(0)->is_values_table();
+}
+
+int ObDMLStmt::do_formalize_lateral_derived_table_pre()
+{
+  int ret = OB_SUCCESS;
+  ObExecParamRawExpr *exec_param = NULL;
+  ObSEArray<ObRawExpr*, 8> ref_exprs;
+  ObSEArray<int64_t, 8> ref_exec_idxs;
+  for (int64_t j = 0; OB_SUCC(ret) && j < table_items_.count(); ++j) {
+    TableItem *table_item = NULL;
+    ref_exprs.reuse();
+    ref_exec_idxs.reuse();
+    if (OB_ISNULL(table_item = table_items_.at(j))) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected null", K(ret));
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < table_item->exec_params_.count(); ++i) {
+      int64_t idx = -1;
+      if (OB_ISNULL(exec_param = table_item->exec_params_.at(i))) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected null", K(ret));
+      } else if (OB_FALSE_IT(exec_param->clear_explicited_referece())) {
+      } else if (ObOptimizerUtil::find_item(ref_exprs,
+                                            exec_param->get_ref_expr(),
+                                            &idx)) {
+        exec_param->set_ref_expr(table_item->exec_params_.at(ref_exec_idxs.at(idx)));
+      } else if (OB_FAIL(ref_exprs.push_back(exec_param->get_ref_expr()))) {
+        LOG_WARN("failed to push back ref exprs");
+      } else if (OB_FAIL(ref_exec_idxs.push_back(i))) {
+        LOG_WARN("failed to push back ref exec idxs", K(ret));
+      }
+    }
+  }
+  return ret;
+}
+
+int ObDMLStmt::do_formalize_lateral_derived_table_post()
+{
+  int ret = OB_SUCCESS;
+  ObRawExpr *exec_param = NULL;
+  TableItem *table_item = NULL;
+  for (int64_t j = 0; OB_SUCC(ret) && j < table_items_.count(); ++j) {
+    if (OB_ISNULL(table_item = table_items_.at(j))) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected null", K(ret));
+    }
+    for (int64_t i = table_item->exec_params_.count() - 1; OB_SUCC(ret) && i >= 0; --i) {
+      int64_t idx = -1;
+      if (OB_ISNULL(exec_param = table_item->exec_params_.at(i))) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected null", K(ret));
+      } else if (exec_param->is_explicited_reference()) {
+        // do nothing
+      } else if (OB_FAIL(table_item->exec_params_.remove(i))) {
+        LOG_WARN("failed to remove exec param", K(ret));
+      } else {
+        LOG_TRACE("succeed to remove exec param expr", K(*exec_param));
+      }
+    }
+    if (OB_SUCC(ret) && table_item->is_lateral_table() &&
+        table_item->exec_params_.empty()) {
+      table_item->type_ = TableItem::GENERATED_TABLE;
+    }
+  }
+  return ret;
 }
 
 ObJtColBaseInfo::ObJtColBaseInfo()
@@ -4864,7 +5026,7 @@ int ObJtColBaseInfo::assign(const ObJtColBaseInfo& src)
 int ObJsonTableDef::deep_copy(const ObJsonTableDef& src, ObIRawExprCopier &expr_copier, ObIAllocator* allocator)
 {
   int ret = OB_SUCCESS;
-
+  table_type_ = src.table_type_;
   if (OB_FAIL(expr_copier.copy(src.doc_expr_, doc_expr_))) {
     LOG_WARN("failed to deep copy raw expr", K(ret));
   }
@@ -4889,6 +5051,14 @@ int ObJsonTableDef::deep_copy(const ObJsonTableDef& src, ObIRawExprCopier &expr_
       }
     }
   }
+  ObString ns_str;
+  for (size_t i = 0; OB_SUCC(ret) && i < src.namespace_arr_.count(); i ++) {
+    if (OB_FAIL(ob_write_string(*allocator, src.namespace_arr_.at(i), ns_str))) {
+      LOG_WARN("fail to copy string", K(src.namespace_arr_.at(i)), K(i));
+    } else if (OB_FAIL(namespace_arr_.push_back(ns_str))) {
+      LOG_WARN("fail to push str in array", K(ret), K(ns_str));
+    }
+  }
 
   return ret;
 }
@@ -4898,10 +5068,37 @@ int ObJsonTableDef::assign(const ObJsonTableDef& src)
   int ret = OB_SUCCESS;
 
   doc_expr_ = src.doc_expr_;
+  table_type_ = src.table_type_;
 
   if (OB_FAIL(all_cols_.assign(src.all_cols_))) {
     LOG_WARN("fail to assign all cols.", K(ret));
   }
+  for (size_t i = 0; OB_SUCC(ret) && i < src.namespace_arr_.count(); i ++) {
+    if (OB_FAIL(namespace_arr_.push_back(src.namespace_arr_.at(i)))) {
+      LOG_WARN("fail to push str in array", K(ret), K(src.namespace_arr_.at(i)));
+    }
+  }
 
+  return ret;
+}
+
+int ObDMLStmt::get_match_expr_on_table(uint64_t table_id, ObMatchFunRawExpr *&match_expr) const
+{
+  int ret = OB_SUCCESS;
+  match_expr = NULL;
+  for (int64_t i = 0; OB_SUCC(ret) && i < get_match_exprs().count(); i++) {
+    uint64_t cur_tid = OB_INVALID_ID;
+    if (OB_ISNULL(get_match_exprs().at(i))) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected null", K(ret));
+    } else if (OB_FAIL(get_match_exprs().at(i)->get_table_id(cur_tid))) {
+      LOG_WARN("failed to get fulltext search exprs", K(ret));
+    } else if (OB_NOT_NULL(match_expr) && cur_tid == table_id) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_WARN("invalid argument, find more than one match expr on current table", K(ret), K(table_id));
+    } else if (cur_tid == table_id) {
+      match_expr = get_match_exprs().at(i);
+    } else { /*do nothing*/ }
+  }
   return ret;
 }

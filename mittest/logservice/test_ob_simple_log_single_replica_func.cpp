@@ -348,7 +348,7 @@ TEST_F(TestObSimpleLogClusterSingleReplica, single_replica_flashback)
   EXPECT_GT(leader.palf_handle_impl_->sw_.get_max_scn(), flashback_scn);
 
   leader.palf_handle_impl_->state_mgr_.role_ = FOLLOWER;
-  leader.palf_handle_impl_->state_mgr_.state_ = ACTIVE;
+  leader.palf_handle_impl_->state_mgr_.state_ = ObReplicaState::ACTIVE;
 
   EXPECT_EQ(OB_SUCCESS, leader.palf_handle_impl_->flashback(mode_version, max_scn, timeout_ts_us));
   EXPECT_LT(leader.palf_handle_impl_->sw_.get_max_scn(), flashback_scn);
@@ -356,7 +356,7 @@ TEST_F(TestObSimpleLogClusterSingleReplica, single_replica_flashback)
   EXPECT_EQ(new_log_tail, leader.palf_handle_impl_->get_end_lsn());
   EXPECT_EQ(OB_ITER_END, read_log(leader));
   leader.palf_handle_impl_->state_mgr_.role_ = LEADER;
-  leader.palf_handle_impl_->state_mgr_.state_ = ACTIVE;
+  leader.palf_handle_impl_->state_mgr_.state_ = ObReplicaState::ACTIVE;
   dynamic_cast<palf::PalfEnvImpl*>(get_cluster()[0]->get_palf_env())->log_loop_thread_.start();
   switch_flashback_to_append(leader, mode_version);
 
@@ -1902,7 +1902,7 @@ TEST_F(TestObSimpleLogClusterSingleReplica, test_raw_read)
   char *read_buf_ptr = reinterpret_cast<char*>(mtl_malloc_align(
     LOG_DIO_ALIGN_SIZE, PALF_BLOCK_SIZE + 2 * LOG_DIO_ALIGN_SIZE, "mittest"));
   EXPECT_EQ(OB_SUCCESS, create_paxos_group(id, leader_idx, leader));
-  leader.palf_handle_impl_->log_engine_.log_storage_.hot_cache_ = NULL;
+  leader.palf_handle_impl_->log_engine_.log_storage_.log_cache_->hot_cache_.reset();
   // 提交100条日志, 每条日志大小为30K.
   {
     char *read_buf = read_buf_ptr;

@@ -293,6 +293,23 @@ public:
   common::ObSEArray<ExternalParamInfo, 8> params_;
 };
 
+struct ObStarExpansionInfo{
+  ObStarExpansionInfo()
+      :start_pos_(0),
+       end_pos_(0),
+       column_name_list_()
+  {}
+
+  ~ObStarExpansionInfo() {}
+
+public:
+  int64_t start_pos_;
+  int64_t end_pos_;
+  common::ObArray<ObString> column_name_list_;
+
+  TO_STRING_KV(K_(start_pos), K_(end_pos), K_(column_name_list));
+};
+
 struct ObResolverParams
 {
   ObResolverParams()
@@ -352,7 +369,10 @@ struct ObResolverParams
        is_specified_col_name_(false),
        is_in_sys_view_(false),
        is_expanding_view_(false),
-       package_guard_(NULL)
+       is_resolve_lateral_derived_table_(false),
+       package_guard_(NULL),
+       star_expansion_infos_(),
+       is_for_rt_mv_(false)
   {}
   bool is_force_trace_log() { return force_trace_log_; }
 
@@ -421,7 +441,10 @@ public:
   bool is_specified_col_name_;//mark if specify the column name in create view or create table as..
   bool is_in_sys_view_;
   bool is_expanding_view_;
+  bool is_resolve_lateral_derived_table_; // used to mark resolve lateral derived table.
   pl::ObPLPackageGuard *package_guard_;
+  common::ObArray<ObStarExpansionInfo> star_expansion_infos_;
+  bool is_for_rt_mv_; // call resolve in transformation for expanding inline real-time materialized view
 };
 } // end namespace sql
 } // end namespace oceanbase

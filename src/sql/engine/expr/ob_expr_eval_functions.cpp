@@ -239,6 +239,8 @@
 #include "ob_expr_json_object.h"
 #include "ob_expr_json_extract.h"
 #include "ob_expr_json_contains.h"
+#include "ob_expr_json_schema_valid.h"
+#include "ob_expr_json_schema_validation_report.h"
 #include "ob_expr_json_contains_path.h"
 #include "ob_expr_json_depth.h"
 #include "ob_expr_json_keys.h"
@@ -250,6 +252,7 @@
 #include "ob_expr_json_valid.h"
 #include "ob_expr_json_remove.h"
 #include "ob_expr_json_array_append.h"
+#include "ob_expr_json_append.h"
 #include "ob_expr_json_array_insert.h"
 #include "ob_expr_json_value.h"
 #include "ob_expr_json_replace.h"
@@ -324,6 +327,9 @@
 #include "ob_expr_xml_serialize.h"
 #include "ob_expr_xmlcast.h"
 #include "ob_expr_update_xml.h"
+#include "ob_expr_insert_child_xml.h"
+#include "ob_expr_xml_delete_xml.h"
+#include "ob_expr_xml_sequence.h"
 #include "ob_expr_generator_func.h"
 #include "ob_expr_random.h"
 #include "ob_expr_randstr.h"
@@ -337,9 +343,16 @@
 #include "ob_expr_temp_table_ssid.h"
 #include "ob_expr_between.h"
 #include "ob_expr_align_date4cmp.h"
+#include "ob_expr_word_count.h"
+#include "ob_expr_word_segment.h"
+#include "ob_expr_doc_id.h"
+#include "ob_expr_doc_length.h"
+#include "ob_expr_bm25.h"
+#include "ob_expr_lock_func.h"
 #include "ob_expr_extract_cert_expired_time.h"
 #include "ob_expr_transaction_id.h"
 #include "ob_expr_inner_row_cmp_val.h"
+#include "ob_expr_last_refresh_scn.h"
 #include "ob_expr_sql_udt_construct.h"
 #include "ob_expr_priv_attribute_access.h"
 #include "ob_expr_temp_table_ssid.h"
@@ -1087,14 +1100,14 @@ static ObExpr::EvalFunc g_expr_eval_functions[] = {
   NULL, //ObExprInnerIsTrue::number_is_true_start,                    /* 621 */
   NULL, //ObExprInnerIsTrue::number_is_true_end,                      /* 622 */
   NULL, //ObExprInnerDecodeLike::eval_inner_decode_like               /* 623 */
-  NULL, //ObExprJsonSchemaValid::eval_json_schema_valid               /* 624 */
-  NULL, //ObExprJsonSchemaValidationReport::eval_json_schema_validation_report /* 625 */
-  NULL, //ObExprInsertChildXml::eval_insert_child_xml                 /* 626 */
-  NULL, //ObExprDeleteXml::eval_delete_xml                            /* 627 */
-  NULL, //ObExprExtractValue::eval_mysql_extract_value                /* 628 */
-  NULL, //ObExprUpdateXml::eval_mysql_update_xml                      /* 629 */
-  NULL, //ObExprXmlSequence::eval_xml_sequence                        /* 630 */
-  NULL, //ObExprJsonAppend::eval_json_array_append                    /* 631 */
+  ObExprJsonSchemaValid::eval_json_schema_valid,                      /* 624 */
+  ObExprJsonSchemaValidationReport::eval_json_schema_validation_report, /* 625 */
+  ObExprInsertChildXml::eval_insert_child_xml,                        /* 626 */
+  ObExprDeleteXml::eval_delete_xml,                                   /* 627 */
+  ObExprExtractValue::eval_mysql_extract_value,                       /* 628 */
+  ObExprUpdateXml::eval_mysql_update_xml,                             /* 629 */
+  ObExprXmlSequence::eval_xml_sequence,                               /* 630 */
+  ObExprJsonAppend::eval_json_array_append,                           /* 631 */
   NULL, //unused                                                      /* 632 */
   ObExprUdtConstruct::eval_udt_construct,                             /* 633 */
   ObExprUDTAttributeAccess::eval_attr_access,                         /* 634 */
@@ -1129,10 +1142,10 @@ static ObExpr::EvalFunc g_expr_eval_functions[] = {
   NULL, //ObExprXmlForest::eval_xml_forest,                           /* 663 */
   NULL, //ObExprExistsNodeXml::eval_existsnode_xml,                   /* 664 */
   NULL, //ObExprPassword::eval_password,                              /* 665 */
-  NULL, // ObExprDocID::generate_doc_id,                              /* 666 */
-  NULL, // ObExprWordSegment::generate_fulltext_column,               /* 667 */
-  NULL, // ObExprWordCount::generate_word_count,                      /* 668 */
-  NULL, // ObExprBM25::eval_bm25_relevance_expr,                      /* 669 */
+  ObExprDocID::generate_doc_id,                                       /* 666 */
+  ObExprWordSegment::generate_fulltext_column,                        /* 667 */
+  ObExprWordCount::generate_word_count,                               /* 668 */
+  ObExprBM25::eval_bm25_relevance_expr,                               /* 669 */
   ObExprTransactionId::eval_transaction_id,                           /* 670 */
   NULL, //ObExprInnerTableOptionPrinter::eval_inner_table_option_printer, /* 671 */
   NULL, //ObExprInnerTableSequenceGetter::eval_inner_table_sequence_getter, /* 672 */
@@ -1140,22 +1153,26 @@ static ObExpr::EvalFunc g_expr_eval_functions[] = {
   ObExprInnerRowCmpVal::eval_inner_row_cmp_val,                       /* 674 */
   ObExprIs::json_is_true,                                             /* 675 */
   ObExprIs::json_is_false,                                            /* 676 */
-  NULL, //ObExprCurrentRole::eval_current_role                        /* 677 */
+  ObExprCurrentRole::eval_current_role,                               /* 677 */
   ObExprMod::mod_decimalint,                                          /* 678 */
   NULL, // ObExprPrivSTGeoHash::eval_priv_st_geohash,                 /* 679 */
   NULL, // ObExprPrivSTMakePoint::eval_priv_st_makepoint,             /* 680 */
-  NULL, // ObExprGetLock::get_lock,                                   /* 681 */
-  NULL, // ObExprIsFreeLock::is_free_lock,                            /* 682 */
-  NULL, // ObExprIsUsedLock::is_used_lock,                            /* 683 */
-  NULL, // ObExprReleaseLock::release_lock,                           /* 684 */
-  NULL, // ObExprReleaseAllLocks::release_all_locks,                  /* 685 */
+  ObExprGetLock::get_lock,                                            /* 681 */
+  ObExprIsFreeLock::is_free_lock,                                     /* 682 */
+  ObExprIsUsedLock::is_used_lock,                                     /* 683 */
+  ObExprReleaseLock::release_lock,                                    /* 684 */
+  ObExprReleaseAllLocks::release_all_locks,                           /* 685 */
   NULL, // ObExprGTIDSubset::eval_subset,                             /* 686 */
   NULL, // ObExprGTIDSubtract::eval_subtract,                         /* 687 */
   NULL, // ObExprWaitForExecutedGTIDSet::eval_wait_for_executed_gtid_set, /* 688 */
   NULL, // ObExprWaitUntilSQLThreadAfterGTIDs::eval_wait_until_sql_thread_after_gtids /* 689 */
-  NULL, // ObExprLastRefreshScn::eval_last_refresh_scn                         /* 690 */
-  NULL, // ObExprDocLength::generate_doc_length,                      /*691*/
+  ObExprLastRefreshScn::eval_last_refresh_scn,                        /* 690 */
+  ObExprDocLength::generate_doc_length,                               /* 691 */
   NULL, // ObExprTopNFilter::eval_topn_filter,                        /* 692 */
+  NULL, // ObExprIsEnabledRole::eval_is_enabled_role,                 /* 693 */
+  NULL, // ObExprCanAccessTrigger::can_access_trigger,                /* 694 */
+  NULL, //ObRelationalExprOperator::eval_min_max_compare,             /* 695 */
+  NULL, //ObRelationalExprOperator::min_max_row_eval,                 /* 696 */
 };
 
 static ObExpr::EvalBatchFunc g_expr_eval_batch_functions[] = {
@@ -1290,6 +1307,7 @@ static ObExpr::EvalBatchFunc g_expr_eval_batch_functions[] = {
   ObBatchCast::implicit_batch_cast<ObDecimalIntTC, ObNumberTC>,       /* 128 */
   NULL,//ObExprDecodeTraceId::calc_decode_trace_id_expr_batch,        /* 129 */
   NULL,//ObExprTopNFilter::eval_topn_filter_batch,                    /* 130 */
+  NULL,//ObRelationalExprOperator::eval_batch_min_max_compare,        /* 131 */
 };
 
 static ObExpr::EvalVectorFunc g_expr_eval_vector_functions[] = {
@@ -1406,6 +1424,8 @@ static ObExpr::EvalVectorFunc g_expr_eval_vector_functions[] = {
   ObExprInOrNotIn::eval_vector_in_without_row,                  /* 110 */
   NULL,//ObExprDecodeTraceId::calc_decode_trace_id_expr_vector  /* 111 */
   NULL,//ObExprTopNFilter::eval_topn_filter_vector,             /* 112 */
+  NULL,//ObRelationalExprOperator::eval_vector_min_max_compare, /* 113 */
+  NULL,//ObExprCeilFloor::calc_ceil_floor_vector                /* 114 */
 };
 
 REG_SER_FUNC_ARRAY(OB_SFA_SQL_EXPR_EVAL,

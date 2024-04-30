@@ -65,6 +65,7 @@ enum ObDDLType
   DDL_CREATE_PARTITIONED_LOCAL_INDEX = 10,
   DDL_DROP_LOB = 11,
   DDL_DROP_FTS_INDEX = 12,
+  DDL_DROP_MULVALUE_INDEX = 13,
   ///< @note tablet split.
   DDL_AUTO_SPLIT_BY_RANGE = 100,
   DDL_AUTO_SPLIT_NON_RANGE = 101,
@@ -99,6 +100,7 @@ enum ObDDLType
   DDL_MVIEW_COMPLETE_REFRESH = 1014,
   DDL_CREATE_MVIEW = 1015,
   DDL_ALTER_COLUMN_GROUP = 1016, // alter table add/drop column group
+  DDL_MODIFY_AUTO_INCREMENT_WITH_REDEFINITION = 1017,
 
   // @note new normal ddl type to be defined here !!!
   DDL_NORMAL_TYPE = 10001,
@@ -315,6 +317,8 @@ static inline bool is_direct_load_retry_err(const int ret)
     || ret == OB_NOT_MASTER
     || ret == OB_TASK_EXPIRED
     || ret == OB_REPLICA_NOT_READABLE
+    || ret == OB_TRANS_CTX_NOT_EXIST
+    || ret == OB_SCHEMA_EAGAIN
     ;
 }
 
@@ -474,6 +478,9 @@ public:
       const bool is_oracle_mode,
       ObSqlString &sql_string);
 
+  static int generate_order_by_str_for_mview(const schema::ObTableSchema &container_table_schema,
+                                             ObSqlString &rowkey_column_sql_string);
+
   static int ddl_get_tablet(
       storage::ObLSHandle &ls_handle,
       const ObTabletID &tablet_id,
@@ -524,6 +531,15 @@ public:
      uint64_t &data_format_version,
      int64_t &snapshot_version,
      share::ObDDLTaskStatus &task_status);
+
+  static int get_data_information(
+     const uint64_t tenant_id,
+     const uint64_t task_id,
+     uint64_t &data_format_version,
+     int64_t &snapshot_version,
+     share::ObDDLTaskStatus &task_status,
+     uint64_t &target_object_id,
+     int64_t &schema_version);
 
   static int replace_user_tenant_id(
     const ObDDLType &ddl_type,
@@ -636,6 +652,7 @@ public:
     }
     return res;
   }
+  static bool use_idempotent_mode(const int64_t data_format_version);
 
 private:
   static int batch_check_tablet_checksum(
@@ -769,7 +786,6 @@ private:
       const int64_t execution_id,
       const ObIArray<ObTabletID> &tablet_ids,
       bool &tablet_checksum_status);
-
 };
 
 typedef common::ObCurTraceId::TraceId DDLTraceId;

@@ -36,6 +36,7 @@
 #include "sql/engine/expr/ob_expr_bit_neg.h"
 #include "sql/engine/expr/ob_expr_bit_left_shift.h"
 #include "sql/engine/expr/ob_expr_bit_right_shift.h"
+#include "sql/engine/expr/ob_expr_bm25.h"
 #include "sql/engine/expr/ob_expr_case.h"
 #include "sql/engine/expr/ob_expr_oracle_decode.h"
 #include "sql/engine/expr/ob_expr_oracle_trunc.h"
@@ -194,6 +195,10 @@
 #include "sql/engine/expr/ob_expr_part_id.h"
 #include "sql/engine/expr/ob_expr_timestamp_add.h"
 #include "sql/engine/expr/ob_expr_des_hex_str.h"
+#include "sql/engine/expr/ob_expr_doc_id.h"
+#include "sql/engine/expr/ob_expr_doc_length.h"
+#include "sql/engine/expr/ob_expr_word_segment.h"
+#include "sql/engine/expr/ob_expr_word_count.h"
 #include "sql/engine/expr/ob_expr_ascii.h"
 #include "sql/engine/expr/ob_expr_truncate.h"
 #include "sql/engine/expr/ob_expr_bit_count.h"
@@ -313,6 +318,8 @@
 #include "sql/engine/expr/ob_expr_nlssort.h"
 #include "sql/engine/expr/ob_expr_json_object.h"
 #include "sql/engine/expr/ob_expr_json_extract.h"
+#include "sql/engine/expr/ob_expr_json_schema_valid.h"
+#include "sql/engine/expr/ob_expr_json_schema_validation_report.h"
 #include "sql/engine/expr/ob_expr_json_contains.h"
 #include "sql/engine/expr/ob_expr_json_contains_path.h"
 #include "sql/engine/expr/ob_expr_json_depth.h"
@@ -325,6 +332,7 @@
 #include "sql/engine/expr/ob_expr_json_valid.h"
 #include "sql/engine/expr/ob_expr_json_remove.h"
 #include "sql/engine/expr/ob_expr_json_array_append.h"
+#include "sql/engine/expr/ob_expr_json_append.h"
 #include "sql/engine/expr/ob_expr_json_array_insert.h"
 #include "sql/engine/expr/ob_expr_json_value.h"
 #include "sql/engine/expr/ob_expr_json_replace.h"
@@ -401,6 +409,9 @@
 #include "sql/engine/expr/ob_expr_xml_serialize.h"
 #include "sql/engine/expr/ob_expr_xmlcast.h"
 #include "sql/engine/expr/ob_expr_update_xml.h"
+#include "sql/engine/expr/ob_expr_insert_child_xml.h"
+#include "sql/engine/expr/ob_expr_xml_delete_xml.h"
+#include "sql/engine/expr/ob_expr_xml_sequence.h"
 #include "sql/engine/expr/ob_expr_sql_udt_construct.h"
 #include "sql/engine/expr/ob_expr_priv_attribute_access.h"
 #include "sql/engine/expr/ob_expr_temp_table_ssid.h"
@@ -412,6 +423,7 @@
 #include "sql/engine/expr/ob_expr_extract_cert_expired_time.h"
 #include "sql/engine/expr/ob_expr_transaction_id.h"
 #include "sql/engine/expr/ob_expr_inner_row_cmp_val.h"
+#include "sql/engine/expr/ob_expr_last_refresh_scn.h"
 #include "sql/engine/expr/ob_expr_priv_st_makeenvelope.h"
 #include "sql/engine/expr/ob_expr_priv_st_clipbybox2d.h"
 #include "sql/engine/expr/ob_expr_priv_st_pointonsurface.h"
@@ -426,6 +438,8 @@
 #include "sql/engine/expr/ob_expr_st_symdifference.h"
 #include "sql/engine/expr/ob_expr_priv_st_asmvtgeom.h"
 #include "sql/engine/expr/ob_expr_priv_st_makevalid.h"
+
+#include "sql/engine/expr/ob_expr_lock_func.h"
 
 using namespace oceanbase::common;
 namespace oceanbase
@@ -857,6 +871,10 @@ void ObExprOperatorFactory::register_expr_operators()
     REG_OP(ObExprPartId);
     REG_OP(ObExprLastTraceId);
     REG_OP(ObExprLastExecId);
+    REG_OP(ObExprDocID);
+    REG_OP(ObExprDocLength);
+    REG_OP(ObExprWordSegment);
+    REG_OP(ObExprWordCount);
     REG_OP(ObExprObjAccess);
     REG_OP(ObExprEnumToStr);
     REG_OP(ObExprSetToStr);
@@ -913,6 +931,8 @@ void ObExprOperatorFactory::register_expr_operators()
     REG_OP(ObExprHash);
     REG_OP(ObExprJsonObject);
     REG_OP(ObExprJsonExtract);
+    REG_OP(ObExprJsonSchemaValid);
+    REG_OP(ObExprJsonSchemaValidationReport);
     REG_OP(ObExprJsonContains);
     REG_OP(ObExprJsonContainsPath);
     REG_OP(ObExprJsonDepth);
@@ -925,6 +945,7 @@ void ObExprOperatorFactory::register_expr_operators()
     REG_OP(ObExprJsonSearch);
     REG_OP(ObExprJsonValid);
     REG_OP(ObExprJsonArrayAppend);
+    REG_OP(ObExprJsonAppend);
     REG_OP(ObExprJsonArrayInsert);
     REG_OP(ObExprJsonValue);
     REG_OP(ObExprJsonReplace);
@@ -939,6 +960,8 @@ void ObExprOperatorFactory::register_expr_operators()
     REG_OP(ObExprJsonMergePatch);
     REG_OP(ObExprJsonPretty);
     REG_OP(ObExprJsonMemberOf);
+    REG_OP(ObExprExtractValue);
+    REG_OP(ObExprUpdateXml);
     REG_OP(ObExprSha);
     REG_SAME_OP(T_FUN_SYS_SHA ,T_FUN_SYS_SHA, N_SHA1, i);
     REG_OP(ObExprSha2);
@@ -1026,9 +1049,18 @@ void ObExprOperatorFactory::register_expr_operators()
     REG_OP(ObExprPrivSTEquals);
     REG_OP(ObExprPrivSTTouches);
     REG_OP(ObExprAlignDate4Cmp);
+    REG_OP(ObExprJsonQuery);
+    REG_OP(ObExprBM25);
+
+    REG_OP(ObExprGetLock);
+    REG_OP(ObExprIsFreeLock);
+    REG_OP(ObExprIsUsedLock);
+    REG_OP(ObExprReleaseLock);
+    REG_OP(ObExprReleaseAllLocks);
     REG_OP(ObExprExtractExpiredTime);
     REG_OP(ObExprTransactionId);
     REG_OP(ObExprInnerRowCmpVal);
+    REG_OP(ObExprLastRefreshScn);
     // REG_OP(ObExprTopNFilter);
     REG_OP(ObExprPrivSTMakeEnvelope);
     REG_OP(ObExprPrivSTClipByBox2D);
@@ -1044,6 +1076,7 @@ void ObExprOperatorFactory::register_expr_operators()
     REG_OP(ObExprSTSymDifference);
     REG_OP(ObExprPrivSTAsMVTGeom);
     REG_OP(ObExprPrivSTMakeValid);
+    REG_OP(ObExprCurrentRole);
   }();
 // 注册oracle系统函数
   REG_OP_ORCL(ObExprSysConnectByPath);
@@ -1353,12 +1386,16 @@ void ObExprOperatorFactory::register_expr_operators()
   REG_OP_ORCL(ObExprXmlSerialize);
   REG_OP_ORCL(ObExprXmlcast);
   REG_OP_ORCL(ObExprUpdateXml);
+  REG_OP_ORCL(ObExprInsertChildXml);
+  REG_OP_ORCL(ObExprDeleteXml);
+  REG_OP_ORCL(ObExprXmlSequence);
   REG_OP_ORCL(ObExprUdtConstruct);
   REG_OP_ORCL(ObExprUDTAttributeAccess);
   REG_OP_ORCL(ObExprTempTableSSID);
   REG_OP_ORCL(ObExprJsonObjectStar);
   REG_OP_ORCL(ObExprTransactionId);
   REG_OP_ORCL(ObExprInnerRowCmpVal);
+  REG_OP_ORCL(ObExprLastRefreshScn);
   // REG_OP_ORCL(ObExprTopNFilter);
 }
 
@@ -1475,9 +1512,15 @@ void ObExprOperatorFactory::get_function_alias_name(const ObString &origin_name,
       // don't alias "power" to "pow" in oracle mode, because oracle has no
       // "pow" function.
       alias_name = ObString::make_string(N_POW);
+    } else if (0 == origin_name.case_compare("DOC_ID")) {
+      alias_name = ObString::make_string(N_DOC_ID);
     } else if (0 == origin_name.case_compare("ws")) {
       // ws is synonym for word_segment
       alias_name = ObString::make_string(N_WORD_SEGMENT);
+    } else if (0 == origin_name.case_compare("WORD_COUNT")) {
+      alias_name = ObString::make_string(N_WORD_COUNT);
+    } else if (0 == origin_name.case_compare("DOC_LENGTH")) {
+      alias_name = ObString::make_string(N_DOC_LENGTH);
     } else if (0 == origin_name.case_compare("inet_ntoa")) {
       // inet_ntoa is synonym for int2ip
       alias_name = ObString::make_string(N_INT2IP);

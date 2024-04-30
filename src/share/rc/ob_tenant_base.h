@@ -74,6 +74,7 @@ class ObTenantMdsService;
   class ObAccessService;
   class ObTenantFreezer;
   class ObTenantMetaMemMgr;
+  class ObTenantFTPluginMgr;
   class ObStorageLogger;
   class ObTenantCheckpointSlogHandler;
   class ObTenantFreezeInfoMgr;
@@ -184,6 +185,7 @@ namespace observer
   class ObTenantMetaChecker;
   class QueueThread;
   class ObTableLoadService;
+  class ObTableLoadResourceService;
   class ObStartupAccelTaskHandler;
   class ObTabletTableUpdater;
 }
@@ -200,6 +202,7 @@ namespace observer
 }
 namespace storage {
   class MockTenantModuleEnv;
+  class ObStorageHADiagMgr;
 }
 
 namespace share
@@ -214,6 +217,7 @@ class ObTenantErrsimModuleMgr;
 class ObTenantErrsimEventMgr;
 class ObSharedMemAllocMgr;
 class ObIndexUsageInfoMgr;
+class ObResourceLimitCalculator;
 namespace schema
 {
   class ObTenantSchemaService;
@@ -247,6 +251,7 @@ using ObTableScanIteratorObjPool = common::ObServerObjectPool<oceanbase::storage
       blocksstable::ObDecodeResourcePool*,           \
       omt::ObSharedTimer*,                           \
       storage::ObTenantMetaMemMgr*,                  \
+      storage::ObTenantFTPluginMgr*,                 \
       ObPartTransCtxObjPool*,                        \
       ObTableScanIteratorObjPool*,                   \
       common::ObTenantIOManager*,                    \
@@ -333,6 +338,7 @@ using ObTableScanIteratorObjPool = common::ObServerObjectPool<oceanbase::storage
       datadict::ObDataDictService*,                  \
       ArbMTLMember                                   \
       observer::ObTableLoadService*,                 \
+      observer::ObTableLoadResourceService*,         \
       concurrency_control::ObMultiVersionGarbageCollector*, \
       sql::ObUDRMgr*,                        \
       sql::ObFLTSpanMgr*,                            \
@@ -356,7 +362,9 @@ using ObTableScanIteratorObjPool = common::ObServerObjectPool<oceanbase::storage
       share::ObIndexUsageInfoMgr*,                  \
       storage::ObTabletMemtableMgrPool*,            \
       rootserver::ObMViewMaintenanceService*,       \
+      share::ObResourceLimitCalculator*,            \
       storage::checkpoint::ObCheckpointDiagnoseMgr*, \
+      storage::ObStorageHADiagMgr*,                  \
       common::sqlclient::ObTenantDblinkKeeper*,      \
       storage::ObGlobalIteratorPool*                 \
   )

@@ -1020,6 +1020,8 @@ Timestamp{whitespace}?\"[^\"]*\" {
 <hint>LEADING  { return LEADING_HINT; }
 <hint>ORDERED  { return ORDERED; }
 <hint>NO_REWRITE { return NO_REWRITE; }
+<hint>MV_REWRITE { return MV_REWRITE; }
+<hint>NO_MV_REWRITE { return NO_MV_REWRITE; }
 <hint>FULL  { return FULL_HINT; }
 <hint>USE_MERGE  { return USE_MERGE; }
 <hint>NO_USE_MERGE  { return NO_USE_MERGE; }
@@ -1147,6 +1149,8 @@ Timestamp{whitespace}?\"[^\"]*\" {
 <hint>DYNAMIC_SAMPLING { return DYNAMIC_SAMPLING; }
 <hint>BLOCKING { return BLOCKING; }
 <hint>PUSHDOWN { return PUSHDOWN; }
+<hint>DECORRELATE { return DECORRELATE; }
+<hint>NO_DECORRELATE { return NO_DECORRELATE; }
 <hint>{identifier} {
   if (!(IS_FAST_PARAMETERIZE)) {
     check_value(yylval);

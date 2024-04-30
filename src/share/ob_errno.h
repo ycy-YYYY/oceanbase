@@ -891,6 +891,10 @@ constexpr int OB_ERR_TABLE_WITHOUT_ALIAS = -5515;
 constexpr int OB_ERR_DEPRECATED_SYNTAX = -5516;
 constexpr int OB_ERR_NON_STRING_NOT_SUPPORT = -5517;
 constexpr int OB_ERR_DEPRECATED_SYNTAX_NO_REP = -5518;
+constexpr int OB_NOT_MULTIVALUE_SUPPORT = -5519;
+constexpr int OB_ERR_JSON_VALUE_CAST_FUNCTION_INDEX = -5520;
+constexpr int OB_ERR_JSON_CONTAINER_CAST_SCALAR = -5521;
+constexpr int OB_ERR_INVALID_IDENTIFIER_JSON_TABLE = -5522;
 constexpr int OB_ERR_SP_ALREADY_EXISTS = -5541;
 constexpr int OB_ERR_SP_DOES_NOT_EXIST = -5542;
 constexpr int OB_ERR_SP_UNDECLARED_VAR = -5543;
@@ -1571,6 +1575,7 @@ constexpr int OB_STORAGE_DEST_NOT_CONNECT = -9115;
 constexpr int OB_ERR_RESIZE_FILE_TO_SMALLER = -9200;
 constexpr int OB_MARK_BLOCK_INFO_TIMEOUT = -9201;
 constexpr int OB_NOT_READY_TO_EXTEND_FILE = -9202;
+constexpr int OB_FUNCTION_NOT_DEFINED = -9203;
 constexpr int OB_ERR_DUPLICATE_HAVING_CLAUSE_IN_TABLE_EXPRESSION = -9501;
 constexpr int OB_ERR_INOUT_PARAM_PLACEMENT_NOT_PROPERLY = -9502;
 constexpr int OB_ERR_OBJECT_NOT_FOUND = -9503;
@@ -1848,6 +1853,7 @@ constexpr int OB_KV_COLUMN_TYPE_NOT_MATCH = -10511;
 constexpr int OB_KV_COLLATION_MISMATCH = -10512;
 constexpr int OB_KV_SCAN_RANGE_MISSING = -10513;
 constexpr int OB_KV_FILTER_PARSE_ERROR = -10514;
+constexpr int OB_KV_REDIS_PARSE_ERROR = -10515;
 constexpr int OB_KV_ODP_TIMEOUT = -10650;
 constexpr int OB_ERR_VALUES_CLAUSE_NEED_HAVE_COLUMN = -11000;
 constexpr int OB_ERR_VALUES_CLAUSE_CANNOT_USE_DEFAULT_VALUES = -11001;
@@ -2509,7 +2515,7 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_ERR_TOO_MANY_PS__USER_ERROR_MSG "Too many prepared statements"
 #define OB_ERR_HINT_UNKNOWN__USER_ERROR_MSG "Unknown hint"
 #define OB_ERR_WHEN_UNSATISFIED__USER_ERROR_MSG "When condition not satisfied"
-#define OB_ERR_QUERY_INTERRUPTED__USER_ERROR_MSG "Query execution was interrupted"
+#define OB_ERR_QUERY_INTERRUPTED__USER_ERROR_MSG "Query execution was interrupted, %s"
 #define OB_ERR_SESSION_INTERRUPTED__USER_ERROR_MSG "Session interrupted"
 #define OB_ERR_UNKNOWN_SESSION_ID__USER_ERROR_MSG "Unknown session ID"
 #define OB_ERR_PROTOCOL_NOT_RECOGNIZE__USER_ERROR_MSG "Incorrect protocol"
@@ -2802,13 +2808,13 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_ERR_MISSING_ON_KEYWORD__USER_ERROR_MSG "missing ON keyword"
 #define OB_ERR_NO_GRANT_OPTION__USER_ERROR_MSG "grant option does not exist for '%.*s.%.*s'"
 #define OB_ERR_ALTER_INDEX_AND_EXECUTE_NOT_ALLOWED_FOR_VIEWS__USER_ERROR_MSG "ALTER, INDEX and EXECUTE not allowed for views"
-#define OB_ERR_CIRCULAR_ROLE_GRANT_DETECTED__USER_ERROR_MSG "circular role grant detected"
+#define OB_ERR_CIRCULAR_ROLE_GRANT_DETECTED__USER_ERROR_MSG "User account `%.*s`@`%.*s` is directly or indirectly granted to the role `%.*s`@`%.*s`. The GRANT would create a loop"
 #define OB_ERR_INVALID_PRIVILEGE_ON_DIRECTORIES__USER_ERROR_MSG "invalid privilege on directories"
 #define OB_ERR_DIRECTORY_ACCESS_DENIED__USER_ERROR_MSG "directory access denied"
 #define OB_ERR_MISSING_OR_INVALID_ROLE_NAME__USER_ERROR_MSG "missing or invalid role name"
 #define OB_ERR_ROLE_NOT_GRANTED_OR_DOES_NOT_EXIST__USER_ERROR_MSG "role '%.*s' not granted or does not exist"
 #define OB_ERR_DEFAULT_ROLE_NOT_GRANTED_TO_USER__USER_ERROR_MSG "DEFAULT ROLE '%.*s' not granted to user"
-#define OB_ERR_ROLE_NOT_GRANTED_TO__USER_ERROR_MSG "ROLE '%.*s' not granted to '%.*s'"
+#define OB_ERR_ROLE_NOT_GRANTED_TO__USER_ERROR_MSG "`%.*s`@`%.*s` is not granted to `%.*s`@`%.*s`"
 #define OB_ERR_CANNOT_GRANT_TO_A_ROLE_WITH_GRANT_OPTION__USER_ERROR_MSG "cannot GRANT to a role WITH GRANT OPTION"
 #define OB_ERR_DUPLICATE_USERNAME_IN_LIST__USER_ERROR_MSG "duplicate username in list"
 #define OB_ERR_CANNOT_GRANT_STRING_TO_A_ROLE__USER_ERROR_MSG "cannot grant %.*s to a role"
@@ -2939,6 +2945,10 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_ERR_DEPRECATED_SYNTAX__USER_ERROR_MSG "%s is deprecated and will be removed in a future release. Please use \'%s\' instead"
 #define OB_ERR_NON_STRING_NOT_SUPPORT__USER_ERROR_MSG "This version of MySQL doesn't yet support 'non-string DEFAULT value for a column in a JSON_TABLE expression'"
 #define OB_ERR_DEPRECATED_SYNTAX_NO_REP__USER_ERROR_MSG "%s is deprecated and will be removed in a future release"
+#define OB_NOT_MULTIVALUE_SUPPORT__USER_ERROR_MSG "This version of MySQL doesn't yet support %s"
+#define OB_ERR_JSON_VALUE_CAST_FUNCTION_INDEX__USER_ERROR_MSG "Invalid JSON value for CAST for functional index."
+#define OB_ERR_JSON_CONTAINER_CAST_SCALAR__USER_ERROR_MSG "Cannot store an array or an object in a scalar key part of the index."
+#define OB_ERR_INVALID_IDENTIFIER_JSON_TABLE__USER_ERROR_MSG "invalid identifier used for path expression in JSON_TABLE"
 #define OB_ERR_SESSION_VAR_CHANGED__USER_ERROR_MSG "System variable '%.*s' is different from the old value solidified for '%.*s'(old value:%.*s)."
 #define OB_ERR_SP_ALREADY_EXISTS__USER_ERROR_MSG "%s %.*s already exists"
 #define OB_ERR_SP_DOES_NOT_EXIST__USER_ERROR_MSG "%s %.*s.%.*s does not exist"
@@ -3665,12 +3675,12 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_ERR_VALUE_NOT_ALLOWED__USER_ERROR_MSG "value not allowed"
 #define OB_ERR_INVALID_XML_DATATYPE__USER_ERROR_MSG "inconsistent datatypes: expected %s got %s"
 #define OB_ERR_XML_MISSING_COMMA__USER_ERROR_MSG "missing comma"
-#define OB_ERR_INVALID_XPATH_EXPRESSION__USER_ERROR_MSG "invalid xpath expression"
+#define OB_ERR_INVALID_XPATH_EXPRESSION__USER_ERROR_MSG "XPATH syntax error: ''"
 #define OB_ERR_EXTRACTVALUE_MULTI_NODES__USER_ERROR_MSG "EXTRACTVALUE cannot extract values of multiple nodes"
 #define OB_ERR_XML_FRAMENT_CONVERT__USER_ERROR_MSG "Cannot convert XML fragment to the required datatype"
 #define OB_INVALID_PRINT_OPTION__USER_ERROR_MSG "The specified printing option is invalid"
 #define OB_XML_CHAR_LEN_TOO_SMALL__USER_ERROR_MSG "character length specified for XMLSerialize is too small."
-#define OB_XPATH_EXPRESSION_UNSUPPORTED__USER_ERROR_MSG "Given XPATH expression not supported"
+#define OB_XPATH_EXPRESSION_UNSUPPORTED__USER_ERROR_MSG "Only constant XPATH queries are supported"
 #define OB_EXTRACTVALUE_NOT_LEAF_NODE__USER_ERROR_MSG "EXTRACTVALUE can only retrieve value of leaf node"
 #define OB_XML_INSERT_FRAGMENT__USER_ERROR_MSG "Cannot insert XML fragments"
 #define OB_ERR_NO_ORDER_MAP_SQL__USER_ERROR_MSG "cannot ORDER objects without MAP or ORDER method"
@@ -3694,7 +3704,7 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_ERR_XML_NOT_SUPPORT_OPERATION__USER_ERROR_MSG "XML node '' (type=%s) does not support this operation"
 #define OB_ERR_DUP_DEF_NAMESPACE__USER_ERROR_MSG "XQST0066 - duplicate default namespace definition - %s."
 #define OB_ERR_COMPARE_VARRAY_LOB_ATTR__USER_ERROR_MSG "cannot compare VARRAY or LOB attributes of an object type"
-#define OB_ERR_XML_PARENT_ALREADY_CONTAINS_CHILD__USER_ERROR_MSG "Parent %.*s already contains child entry %.*s"
+#define OB_ERR_XML_PARENT_ALREADY_CONTAINS_CHILD__USER_ERROR_MSG "Parent %.*s already contains child entry %s%.*s"
 #define OB_SERVER_IS_INIT__USER_ERROR_MSG "Server is initializing"
 #define OB_SERVER_IS_STOPPING__USER_ERROR_MSG "Server is stopping"
 #define OB_PACKET_CHECKSUM_ERROR__USER_ERROR_MSG "Packet checksum error"
@@ -3817,6 +3827,7 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_ERR_RESIZE_FILE_TO_SMALLER__USER_ERROR_MSG "Extend ssblock file to smaller is not allowed"
 #define OB_MARK_BLOCK_INFO_TIMEOUT__USER_ERROR_MSG "Mark blocks timeout(5s) in auto extend process when alloc block fail"
 #define OB_NOT_READY_TO_EXTEND_FILE__USER_ERROR_MSG "Auto extend param is not ready to start extending file"
+#define OB_FUNCTION_NOT_DEFINED__USER_ERROR_MSG "Function %.*s is not defined"
 #define OB_ERR_DUPLICATE_HAVING_CLAUSE_IN_TABLE_EXPRESSION__USER_ERROR_MSG "Duplicate having-clause in table expression"
 #define OB_ERR_INOUT_PARAM_PLACEMENT_NOT_PROPERLY__USER_ERROR_MSG "OUT and IN/OUT modes cannot be used in this context"
 #define OB_ERR_OBJECT_NOT_FOUND__USER_ERROR_MSG "object '%.*s' of type %.*s not found in schema '%.*s'"
@@ -3863,7 +3874,7 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_ERR_NEW_OLD_REFERENCES__USER_ERROR_MSG "NEW or OLD references not allowed in table level triggers"
 #define OB_ERR_TYPE_DECL_ILLEGAL__USER_ERROR_MSG "%%TYPE must be applied to a variable, column, field or attribute, not to '%.*s'"
 #define OB_ERR_OBJECT_INVALID__USER_ERROR_MSG "object '%.*s' is invalid"
-#define OB_ERR_XML_PARSE__USER_ERROR_MSG "XML parsing failed"
+#define OB_ERR_XML_PARSE__USER_ERROR_MSG "Incorrect XML value"
 #define OB_ERR_EXP_NOT_ASSIGNABLE__USER_ERROR_MSG "expression '%.*s' cannot be used as an assignment"
 #define OB_ERR_CURSOR_CONTAIN_BOTH_REGULAR_AND_ARRAY__USER_ERROR_MSG "Cursor contains both regular and array defines which is illegal"
 #define OB_ERR_STATIC_BOOL_EXPR__USER_ERROR_MSG "a static boolean expression must be used"
@@ -4096,6 +4107,7 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_KV_COLLATION_MISMATCH__USER_ERROR_MSG "Collation type for '%.*s' not match, schema collation type is '%.*s', input collation type is '%.*s'"
 #define OB_KV_SCAN_RANGE_MISSING__USER_ERROR_MSG "Scan range missing, input scan range cell count is '%ld', which should equal to rowkey count '%ld'"
 #define OB_KV_FILTER_PARSE_ERROR__USER_ERROR_MSG "Filter parse errror, the input filter string is: '%.*s'"
+#define OB_KV_REDIS_PARSE_ERROR__USER_ERROR_MSG "Redis protocol parse errror, the input redis string is: '%.*s'"
 #define OB_KV_ODP_TIMEOUT__USER_ERROR_MSG "ODP process timeout"
 #define OB_ERR_VALUES_CLAUSE_NEED_HAVE_COLUMN__USER_ERROR_MSG "Each row of a VALUES clause must have at least one column, unless when used as source in an INSERT statement."
 #define OB_ERR_VALUES_CLAUSE_CANNOT_USE_DEFAULT_VALUES__USER_ERROR_MSG "A VALUES clause cannot use DEFAULT values, unless used as a source in an INSERT statement."
@@ -4757,7 +4769,7 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_ERR_TOO_MANY_PS__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -5061, Too many prepared statements"
 #define OB_ERR_HINT_UNKNOWN__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -5063, Unknown hint"
 #define OB_ERR_WHEN_UNSATISFIED__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -5064, When condition not satisfied"
-#define OB_ERR_QUERY_INTERRUPTED__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -5065, Query execution was interrupted"
+#define OB_ERR_QUERY_INTERRUPTED__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -5065, Query execution was interrupted, %s"
 #define OB_ERR_SESSION_INTERRUPTED__ORA_USER_ERROR_MSG "ORA-01092: OceanBase instance terminated. Disconnection forced"
 #define OB_ERR_UNKNOWN_SESSION_ID__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -5067, Unknown session ID"
 #define OB_ERR_PROTOCOL_NOT_RECOGNIZE__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -5068, Incorrect protocol"
@@ -5050,13 +5062,13 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_ERR_MISSING_ON_KEYWORD__ORA_USER_ERROR_MSG "ORA-00969: missing ON keyword"
 #define OB_ERR_NO_GRANT_OPTION__ORA_USER_ERROR_MSG "ORA-01720: grant option does not exist for '%.*s.%.*s'"
 #define OB_ERR_ALTER_INDEX_AND_EXECUTE_NOT_ALLOWED_FOR_VIEWS__ORA_USER_ERROR_MSG "ORA-02204: ALTER, INDEX and EXECUTE not allowed for views"
-#define OB_ERR_CIRCULAR_ROLE_GRANT_DETECTED__ORA_USER_ERROR_MSG "ORA-01934: circular role grant detected"
+#define OB_ERR_CIRCULAR_ROLE_GRANT_DETECTED__ORA_USER_ERROR_MSG "ORA-01934: User account `%.*s`@`%.*s` is directly or indirectly granted to the role `%.*s`@`%.*s`. The GRANT would create a loop"
 #define OB_ERR_INVALID_PRIVILEGE_ON_DIRECTORIES__ORA_USER_ERROR_MSG "ORA-22928: invalid privilege on directories"
 #define OB_ERR_DIRECTORY_ACCESS_DENIED__ORA_USER_ERROR_MSG "ORA-29289: directory access denied"
 #define OB_ERR_MISSING_OR_INVALID_ROLE_NAME__ORA_USER_ERROR_MSG "ORA-01937: missing or invalid role name"
 #define OB_ERR_ROLE_NOT_GRANTED_OR_DOES_NOT_EXIST__ORA_USER_ERROR_MSG "ORA-01924: role '%.*s' not granted or does not exist"
 #define OB_ERR_DEFAULT_ROLE_NOT_GRANTED_TO_USER__ORA_USER_ERROR_MSG "ORA-01955: DEFAULT ROLE '%.*s' not granted to user"
-#define OB_ERR_ROLE_NOT_GRANTED_TO__ORA_USER_ERROR_MSG "ORA-01951: ROLE '%.*s' not granted to '%.*s'"
+#define OB_ERR_ROLE_NOT_GRANTED_TO__ORA_USER_ERROR_MSG "ORA-01951: ROLE '%.*s%.*s' not granted to '%.*s%.*s'"
 #define OB_ERR_CANNOT_GRANT_TO_A_ROLE_WITH_GRANT_OPTION__ORA_USER_ERROR_MSG "ORA-01926: cannot GRANT to a role WITH GRANT OPTION"
 #define OB_ERR_DUPLICATE_USERNAME_IN_LIST__ORA_USER_ERROR_MSG "ORA-01700: duplicate username in list"
 #define OB_ERR_CANNOT_GRANT_STRING_TO_A_ROLE__ORA_USER_ERROR_MSG "ORA-01931: cannot grant %.*s to a role"
@@ -5187,6 +5199,10 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_ERR_DEPRECATED_SYNTAX__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -5516, %s is deprecated and will be removed in a future release. Please use \'%s\' instead"
 #define OB_ERR_NON_STRING_NOT_SUPPORT__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -5517, This version of MySQL doesn't yet support 'non-string DEFAULT value for a column in a JSON_TABLE expression'"
 #define OB_ERR_DEPRECATED_SYNTAX_NO_REP__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -5518, %s is deprecated and will be removed in a future release"
+#define OB_NOT_MULTIVALUE_SUPPORT__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -5519, This version of MySQL doesn't yet support %s"
+#define OB_ERR_JSON_VALUE_CAST_FUNCTION_INDEX__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -5520, Invalid JSON value for CAST for functional index."
+#define OB_ERR_JSON_CONTAINER_CAST_SCALAR__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -5521, Cannot store an array or an object in a scalar key part of the index."
+#define OB_ERR_INVALID_IDENTIFIER_JSON_TABLE__ORA_USER_ERROR_MSG "ORA-40680: invalid identifier used for path expression in JSON_TABLE"
 #define OB_ERR_SESSION_VAR_CHANGED__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -5540, System variable '%.*s' is different from the old value solidified for '%.*s'(old value:%.*s)."
 #define OB_ERR_SP_ALREADY_EXISTS__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -5541, %s %.*s already exists"
 #define OB_ERR_SP_DOES_NOT_EXIST__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -5542, %s %.*s.%.*s does not exist"
@@ -5942,7 +5958,7 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_ERR_XML_NOT_SUPPORT_OPERATION__ORA_USER_ERROR_MSG "ORA-31195: XML node '' (type=%s) does not support this operation"
 #define OB_ERR_DUP_DEF_NAMESPACE__ORA_USER_ERROR_MSG "ORA-19118: XQST0066 - duplicate default namespace definition - %s."
 #define OB_ERR_COMPARE_VARRAY_LOB_ATTR__ORA_USER_ERROR_MSG "ORA-22901: cannot compare VARRAY or LOB attributes of an object type"
-#define OB_ERR_XML_PARENT_ALREADY_CONTAINS_CHILD__ORA_USER_ERROR_MSG "ORA-31003: Parent %.*s already contains child entry %.*s"
+#define OB_ERR_XML_PARENT_ALREADY_CONTAINS_CHILD__ORA_USER_ERROR_MSG "ORA-31003: Parent %.*s already contains child entry %s%.*s"
 #define OB_SERVER_IS_INIT__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -8001, Server is initializing"
 #define OB_SERVER_IS_STOPPING__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -8002, Server is stopping"
 #define OB_PACKET_CHECKSUM_ERROR__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -8003, Packet checksum error"
@@ -6065,6 +6081,7 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_ERR_RESIZE_FILE_TO_SMALLER__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9200, Extend ssblock file to smaller is not allowed"
 #define OB_MARK_BLOCK_INFO_TIMEOUT__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9201, Mark blocks timeout(5s) in auto extend process when alloc block fail"
 #define OB_NOT_READY_TO_EXTEND_FILE__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9202, Auto extend param is not ready to start extending file"
+#define OB_FUNCTION_NOT_DEFINED__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9203, Function %.*s is not defined"
 #define OB_ERR_DUPLICATE_HAVING_CLAUSE_IN_TABLE_EXPRESSION__ORA_USER_ERROR_MSG "PLS-00119: Duplicate having-clause in table expression"
 #define OB_ERR_INOUT_PARAM_PLACEMENT_NOT_PROPERLY__ORA_USER_ERROR_MSG "PLS-00254: OUT and IN/OUT modes cannot be used in this context"
 #define OB_ERR_OBJECT_NOT_FOUND__ORA_USER_ERROR_MSG "ORA-31603: object '%.*s' of type %.*s not found in schema '%.*s'"
@@ -6344,6 +6361,7 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_KV_COLLATION_MISMATCH__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -10512, Collation type for '%.*s' not match, schema collation type is '%.*s', input collation type is '%.*s'"
 #define OB_KV_SCAN_RANGE_MISSING__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -10513, Scan range missing, input scan range cell count is '%ld', which should equal to rowkey count '%ld'"
 #define OB_KV_FILTER_PARSE_ERROR__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -10514, Filter parse errror, the input filter string is: '%.*s'"
+#define OB_KV_REDIS_PARSE_ERROR__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -10515, Redis protocol parse errror, the input redis string is: '%.*s'"
 #define OB_KV_ODP_TIMEOUT__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -10650, ODP process timeout"
 #define OB_ERR_VALUES_CLAUSE_NEED_HAVE_COLUMN__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11000, Each row of a VALUES clause must have at least one column, unless when used as source in an INSERT statement."
 #define OB_ERR_VALUES_CLAUSE_CANNOT_USE_DEFAULT_VALUES__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11001, A VALUES clause cannot use DEFAULT values, unless used as a source in an INSERT statement."
@@ -6372,7 +6390,7 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_ERR_DATA_TOO_LONG_MSG_FMT_V2__ORA_USER_ERROR_MSG "ORA-12899: value too large for column %.*s (actual: %ld, maximum: %ld)"
 #define OB_ERR_INVALID_DATE_MSG_FMT_V2__ORA_USER_ERROR_MSG "ORA-01861: Incorrect datetime value for column '%.*s' at row %ld"
 
-extern int g_all_ob_errnos[2244];
+extern int g_all_ob_errnos[2250];
 
   const char *ob_error_name(const int oberr);
   const char* ob_error_cause(const int oberr);

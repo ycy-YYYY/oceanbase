@@ -219,7 +219,7 @@ int ObTransService::reuse_tx(ObTxDesc &tx, const uint64_t data_version)
     // it is safe to operate tx without lock when not shared
     ret = reinit_tx_(tx, tx.sess_id_, data_version);
   }
-  TRANS_LOG(TRACE, "reuse tx", K(ret), K(orig_tx_id), K(tx));
+  TRANS_LOG(DEBUG, "reuse tx", K(ret), K(orig_tx_id), K(tx));
   ObTransTraceLog &tlog = tx.get_tlog();
   REC_TRANS_TRACE_EXT(&tlog, reuse, OB_Y(ret),
                       OB_ID(addr), (void*)&tx,
@@ -661,6 +661,8 @@ int ObTransService::get_read_snapshot(ObTxDesc &tx,
   if (OB_SUCC(ret)) {
     snapshot.source_ = ObTxReadSnapshot::SRC::GLOBAL;
     snapshot.parts_.reset();
+    snapshot.snapshot_ls_role_ = common::ObRole::INVALID_ROLE;
+    snapshot.snapshot_acquire_addr_ = GCTX.self_addr();
     // If tx id is valid , record tx_id and scn
     if (tx.tx_id_.is_valid()) {
       snapshot.core_.tx_id_ = tx.tx_id_;
@@ -699,8 +701,8 @@ int ObTransService::get_ls_read_snapshot(ObTxDesc &tx,
                                          ObTxReadSnapshot &snapshot)
 {
   int ret = OB_SUCCESS;
-  bool acquire_from_follower  = false;
   bool fallback_get_global_snapshot = false;
+  ObRole role = common::ObRole::INVALID_ROLE;
   // if txn is active use txn's isolation instead
   ObTxIsolationLevel isolation = tx.is_in_tx() ? tx.isolation_ : iso_level;
   if (isolation == ObTxIsolationLevel::SERIAL ||
@@ -712,19 +714,16 @@ int ObTransService::get_ls_read_snapshot(ObTxDesc &tx,
   } else {
     ObSpinLockGuard guard(tx.lock_);
     if (OB_FAIL(tx_sanity_check_(tx))) {
-  } else if (OB_SUCC(acquire_local_snapshot_(lsid,
+    } else if (OB_SUCC(acquire_local_snapshot_(lsid,
                                              snapshot.core_.version_,
                                              true /*is_read_only*/,
-                                             acquire_from_follower))) {
+                                             role))) {
       snapshot.source_ = ObTxReadSnapshot::SRC::LS;
       snapshot.snapshot_lsid_ = lsid;
       snapshot.uncertain_bound_ = 0;
       snapshot.parts_.reset();
-      if(acquire_from_follower) {
-        snapshot.snapshot_ls_role_ = common::ObRole::FOLLOWER;
-      } else {
-        snapshot.snapshot_ls_role_ = common::ObRole::LEADER;
-      }
+      snapshot.snapshot_acquire_addr_ = GCTX.self_addr();
+      snapshot.snapshot_ls_role_ = role;
       // If tx id is valid , record tx_id and scn
       if (tx.tx_id_.is_valid()) {
         snapshot.core_.tx_id_ = tx.tx_id_;
@@ -771,12 +770,10 @@ int ObTransService::get_read_snapshot_version(const int64_t expire_ts,
 {
   int ret = OB_SUCCESS;
   int64_t uncertain_bound = 0;
-
   ret = acquire_global_snapshot__(expire_ts,
                                   0,
                                   snapshot_version,
-                                  uncertain_bound,
-                                  []() -> bool { return false; });
+                                  uncertain_bound);
   return ret;
 }
 
@@ -784,12 +781,12 @@ int ObTransService::get_ls_read_snapshot_version(const share::ObLSID &local_ls_i
                                                  SCN &snapshot_version)
 {
   int ret = OB_SUCCESS;
-  bool acquire_from_follower = false;
+  ObRole role = common::ObRole::INVALID_ROLE;
   ret = acquire_local_snapshot_(local_ls_id,
                                 snapshot_version,
                                 true /*is_read_only*/,
-                                acquire_from_follower);
-  UNUSED(acquire_from_follower);
+                                role);
+  UNUSED(role);
   return ret;
 }
 
@@ -1040,7 +1037,7 @@ int ObTransService::create_global_implicit_savepoint_(ObTxDesc &tx,
                       OB_ID(opid), tx.op_sn_,
                       OB_ID(ref), tx.get_ref(),
                       OB_ID(thread_id), GETTID());
-  TRANS_LOG(TRACE, "create global implicit savepoint", K(ret), K(tx), K(tx_param), K(savepoint));
+  TRANS_LOG(DEBUG, "create global implicit savepoint", K(ret), K(tx), K(tx_param), K(savepoint));
   return ret;
 }
 
@@ -1300,7 +1297,7 @@ int ObTransService::ls_sync_rollback_savepoint__(ObPartTransCtx *part_ctx,
   bool blockable = expire_ts > 0;
   do {
     ret = part_ctx->rollback_to_savepoint(op_sn, specified_from_scn, savepoint, tx_seq_base, downstream_parts);
-    if (OB_NEED_RETRY == ret && blockable) {
+    if ((OB_NEED_RETRY == ret || OB_EAGAIN == ret) && blockable) {
       if (ObTimeUtility::current_time() >= expire_ts) {
         ret = OB_TIMEOUT;
         TRANS_LOG(WARN, "can not retry rollback_to because of timeout", K(ret), K(retry_cnt));
@@ -1312,7 +1309,7 @@ int ObTransService::ls_sync_rollback_savepoint__(ObPartTransCtx *part_ctx,
         ob_usleep(50 * 1000);
       }
     }
-  } while (OB_NEED_RETRY == ret && blockable && !part_ctx->is_transfer_deleted());
+  } while ((OB_NEED_RETRY == ret || OB_EAGAIN == ret) && blockable && !part_ctx->is_transfer_deleted());
 #ifndef NDEBUG
   TRANS_LOG(INFO, "rollback to savepoint sync", K(ret),
             K(part_ctx->get_trans_id()), K(part_ctx->get_ls_id()), K(retry_cnt),

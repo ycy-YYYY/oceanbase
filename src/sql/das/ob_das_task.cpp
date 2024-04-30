@@ -83,6 +83,24 @@ OB_DEF_SERIALIZE(ObDASRemoteInfo)
   OB_UNIS_ENCODE(session_id_);
   OB_UNIS_ENCODE(plan_id_);
   OB_UNIS_ENCODE(plan_hash_);
+  //Serializing the reference relationship between ctdefs and rtdefs.
+  for (int i = 0; OB_SUCC(ret) && i < ctdefs_.count(); ++i) {
+    const ObDASBaseCtDef *ctdef = ctdefs_.at(i);
+    OB_UNIS_ENCODE(ctdef->children_cnt_);
+    for (int j = 0; OB_SUCC(ret) && j < ctdef->children_cnt_; ++j) {
+      const ObDASBaseCtDef *child_ctdef = ctdef->children_[j];
+      OB_UNIS_ENCODE(child_ctdef);
+    }
+  }
+  for (int i = 0; OB_SUCC(ret) && i < rtdefs_.count(); ++i) {
+    ObDASBaseRtDef *rtdef = rtdefs_.at(i);
+    OB_UNIS_ENCODE(rtdef->ctdef_);
+    OB_UNIS_ENCODE(rtdef->children_cnt_);
+    for (int j = 0; OB_SUCC(ret) && j < rtdef->children_cnt_; ++j) {
+      ObDASBaseRtDef *child_rtdef = rtdef->children_[j];
+      OB_UNIS_ENCODE(child_rtdef);
+    }
+  }
   return ret;
 }
 
@@ -131,6 +149,16 @@ OB_DEF_DESERIALIZE(ObDASRemoteInfo)
       // }
       // EVENT_INC(ACTIVE_SESSIONS);
     }
+
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(des_exec_ctx->get_my_session()->set_session_state(QUERY_ACTIVE))) {
+      LOG_WARN("set session state failed", K(ret));
+    } else if (OB_FAIL(des_exec_ctx->get_my_session()->store_query_string(
+        ObString::make_string("DAS REMOTE SCHEDULING")))) {
+      LOG_WARN("store query string failed", K(ret));
+    } else {
+      des_exec_ctx->get_my_session()->set_mysql_cmd(obmysql::COM_QUERY);
+    }
   }
   OZ(exec_ctx_->create_physical_plan_ctx());
   if (OB_SUCC(ret) && has_expr_) {
@@ -177,6 +205,42 @@ OB_DEF_DESERIALIZE(ObDASRemoteInfo)
   OB_UNIS_DECODE(session_id_);
   OB_UNIS_DECODE(plan_id_);
   OB_UNIS_DECODE(plan_hash_);
+  //rebuilding the reference relationship between ctdefs and rtdefs after deserialization.
+  for (int i = 0; OB_SUCC(ret) && i < ctdefs_.count(); ++i) {
+    ObDASBaseCtDef *ctdef = const_cast<ObDASBaseCtDef*>(ctdefs_.at(i));
+    OB_UNIS_DECODE(ctdef->children_cnt_);
+    if (OB_SUCC(ret) && ctdef->children_cnt_ > 0) {
+      if (OB_ISNULL(ctdef->children_ = OB_NEW_ARRAY(ObDASBaseCtDef*, &exec_ctx_->get_allocator(), ctdef->children_cnt_))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_WARN("allocate ctdef children_ failed", K(ret), K(ctdef->children_cnt_));
+      }
+    }
+    for (int j = 0; OB_SUCC(ret) && j < ctdef->children_cnt_; ++j) {
+      const ObDASBaseCtDef *child_ctdef = nullptr;
+      OB_UNIS_DECODE(child_ctdef);
+      if (OB_SUCC(ret)) {
+        ctdef->children_[j] = const_cast<ObDASBaseCtDef*>(child_ctdef);
+      }
+    }
+  }
+  for (int i = 0; OB_SUCC(ret) && i < rtdefs_.count(); ++i) {
+    ObDASBaseRtDef *rtdef = rtdefs_.at(i);
+    OB_UNIS_DECODE(rtdef->ctdef_);
+    OB_UNIS_DECODE(rtdef->children_cnt_);
+    if (OB_SUCC(ret) && rtdef->children_cnt_ > 0) {
+      if (OB_ISNULL(rtdef->children_ = OB_NEW_ARRAY(ObDASBaseRtDef*, &exec_ctx_->get_allocator(), rtdef->children_cnt_))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_WARN("allocate rtdef children_ failed", K(ret), K(rtdef->children_cnt_));
+      }
+    }
+    for (int j = 0; OB_SUCC(ret) && j < rtdef->children_cnt_; ++j) {
+      ObDASBaseRtDef *child_rtdef = nullptr;
+      OB_UNIS_DECODE(child_rtdef);
+      if (OB_SUCC(ret)) {
+        rtdef->children_[j] = child_rtdef;
+      }
+    }
+  }
   return ret;
 }
 
@@ -216,6 +280,24 @@ OB_DEF_SERIALIZE_SIZE(ObDASRemoteInfo)
   OB_UNIS_ADD_LEN(session_id_);
   OB_UNIS_ADD_LEN(plan_id_);
   OB_UNIS_ADD_LEN(plan_hash_);
+  //Serializing the reference relationship between ctdefs and rtdefs.
+  for (int i = 0; i < ctdefs_.count(); ++i) {
+    const ObDASBaseCtDef *ctdef = ctdefs_.at(i);
+    OB_UNIS_ADD_LEN(ctdef->children_cnt_);
+    for (int j = 0; j < ctdef->children_cnt_; ++j) {
+      const ObDASBaseCtDef *child_ctdef = ctdef->children_[j];
+      OB_UNIS_ADD_LEN(child_ctdef);
+    }
+  }
+  for (int i = 0; i < rtdefs_.count(); ++i) {
+    ObDASBaseRtDef *rtdef = rtdefs_.at(i);
+    OB_UNIS_ADD_LEN(rtdef->ctdef_);
+    OB_UNIS_ADD_LEN(rtdef->children_cnt_);
+    for (int j = 0; j < rtdef->children_cnt_; ++j) {
+      ObDASBaseRtDef *child_rtdef = rtdef->children_[j];
+      OB_UNIS_ADD_LEN(child_rtdef);
+    }
+  }
   return len;
 }
 
@@ -277,7 +359,9 @@ OB_SERIALIZE_MEMBER(ObIDASTaskOp,
                     ls_id_,
                     related_ctdefs_,
                     related_rtdefs_,
-                    related_tablet_ids_);
+                    related_tablet_ids_,
+                    attach_ctdef_,
+                    attach_rtdef_);
 
 ObDASTaskArg::ObDASTaskArg()
   : timeout_ts_(0),

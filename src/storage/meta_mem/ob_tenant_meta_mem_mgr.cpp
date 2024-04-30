@@ -35,6 +35,7 @@
 #include "storage/ddl/ob_tablet_ddl_kv.h"
 #include "share/ob_thread_define.h"
 #include "storage/slog_ckpt/ob_server_checkpoint_slog_handler.h"
+#include "storage/ob_disk_usage_reporter.h"
 
 namespace oceanbase
 {
@@ -193,6 +194,7 @@ ObTenantMetaMemMgr::ObTenantMetaMemMgr(const uint64_t tenant_id)
     lock_memtable_pool_(tenant_id, MAX_LOCK_MEMTABLE_CNT_IN_OBJ_POOL, "LockMemObj", ObCtxIds::DEFAULT_CTX_ID),
     meta_cache_io_allocator_(),
     last_access_tenant_config_ts_(-1),
+    t3m_limit_calculator_(*this),
     is_tablet_leak_checker_enabled_(false),
     is_inited_(false)
 {
@@ -222,9 +224,7 @@ int ObTenantMetaMemMgr::mtl_new(ObTenantMetaMemMgr *&meta_mem_mgr)
 int ObTenantMetaMemMgr::init()
 {
   int ret = OB_SUCCESS;
-  lib::ObMemAttr mem_attr(tenant_id_, "MetaAllocator", ObCtxIds::META_OBJ_CTX_ID);
-  lib::ObMemAttr map_attr(tenant_id_, "TabletMap");
-  lib::ObMemAttr other_attr(tenant_id_, "T3MOtherMem");
+  const lib::ObMemAttr map_attr(tenant_id_, "TabletMap");
   const int64_t mem_limit = 4 * 1024 * 1024 * 1024LL;
   const int64_t bucket_num = cal_adaptive_bucket_num();
   const int64_t pin_set_bucket_num = common::hash::cal_next_prime(DEFAULT_BUCKET_NUM);
@@ -278,6 +278,7 @@ void ObTenantMetaMemMgr::init_pool_arr()
   pool_arr_[static_cast<int>(ObITable::TableType::TX_DATA_MEMTABLE)] = &tx_data_memtable_pool_;
   pool_arr_[static_cast<int>(ObITable::TableType::TX_CTX_MEMTABLE)] = &tx_ctx_memtable_pool_;
   pool_arr_[static_cast<int>(ObITable::TableType::LOCK_MEMTABLE)] = &lock_memtable_pool_;
+  pool_arr_[static_cast<int>(ObITable::TableType::DIRECT_LOAD_MEMTABLE)] = &ddl_kv_pool_;
 }
 
 int ObTenantMetaMemMgr::start()
@@ -429,7 +430,7 @@ int ObTenantMetaMemMgr::push_table_into_gc_queue(ObITable *table, const ObITable
       } else {
         if (ObITable::TableType::DATA_MEMTABLE == table_type) {
           ObMemtable *memtable = static_cast<ObMemtable *>(table);
-          memtable::ObMtStat& mt_stat = memtable->get_mt_stat();
+          ObMtStat& mt_stat = memtable->get_mt_stat();
           if (0 == mt_stat.push_table_into_gc_queue_time_) {
             mt_stat.push_table_into_gc_queue_time_ = ObTimeUtility::current_time();
             if (0 != mt_stat.release_time_
@@ -616,8 +617,7 @@ void ObTenantMetaMemMgr::batch_gc_memtable_()
           for (common::hash::ObHashSet<uint64_t>::iterator set_iter = memtable_set->begin();
                set_iter != memtable_set->end();
                ++set_iter) {
-            if (OB_TMP_FAIL(push_table_into_gc_queue((ObITable *)(set_iter->first),
-                                                     ObITable::TableType::DATA_MEMTABLE))) {
+            if (OB_TMP_FAIL(push_table_into_gc_queue((ObITable *)(set_iter->first), ObITable::TableType::DATA_MEMTABLE))) {
               LOG_ERROR("push table into gc queue failed, maybe there will be leak",
                         K(tmp_ret), KPC(memtable_set));
             }
@@ -630,13 +630,15 @@ void ObTenantMetaMemMgr::batch_gc_memtable_()
         } else {
           (void)batch_destroy_memtable_(memtable_set);
 
+          int64_t batch_destroyed_occupy_size = 0;
           for (common::hash::ObHashSet<uint64_t>::iterator set_iter = memtable_set->begin();
                set_iter != memtable_set->end();
                ++set_iter) {
+            batch_destroyed_occupy_size += ((ObMemtable *)(set_iter->first))->get_occupied_size();
             pool_arr_[static_cast<int>(ObITable::TableType::DATA_MEMTABLE)]->free_obj((void *)(set_iter->first));
           }
 
-          LOG_INFO("batch gc memtable successfully", K(memtable_set->size()));
+          FLOG_INFO("batch gc memtable successfully", K(memtable_set->size()), K(batch_destroyed_occupy_size));
           while (OB_TMP_FAIL(memtable_set->clear())) {
             LOG_ERROR("clear memtable set failed", K(tmp_ret), KPC(memtable_set));
           }
@@ -823,6 +825,7 @@ int ObTenantMetaMemMgr::gc_tablets_in_queue(bool &all_tablet_cleaned)
     }
     if (left_recycle_cnt < ONE_ROUND_TABLET_GC_COUNT_THRESHOLD) {
       FLOG_INFO("gc tablets in queue", K(gc_tablets_cnt), K(err_tablets_cnt), K(tablet_gc_queue_.count()));
+      static_cast<ObDiskUsageReportTask *>(GCTX.disk_reporter_)->set_count_sstable_data_trigger();
     }
     all_tablet_cleaned = tablet_gc_queue_.is_empty();
   }
@@ -1050,7 +1053,31 @@ void ObTenantMetaMemMgr::release_ddl_kv(ObDDLKV *ddl_kv)
   }
 }
 
-int ObTenantMetaMemMgr::acquire_memtable(ObTableHandleV2 &handle)
+int ObTenantMetaMemMgr::acquire_direct_load_memtable(ObTableHandleV2 &handle)
+{
+  int ret = OB_SUCCESS;
+  ObDDLKV *ddl_kv = nullptr;
+  handle.reset();
+  if (OB_UNLIKELY(!is_inited_)) {
+    ret = OB_NOT_INIT;
+    STORAGE_LOG(WARN, "ObTenantMetaMemMgr hasn't been initialized", K(ret));
+  } else if (OB_FAIL(ddl_kv_pool_.acquire(ddl_kv))) {
+    STORAGE_LOG(WARN, "fail to acquire ddl kv object", K(ret));
+  } else {
+    handle.set_table(ddl_kv, this, ObITable::TableType::DIRECT_LOAD_MEMTABLE);
+    ddl_kv = nullptr;
+  }
+
+  if (OB_FAIL(ret)) {
+    handle.reset();
+    if (OB_NOT_NULL(ddl_kv)) {
+      release_ddl_kv(ddl_kv);
+    }
+  }
+  return ret;
+
+}
+int ObTenantMetaMemMgr::acquire_data_memtable(ObTableHandleV2 &handle)
 {
   int ret = OB_SUCCESS;
   ObMemtable *memtable = nullptr;
@@ -1062,7 +1089,7 @@ int ObTenantMetaMemMgr::acquire_memtable(ObTableHandleV2 &handle)
   } else if (OB_FAIL(memtable_pool_.acquire(memtable))) {
     LOG_WARN("fail to acquire memtable object", K(ret));
   } else {
-    handle.set_table(memtable, this,  ObITable::TableType::DATA_MEMTABLE);
+    handle.set_table(memtable, this, ObITable::TableType::DATA_MEMTABLE);
     memtable = nullptr;
   }
 
@@ -1085,7 +1112,7 @@ int ObTenantMetaMemMgr::acquire_tx_data_memtable(ObTableHandleV2 &handle)
   } else if (OB_FAIL(tx_data_memtable_pool_.acquire(tx_data_memtable))) {
     LOG_WARN("fail to acquire tx data memtable object", K(ret));
   } else {
-    handle.set_table(tx_data_memtable, this,  ObITable::TableType::TX_DATA_MEMTABLE);
+    handle.set_table(tx_data_memtable, this, ObITable::TableType::TX_DATA_MEMTABLE);
     tx_data_memtable = nullptr;
   }
 
@@ -1109,7 +1136,7 @@ int ObTenantMetaMemMgr::acquire_tx_ctx_memtable(ObTableHandleV2 &handle)
   } else if (OB_FAIL(tx_ctx_memtable_pool_.acquire(tx_ctx_memtable))) {
     LOG_WARN("fail to acquire tx ctx memtable object", K(ret));
   } else {
-    handle.set_table(tx_ctx_memtable, this,  ObITable::TableType::TX_CTX_MEMTABLE);
+    handle.set_table(tx_ctx_memtable, this, ObITable::TableType::TX_CTX_MEMTABLE);
     tx_ctx_memtable = nullptr;
   }
 
@@ -2137,6 +2164,98 @@ int ObTenantMetaMemMgr::dump_tablet_info()
     leak_checker_.dump_pinned_tablet_info();
   }
 
+  return ret;
+}
+
+int ObTenantMetaMemMgr::ObT3MResourceLimitCalculatorHandler::
+    get_current_info(share::ObResourceInfo &info)
+{
+  int ret = OB_SUCCESS;
+  ObResoureConstraintValue constraint_value;
+  if (!t3m_.is_inited_) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("t3m not inited, the resource info may not right.", K(ret));
+  } else if (OB_FAIL(get_resource_constraint_value(constraint_value))) {
+    LOG_WARN("get resource constraint value failed", K(ret));
+  } else {
+    info.curr_utilization_ = t3m_.tablet_map_.count();
+    info.max_utilization_ = t3m_.tablet_map_.max_count();
+    info.reserved_value_ = 0;  // reserve value will be used later
+    constraint_value.get_min_constraint(info.min_constraint_type_, info.min_constraint_value_);
+  }
+  return ret;
+}
+
+int ObTenantMetaMemMgr::ObT3MResourceLimitCalculatorHandler::
+    get_resource_constraint_value(share::ObResoureConstraintValue &constraint_value)
+{
+  int ret = OB_SUCCESS;
+  // Get tenant config
+  omt::ObTenantConfigGuard tenant_config(TENANT_CONF(MTL_ID()));
+  const int64_t config_tablet_per_gb = tenant_config.is_valid() ?
+                                          tenant_config->_max_tablet_cnt_per_gb :
+                                          DEFAULT_TABLET_CNT_PER_GB;
+  const int64_t config_mem_percentage = tenant_config.is_valid() ?
+                                          tenant_config->_storage_meta_memory_limit_percentage :
+                                          OB_DEFAULT_META_OBJ_PERCENTAGE_LIMIT;
+  const int64_t tenant_mem = lib::get_tenant_memory_limit(MTL_ID());
+  // Calculate config constraint : (tenant_mem / 1GB) * config_tablet_per_gb
+  const int64_t config_constraint = tenant_mem / (1.0 * 1024 * 1024 * 1024 /* 1GB */) * config_tablet_per_gb;
+  // Calculate memory constraint : (tenant_mem * config_mem_percentage) / 200MB * 20000
+  const int64_t memory_constraint = tenant_mem * (config_mem_percentage / 100.0) /
+                                    (200.0 * 1024 * 1024 /* 200MB */) *
+                                    DEFAULT_TABLET_CNT_PER_GB;
+  // Set into constraint value
+  if (OB_FAIL(constraint_value.set_type_value(CONFIGURATION_CONSTRAINT, config_constraint))) {
+    LOG_WARN("set type value failed", K(ret), K(CONFIGURATION_CONSTRAINT),
+             K(config_tablet_per_gb), K(tenant_mem), K(config_constraint));
+  } else if (OB_FAIL(constraint_value.set_type_value(MEMORY_CONSTRAINT, memory_constraint))) {
+    LOG_WARN("set type value failed", K(ret), K(MEMORY_CONSTRAINT),
+             K(config_mem_percentage), K(tenant_mem), K(memory_constraint));
+  }
+  return ret;
+}
+
+int ObTenantMetaMemMgr::ObT3MResourceLimitCalculatorHandler::
+    cal_min_phy_resource_needed(const int64_t num, share::ObMinPhyResourceResult &min_phy_res)
+{
+  int ret = OB_SUCCESS;
+  int64_t cal_num = num >= 0 ? num : 0;  // We treat unexpected negative input numbers as zero.
+  // Get tenant memory
+  omt::ObTenantConfigGuard tenant_config(TENANT_CONF(MTL_ID()));
+  const int64_t config_tablet_per_gb = tenant_config.is_valid() ?
+                                          tenant_config->_max_tablet_cnt_per_gb :
+                                          DEFAULT_TABLET_CNT_PER_GB;
+  const int64_t config_mem_percentage = tenant_config.is_valid() ?
+                                          tenant_config->_storage_meta_memory_limit_percentage :
+                                          OB_DEFAULT_META_OBJ_PERCENTAGE_LIMIT;
+  // Inverse calculate through config formula and memory formula
+  const int64_t memory_constraint_formula_inverse =
+      cal_num * (200.0 * 1024 * 1024 /* 200MB */) / DEFAULT_TABLET_CNT_PER_GB / (config_mem_percentage / 100.0);
+  const int64_t config_constraint_formula_inverse =
+      cal_num * (1.0 * 1024 * 1024 * 1024 /* 1GB */) / config_tablet_per_gb;
+  // Set into MinPhyResourceResult
+  const int64_t minimum_physics_needed = std::max(memory_constraint_formula_inverse, config_constraint_formula_inverse);
+  LOG_INFO("t3m resource limit calculator, cal_min_phy_resource_needed", K(num),
+           K(cal_num), K(memory_constraint_formula_inverse),
+           K(config_constraint_formula_inverse), K(minimum_physics_needed),
+           K(config_tablet_per_gb), K(config_mem_percentage));
+  if (OB_FAIL(min_phy_res.set_type_value(PHY_RESOURCE_MEMORY, minimum_physics_needed))) {
+    LOG_WARN("set type value failed", K(PHY_RESOURCE_MEMORY),
+             K(memory_constraint_formula_inverse),
+             K(config_constraint_formula_inverse), K(minimum_physics_needed));
+  }
+  return ret;
+}
+
+int ObTenantMetaMemMgr::ObT3MResourceLimitCalculatorHandler::
+    cal_min_phy_resource_needed(share::ObMinPhyResourceResult &min_phy_res) {
+  int ret = OB_SUCCESS;
+  // Get current tablet count
+  const int64_t current_tablet_count = t3m_.tablet_map_.count();
+  if (OB_FAIL(cal_min_phy_resource_needed(current_tablet_count, min_phy_res))) {
+    LOG_WARN("cal_min_phy_resource_needed failed", K(ret), K(current_tablet_count));
+  }
   return ret;
 }
 

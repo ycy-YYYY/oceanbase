@@ -563,6 +563,26 @@ bool ObSortOpImpl::Compare::operator()(
   return less;
 }
 
+ObSortOpImpl::ObSortOpImpl()
+  : inited_(false), local_merge_sort_(false), need_rewind_(false),
+    got_first_row_(false), sorted_(false), enable_encode_sortkey_(false), mem_context_(NULL),
+    mem_entify_guard_(mem_context_), tenant_id_(OB_INVALID_ID), sort_collations_(nullptr),
+    sort_cmp_funs_(nullptr), eval_ctx_(nullptr), datum_store_(ObModIds::OB_SQL_SORT_ROW), inmem_row_size_(0), mem_check_interval_mask_(1),
+    row_idx_(0), heap_iter_begin_(false), imms_heap_(NULL), ems_heap_(NULL),
+    next_stored_row_func_(&ObSortOpImpl::array_next_stored_row),
+    input_rows_(OB_INVALID_ID), input_width_(OB_INVALID_ID),
+    profile_(ObSqlWorkAreaType::SORT_WORK_AREA), self_monitor_info_(),
+    op_monitor_info_(&self_monitor_info_), sql_mem_processor_(profile_, *op_monitor_info_),
+    op_type_(PHY_INVALID), op_id_(UINT64_MAX), exec_ctx_(nullptr), stored_rows_(nullptr),
+    io_event_observer_(nullptr), buckets_(NULL), max_bucket_cnt_(0), part_hash_nodes_(NULL),
+    max_node_cnt_(0), part_cnt_(0), topn_cnt_(INT64_MAX), outputted_rows_cnt_(0),
+    is_fetch_with_ties_(false), topn_heap_(NULL), ties_array_pos_(0),
+    last_ties_row_(NULL), pt_buckets_(NULL), use_partition_topn_sort_(false), heap_nodes_(), cur_heap_idx_(0),
+    rows_(NULL), sort_exprs_(nullptr),
+    compress_type_(NONE_COMPRESSOR)
+{
+}
+
 ObSortOpImpl::ObSortOpImpl(ObMonitorNode &op_monitor_info)
   : inited_(false), local_merge_sort_(false), need_rewind_(false),
     got_first_row_(false), sorted_(false), enable_encode_sortkey_(false), mem_context_(NULL),
@@ -571,14 +591,15 @@ ObSortOpImpl::ObSortOpImpl(ObMonitorNode &op_monitor_info)
     row_idx_(0), heap_iter_begin_(false), imms_heap_(NULL), ems_heap_(NULL),
     next_stored_row_func_(&ObSortOpImpl::array_next_stored_row),
     input_rows_(OB_INVALID_ID), input_width_(OB_INVALID_ID),
-    profile_(ObSqlWorkAreaType::SORT_WORK_AREA), op_monitor_info_(op_monitor_info), sql_mem_processor_(profile_, op_monitor_info_),
+    profile_(ObSqlWorkAreaType::SORT_WORK_AREA), self_monitor_info_(),
+    op_monitor_info_(&op_monitor_info), sql_mem_processor_(profile_, *op_monitor_info_),
     op_type_(PHY_INVALID), op_id_(UINT64_MAX), exec_ctx_(nullptr), stored_rows_(nullptr),
     io_event_observer_(nullptr), buckets_(NULL), max_bucket_cnt_(0), part_hash_nodes_(NULL),
     max_node_cnt_(0), part_cnt_(0), topn_cnt_(INT64_MAX), outputted_rows_cnt_(0),
     is_fetch_with_ties_(false), topn_heap_(NULL), ties_array_pos_(0),
     last_ties_row_(NULL), pt_buckets_(NULL), use_partition_topn_sort_(false), heap_nodes_(), cur_heap_idx_(0), part_group_cnt_(0),
     rows_(NULL), sort_exprs_(nullptr),
-    compress_type_(NONE_COMPRESSOR)
+    compress_type_(NONE_COMPRESSOR), use_compact_format_(false)
 {
 }
 
@@ -693,7 +714,8 @@ int ObSortOpImpl::init(
   const int64_t default_block_size /* = 64KB */,
   const ObCompressorType compress_type /* = NONE_COMPRESS */,
   const ExprFixedArray *exprs /* =nullptr */,
-  const int64_t est_rows /* = 0 */)
+  const int64_t est_rows /* = 0 */,
+  const bool use_compact_format /* =false */)
 {
   int ret = OB_SUCCESS;
   if (is_inited()) {
@@ -722,6 +744,7 @@ int ObSortOpImpl::init(
     part_cnt_ = part_cnt;
     topn_cnt_ = topn_cnt;
     compress_type_ = compress_type;
+    use_compact_format_ = use_compact_format;
     sort_exprs_ = exprs;
     use_heap_sort_ = is_topn_sort() && part_cnt_ == 0;
     use_partition_topn_sort_ = is_topn_sort() && part_cnt_ > 0;
@@ -759,8 +782,8 @@ int ObSortOpImpl::init(
       datum_store_.set_allocator(mem_context_->get_malloc_allocator());
       datum_store_.set_io_event_observer(io_event_observer_);
       profile_.set_exec_ctx(exec_ctx);
-      op_monitor_info_.otherstat_2_id_ = ObSqlMonitorStatIds::SORT_MERGE_SORT_ROUND;
-      op_monitor_info_.otherstat_2_value_ = 1;
+      op_monitor_info_->otherstat_2_id_ = ObSqlMonitorStatIds::SORT_MERGE_SORT_ROUND;
+      op_monitor_info_->otherstat_2_value_ = 1;
       ObPhysicalPlanCtx *plan_ctx = NULL;
       const ObPhysicalPlan *phy_plan = nullptr;
       if (OB_ISNULL(plan_ctx = GET_PHY_PLAN_CTX(*exec_ctx))) {
@@ -770,8 +793,8 @@ int ObSortOpImpl::init(
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("error unexpected, phy plan must not be nullptr", K(ret));
       } else if (phy_plan->get_ddl_task_id() > 0) {
-        op_monitor_info_.otherstat_5_id_ = ObSqlMonitorStatIds::DDL_TASK_ID;
-        op_monitor_info_.otherstat_5_value_ = phy_plan->get_ddl_task_id();
+        op_monitor_info_->otherstat_5_id_ = ObSqlMonitorStatIds::DDL_TASK_ID;
+        op_monitor_info_->otherstat_5_value_ = phy_plan->get_ddl_task_id();
       }
     }
     if (OB_SUCC(ret)) {
@@ -860,6 +883,7 @@ void ObSortOpImpl::reset()
   rows_ = NULL;
   ties_array_pos_ = 0;
   compress_type_ = NONE_COMPRESSOR;
+  use_compact_format_ = false;
   sort_exprs_ = nullptr;
   // for partition topn sort
   cur_heap_idx_ = 0;
@@ -949,8 +973,8 @@ int ObSortOpImpl::build_chunk(const int64_t level, Input &input, int64_t extra_s
         LOG_WARN("copy row to row store failed");
       } else {
         stored_row_cnt++;
-        op_monitor_info_.otherstat_1_id_ = ObSqlMonitorStatIds::SORT_SORTED_ROW_COUNT;
-        op_monitor_info_.otherstat_1_value_ += 1;
+        op_monitor_info_->otherstat_1_id_ = ObSqlMonitorStatIds::SORT_SORTED_ROW_COUNT;
+        op_monitor_info_->otherstat_1_value_ += 1;
         total_size += src_store_row->row_size_;
       }
     }
@@ -962,8 +986,8 @@ int ObSortOpImpl::build_chunk(const int64_t level, Input &input, int64_t extra_s
       LOG_WARN("finish add row failed", K(ret));
     } else {
       const int64_t sort_io_time = ObTimeUtility::fast_current_time() - curr_time;
-      op_monitor_info_.otherstat_4_id_ = ObSqlMonitorStatIds::SORT_DUMP_DATA_TIME;
-      op_monitor_info_.otherstat_4_value_ += sort_io_time;
+      op_monitor_info_->otherstat_4_id_ = ObSqlMonitorStatIds::SORT_DUMP_DATA_TIME;
+      op_monitor_info_->otherstat_4_value_ += sort_io_time;
       LOG_TRACE("dump sort file",
           "level", level,
           "rows", chunk->datum_store_.get_row_cnt(),
@@ -1082,7 +1106,7 @@ int ObSortOpImpl::before_add_row()
       if (OB_FAIL(sql_mem_processor_.init(
                   &mem_context_->get_malloc_allocator(),
                   tenant_id_,
-                  size, op_monitor_info_.op_type_, op_monitor_info_.op_id_, exec_ctx_))) {
+                  size, op_monitor_info_->op_type_, op_monitor_info_->op_id_, exec_ctx_))) {
         LOG_WARN("failed to init sql mem processor", K(ret));
       } else {
         datum_store_.set_dir_id(sql_mem_processor_.get_dir_id());
@@ -1567,8 +1591,8 @@ int ObSortOpImpl::do_partition_topn_sort() {
           } else {
             std::sort(&heap_rows.at(0), &heap_rows.at(0) + heap_rows.count(), CopyableComparer(comp_));
           }
-          op_monitor_info_.otherstat_1_id_ = ObSqlMonitorStatIds::SORT_SORTED_ROW_COUNT;
-          op_monitor_info_.otherstat_1_value_ += cur_heap->heap_.count();
+          op_monitor_info_->otherstat_1_id_ = ObSqlMonitorStatIds::SORT_SORTED_ROW_COUNT;
+          op_monitor_info_->otherstat_1_value_ += cur_heap->heap_.count();
         }
       } else {
         //partition limit, do nothing
@@ -1776,7 +1800,7 @@ int ObSortOpImpl::build_ems_heap(int64_t &merge_ways)
     if (OB_SUCC(ret)) {
       ObSortOpChunk *chunk = sort_chunks_.get_first();
       for (int64_t i = 0; i < merge_ways && OB_SUCC(ret); i++) {
-        chunk->datum_store_.reset();
+        chunk->datum_store_.reset_iter();
         if (OB_FAIL(chunk->datum_store_.get_next_row(chunk->row_))
             || NULL == chunk->row_) {
           if (OB_ITER_END == ret || OB_SUCCESS == ret) {
@@ -1927,7 +1951,7 @@ int ObSortOpImpl::sort_inmem_data()
         heap_nodes_.reuse();
         do_partition_topn_sort();
       } else if (part_cnt_ > 0) {
-        do_partition_sort(*rows_, begin, rows_->count());
+        OZ(do_partition_sort(*rows_, begin, rows_->count()));
       } else if (enable_encode_sortkey_) {
         bool can_encode = true;
         ObAdaptiveQS aqs(*rows_, mem_context_->get_malloc_allocator());
@@ -1947,8 +1971,8 @@ int ObSortOpImpl::sort_inmem_data()
         ret = comp_.ret_;
         LOG_WARN("compare failed", K(ret));
       }
-      op_monitor_info_.otherstat_1_id_ = ObSqlMonitorStatIds::SORT_SORTED_ROW_COUNT;
-      op_monitor_info_.otherstat_1_value_ += rows_->count();
+      op_monitor_info_->otherstat_1_id_ = ObSqlMonitorStatIds::SORT_SORTED_ROW_COUNT;
+      op_monitor_info_->otherstat_1_value_ += rows_->count();
     }
     if (OB_SUCC(ret) && need_imms()) {
       if (NULL == imms_heap_) {
@@ -1981,16 +2005,16 @@ int ObSortOpImpl::sort_inmem_data()
               LOG_WARN("heap push back failed", K(ret));
             }
           }
-          op_monitor_info_.otherstat_1_id_ = ObSqlMonitorStatIds::SORT_SORTED_ROW_COUNT;
-          op_monitor_info_.otherstat_1_value_ += 1;
+          op_monitor_info_->otherstat_1_id_ = ObSqlMonitorStatIds::SORT_SORTED_ROW_COUNT;
+          op_monitor_info_->otherstat_1_value_ += 1;
           prev = &rows_->at(i);
         }
         heap_iter_begin_ = false;
       }
     }
     const int64_t sort_cpu_time = ObTimeUtility::fast_current_time() - curr_time;
-    op_monitor_info_.otherstat_3_id_ = ObSqlMonitorStatIds::SORT_INMEM_SORT_TIME;
-    op_monitor_info_.otherstat_3_value_ += sort_cpu_time;
+    op_monitor_info_->otherstat_3_id_ = ObSqlMonitorStatIds::SORT_INMEM_SORT_TIME;
+    op_monitor_info_->otherstat_3_value_ += sort_cpu_time;
   }
   return ret;
 }
@@ -2064,8 +2088,8 @@ int ObSortOpImpl::sort()
           return ret;
         };
         const int64_t level = sort_chunks_.get_first()->level_ + 1;
-        op_monitor_info_.otherstat_2_id_ = ObSqlMonitorStatIds::SORT_MERGE_SORT_ROUND;
-        op_monitor_info_.otherstat_2_value_ = level;
+        op_monitor_info_->otherstat_2_id_ = ObSqlMonitorStatIds::SORT_MERGE_SORT_ROUND;
+        op_monitor_info_->otherstat_2_value_ = level;
         if (OB_FAIL(build_chunk(level, input))) {
           LOG_WARN("build chunk failed", K(ret));
         } else {
@@ -2340,7 +2364,7 @@ int ObSortOpImpl::add_heap_sort_row(const common::ObIArray<ObExpr*> &exprs,
     int64_t size = OB_INVALID_ID == input_rows_ ? 0 : input_rows_ * input_width_ * 2;
     if (OB_FAIL(sql_mem_processor_.init(
                &mem_context_->get_malloc_allocator(),
-               tenant_id_, size, op_monitor_info_.op_type_, op_monitor_info_.op_id_, &eval_ctx_->exec_ctx_))) {
+               tenant_id_, size, op_monitor_info_->op_type_, op_monitor_info_->op_id_, &eval_ctx_->exec_ctx_))) {
       LOG_WARN("failed to init sql mem processor", K(ret));
     }
   } else {

@@ -172,6 +172,8 @@ int ObInsertTableInfo::assign(const ObInsertTableInfo &other)
     LOG_WARN("failed to assign part generated col dep cols", K(ret));
   } else if (OB_FAIL(assignments_.assign(other.assignments_))) {
     LOG_WARN("failed to assign exprs", K(ret));
+  } else if (OB_FAIL(column_in_values_vector_.assign(other.column_in_values_vector_))) {
+    LOG_WARN("failed to assign exprs", K(ret));
   } else {
     is_replace_ = other.is_replace_;
   }
@@ -187,6 +189,8 @@ int ObInsertTableInfo::deep_copy(ObIRawExprCopier &expr_copier,
   } else if (OB_FAIL(expr_copier.copy(other.values_desc_, values_desc_))) {
     LOG_WARN("failed to copy exprs", K(ret));
   } else if (OB_FAIL(expr_copier.copy(other.values_vector_, values_vector_))) {
+    LOG_WARN("failed to copy exprs", K(ret));
+  } else if (OB_FAIL(expr_copier.copy(other.column_in_values_vector_, column_in_values_vector_))) {
     LOG_WARN("failed to copy exprs", K(ret));
   } else if (OB_FAIL(expr_copier.copy(other.column_conv_exprs_, column_conv_exprs_))) {
     LOG_WARN("failed to copy exprs", K(ret));
@@ -543,10 +547,11 @@ int ObDelUpdStmt::update_base_tid_cid()
             ret = OB_ERR_UNEXPECTED;
             LOG_WARN("get unexpected null", K(col), K(ret));
           } else {
+            const bool is_rowkey_doc = col->get_table_name().suffix_match("rowkey_doc");
             col_item->base_tid_ = col->get_table_id();
             col_item->base_cid_ = col->get_column_id();
             if (OB_UNLIKELY(col_item->base_tid_ == OB_INVALID_ID) ||
-            OB_UNLIKELY(j != 0 && col_item->base_tid_ != base_tid)) {
+            OB_UNLIKELY(j != 0 && col_item->base_tid_ != base_tid && !is_rowkey_doc)) {
               ret = OB_ERR_UNEXPECTED;
               LOG_WARN("base table id is invalid", K(ret), K(col_item->base_tid_), K(base_tid));
             } else if (j == 0) {

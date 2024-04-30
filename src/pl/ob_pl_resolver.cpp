@@ -169,13 +169,20 @@ int ObPLResolver::init_default_expr(ObPLFunctionAST &func_ast,
     const ParseNode *default_node = NULL;
     ObRawExpr *default_expr = NULL;
     ObString default_value = param.get_default_value();
+    bool is_for_trigger = false;
+    if (resolve_ctx_.session_info_.is_for_trigger_package()
+        && lib::is_oracle_mode()
+        && ObTriggerInfo::is_trigger_body_package_id(func_ast.get_package_id())) {
+      is_for_trigger = true;
+    }
     OZ (ObSQLUtils::convert_sql_text_from_schema_for_resolve(
           resolve_ctx_.allocator_, resolve_ctx_.session_info_.get_dtc_params(), default_value));
     OZ (ObRawExprUtils::parse_default_expr_from_str(
       default_value,
       resolve_ctx_.session_info_.get_charsets4parser(),
       resolve_ctx_.allocator_,
-      default_node));
+      default_node,
+      is_for_trigger));
     CK (OB_NOT_NULL(default_node));
     OZ (resolve_expr(default_node, func_ast, default_expr,
          combine_line_and_col(default_node->stmt_loc_), true, &expected_type));
@@ -562,6 +569,8 @@ int ObPLResolver::resolve(const ObStmtNodeTree *parse_tree, ObPLFunctionAST &fun
         ObPLRoutineInfo *routine_info = NULL;
         if (OB_FAIL(resolve_routine_decl(parse_tree, func, routine_info, false))) {
           LOG_WARN("resolve routine declaration failed", K(parse_tree), K(ret));
+        } else {
+          func.set_is_all_sql_stmt(false);
         }
       }
         break;
@@ -570,6 +579,8 @@ int ObPLResolver::resolve(const ObStmtNodeTree *parse_tree, ObPLFunctionAST &fun
         // must be nested routine, because udt member is process in package ast resolve
         if (OB_FAIL(resolve_routine_def(parse_tree, func, false))) {
           LOG_WARN("resolve procedure definition failed", K(parse_tree), K(ret));
+        } else {
+          func.set_is_all_sql_stmt(false);
         }
       }
         break;
@@ -4264,6 +4275,9 @@ int ObPLResolver::resolve_when(const ObStmtNodeTree *parse_tree, ObRawExpr *case
 
       OZ (func.add_expr(expr));
       OZ (expr->formalize(&resolve_ctx_.session_info_));
+      if (!is_bool_stmt && lib::is_mysql_mode()) {
+        OZ (set_cm_warn_on_fail(expr));
+      }
       OZ (stmt->add_when_clause(func.get_expr_count() - 1, body));
     }
   }
@@ -7069,6 +7083,24 @@ int ObPLResolver::check_in_param_type_legal(const ObIRoutineParam *param_info,
             }
           }
         }
+        if (OB_FAIL(ret)) {
+        } else if (actually_type.get_user_type_id() != expected_type.get_user_type_id()) {
+#ifdef OB_BUILD_ORACLE_PL
+          if (ObPlJsonUtil::is_pl_jsontype(actually_type.get_user_type_id())) {
+            OZ (check_composite_compatible(current_block_->get_namespace(),
+                                          expected_type.get_user_type_id(),
+                                          actually_type.get_user_type_id(),
+                                          is_legal));
+          } else {
+#endif
+            OZ (check_composite_compatible(current_block_->get_namespace(),
+                                          actually_type.get_user_type_id(),
+                                          expected_type.get_user_type_id(),
+                                          is_legal));
+          }
+#ifdef OB_BUILD_ORACLE_PL
+        }
+#endif
       } else if (actually_type.is_composite_type() || expected_type.is_composite_type()) {
         if (actually_type.is_obj_type()
              && ObExtendType == actually_type.get_data_type()->get_obj_type()) {
@@ -9503,7 +9535,8 @@ bool ObPLResolver::is_json_type_compatible(const ObUserDefinedType *left, const 
 {
 #ifdef OB_BUILD_ORACLE_PL
   return (ObPlJsonUtil::is_pl_json_element_type(left->get_user_type_id())
-          && ObPlJsonUtil::is_pl_json_object_type(right->get_user_type_id())) ;
+          && (ObPlJsonUtil::is_pl_json_object_type(right->get_user_type_id())
+          || ObPlJsonUtil::is_pl_json_array_type(right->get_user_type_id()))) ;
 #else
   return false;
 #endif
@@ -9683,6 +9716,22 @@ int ObPLResolver::analyze_expr_type(ObRawExpr *&expr,
   return ret;
 }
 
+int ObPLResolver::set_udf_expr_line_number(ObRawExpr *expr, uint64_t line_number)
+{
+  int ret = OB_SUCCESS;
+  if (OB_NOT_NULL(expr)) {
+    if (expr->is_udf_expr()) {
+      ObUDFRawExpr *udf_expr = static_cast<ObUDFRawExpr *>(expr);
+      udf_expr->set_loc(line_number);
+    } else {
+      for (int64_t i = 0; i < expr->get_children_count(); ++i) {
+        OZ (SMART_CALL(set_udf_expr_line_number(expr->get_param_expr(i), line_number)));
+      }
+    }
+  }
+  return ret;
+}
+
 int ObPLResolver::resolve_expr(const ParseNode *node,
                                ObPLCompileUnitAST &unit_ast,
                                ObRawExpr *&expr,
@@ -9737,11 +9786,10 @@ int ObPLResolver::resolve_expr(const ParseNode *node,
   if (OB_SUCC(ret) && lib::is_oracle_mode()) {
     OZ (add_pl_integer_checker_expr(expr_factory_, expr, need_replace));
   }
-  if (OB_SUCC(ret) && expr->is_udf_expr()) {
-    ObUDFRawExpr *udf_expr = static_cast<ObUDFRawExpr *>(expr);
-    udf_expr->set_loc(line_number);
+  if (OB_SUCC(ret)) {
+    OZ (set_udf_expr_line_number(expr, line_number));
   }
-  if (is_mysql_mode()) {
+  if (OB_SUCC(ret) && is_mysql_mode()) {
     ObRawExprWrapEnumSet enum_set_wrapper(expr_factory_, &resolve_ctx_.session_info_);
     OZ (enum_set_wrapper.analyze_expr(expr));
   }
@@ -9784,7 +9832,8 @@ int ObPLResolver::resolve_expr(const ParseNode *node,
 #ifdef OB_BUILD_ORACLE_PL
         // error code compiltable with oracle
         if (ObPlJsonUtil::is_pl_json_object_type(expected_type->get_user_type_id())
-            && ObPlJsonUtil::is_pl_json_element_type(expr->get_result_type().get_udt_id())) {
+            && ObPlJsonUtil::is_pl_json_element_type(expr->get_result_type().get_udt_id())
+            && ObPlJsonUtil::is_pl_json_array_type(expr->get_result_type().get_udt_id())) {
           ret = OB_ERR_EXPRESSION_WRONG_TYPE;
         }
 #endif
@@ -11467,7 +11516,7 @@ int ObPLResolver::resolve_record_construct(const ObQualifiedName &q_name,
   }
   if (OB_SUCC(ret)) {
     int64_t param_cnt = udf_info.ref_expr_->get_param_exprs().count();
-    int64_t member_cnt = object_type->get_member_count();
+    int64_t member_cnt = object_type->is_opaque_type() ?  0 : object_type->get_member_count();
     bool is_opaque_cons_and_no_self_param
       = object_type->is_opaque_type() && (param_cnt - 2) == member_cnt && udf_info.is_udf_udt_cons();
 
@@ -13811,16 +13860,17 @@ int ObPLResolver::resolve_routine(ObObjAccessIdent &access_ident,
         OZ (ObPLResolver::resolve_dblink_routine_with_synonym(resolve_ctx_,
                                 static_cast<uint64_t>(access_idxs.at(access_idxs.count()-1).var_index_),
                                 routine_name, expr_params, routine_info));
-        OX (func.set_can_cached(false));
       }
       if (OB_SUCC(ret)
           && NULL != routine_info
-          && NULL != routine_info->get_ret_info()
           && OB_INVALID_ID != routine_info->get_dblink_id()) {
-        CK (access_ident.is_pl_udf());
-        CK (OB_NOT_NULL(access_ident.udf_info_.ref_expr_));
-        if (OB_SUCC(ret)) {
-          access_ident.udf_info_.ref_expr_->set_func_name(routine_info->get_routine_name());
+        func.set_can_cached(false);
+        if (NULL != routine_info->get_ret_info()) {
+          CK (access_ident.is_pl_udf());
+          CK (OB_NOT_NULL(access_ident.udf_info_.ref_expr_));
+          if (OB_SUCC(ret)) {
+            access_ident.udf_info_.ref_expr_->set_func_name(routine_info->get_routine_name());
+          }
         }
       }
     }

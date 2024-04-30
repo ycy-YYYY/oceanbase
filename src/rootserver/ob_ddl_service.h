@@ -311,7 +311,7 @@ public:
                           share::schema::ObSchemaGetterGuard &schema_guard,
                           const bool need_check_tablet_cnt,
                           const uint64_t tenant_data_version);
-  virtual int alter_table_index(const obrpc::ObAlterTableArg &alter_table_arg,
+  virtual int alter_table_index(obrpc::ObAlterTableArg &alter_table_arg,
                                 const share::schema::ObTableSchema &orgin_table_schema,
                                 share::schema::ObTableSchema &new_table_schema,
                                 share::schema::ObSchemaGetterGuard &schema_guard,
@@ -816,8 +816,9 @@ int check_table_udt_id_is_exist(share::schema::ObSchemaGetterGuard &schema_guard
                            share::schema::ObSchemaGetterGuard &schema_guard);
   int exists_role_grant_cycle(share::schema::ObSchemaGetterGuard &schema_guard,
                               const uint64_t tenant_id,
-                              uint64_t role_id,
-                              const share::schema::ObUserInfo *user_info);
+                              const ObUserInfo &role_info,
+                              const share::schema::ObUserInfo *user_info,
+                              const bool is_oracle_mode);
   virtual int grant(const obrpc::ObGrantArg &arg);
   int revoke(const obrpc::ObRevokeUserArg &arg);
   virtual int grant_priv_to_user(const uint64_t tenant_id,
@@ -845,6 +846,25 @@ int check_table_udt_id_is_exist(share::schema::ObSchemaGetterGuard &schema_guard
                                 const common::ObString *ddl_stmt_str,
                                 share::schema::ObSchemaGetterGuard &schema_guard);
 
+ int grant_or_revoke_column_priv_mysql(const uint64_t tenant_id,
+                                        const uint64_t table_id,
+                                        const uint64_t user_id,
+                                        const ObString& user_name,
+                                        const ObString& host_name,
+                                        const ObString& db,
+                                        const ObString& table,
+                                        const ObIArray<std::pair<ObString, ObPrivType>> &column_names_priv,
+                                        ObDDLOperator &ddl_operator,
+                                        ObDDLSQLTransaction &trans,
+                                        ObSchemaGetterGuard &schema_guard,
+                                        const bool is_grant);
+
+  int grant_table_and_column_mysql(const obrpc::ObGrantArg &arg,
+                                         uint64_t user_id,
+                                         const ObString &user_name,
+                                         const ObString &host_name,
+                                         const ObNeedPriv &need_priv,
+                                         share::schema::ObSchemaGetterGuard &schema_guard);
   int lock_user(const obrpc::ObLockUserArg &arg, common::ObIArray<int64_t> &failed_index);
   int standby_grant(const obrpc::ObStandbyGrantArg &arg);
 
@@ -883,11 +903,24 @@ int check_table_udt_id_is_exist(share::schema::ObSchemaGetterGuard &schema_guard
                           const uint64_t option,
                           const share::schema::ObObjPrivSortKey &obj_key,
                           share::schema::ObSchemaGetterGuard &schema_guard);
-  virtual int revoke_table(const share::schema::ObTablePrivSortKey &table_key,
+
+  virtual int grant_routine(
+    const share::schema::ObRoutinePrivSortKey &routine_key,
+    const ObPrivSet priv_set,
+    const ObString *ddl_stmt_str,
+    const uint64_t option,
+    share::schema::ObSchemaGetterGuard &schema_guard);
+
+  virtual int revoke_routine(
+    const share::schema::ObRoutinePrivSortKey &routine_key,
+    const ObPrivSet priv_set);
+  virtual int revoke_table(const obrpc::ObRevokeTableArg &arg,
+                           const share::schema::ObTablePrivSortKey &table_key,
                            const ObPrivSet priv_set,
                            const share::schema::ObObjPrivSortKey &obj_key,
                            const share::ObRawObjPrivArray &obj_priv_array,
                            const bool revoke_all_ora);
+  virtual int revoke_table_and_column_mysql(const obrpc::ObRevokeTableArg& arg);
   //----End of functions for managing privileges----
   //----Functions for managing outlines----
   virtual int check_outline_exist(share::schema::ObOutlineInfo &Outline_info,
@@ -1161,11 +1194,12 @@ int check_table_udt_id_is_exist(share::schema::ObSchemaGetterGuard &schema_guard
   int rename_dropping_index_name(
       const uint64_t data_table_id,
       const uint64_t database_id,
+      const bool is_inner_and_fts_index,
       const obrpc::ObDropIndexArg &drop_index_arg,
       ObSchemaGetterGuard &schema_guard,
       ObDDLOperator &ddl_operator,
       ObMySQLTransaction &trans,
-      share::schema::ObTableSchema &new_index_schema);
+      common::ObIArray<share::schema::ObTableSchema> &new_index_schemas);
   int get_index_schema_by_name(
       const uint64_t data_table_id,
       const uint64_t database_id,
@@ -1251,6 +1285,11 @@ private:
       const ObTableSchema &table_schema,
       uint64_t &tablet_cnt);
 
+  int check_has_domain_index(
+      ObSchemaGetterGuard &schema_guard,
+      const uint64_t tenant_id,
+      const uint64_t data_table_id,
+      bool &fts_exist);
   int check_has_index_operation(
       ObSchemaGetterGuard &schema_guard,
       const uint64_t teannt_id,
@@ -1301,6 +1340,11 @@ private:
   int get_sample_table_schema(
       common::ObIArray<const share::schema::ObSimpleTableSchemaV2 *> &table_schemas,
       const share::schema::ObSimpleTableSchemaV2 *&sample_table_schema);
+  int get_valid_index_schema_by_id_for_drop_index_(
+      const uint64_t data_table_id,
+      const obrpc::ObDropIndexArg &drop_index_arg,
+      share::schema::ObSchemaGetterGuard &schema_guard,
+      const share::schema::ObTableSchema *&index_table_schema);
   int set_tablegroup_id(share::schema::ObTableSchema &table_schema);
   template<typename SCHEMA>
   int set_default_tablegroup_id(SCHEMA &schema);
@@ -1441,7 +1485,8 @@ private:
   // offline ddl cannot appear at the same time with other ddl types
   // Offline ddl cannot appear at the same time as offline ddl
   int check_is_offline_ddl(obrpc::ObAlterTableArg &alter_table_arg,
-                           share::ObDDLType &ddl_type);
+                           share::ObDDLType &ddl_type,
+                           bool &ddl_need_retry_at_executor);
   int check_can_bind_tablets(const share::ObDDLType ddl_type,
                              bool &bind_tablets);
   int check_ddl_with_primary_key_operation(const obrpc::ObAlterTableArg &alter_table_arg,
@@ -1565,7 +1610,8 @@ private:
                                const share::schema::ObTableSchema &orig_table_schema,
                                share::schema::ObSchemaGetterGuard &schema_guard,
                                const bool is_oracle_mode,
-                               share::ObDDLType &ddl_type);
+                               share::ObDDLType &ddl_type,
+                               bool &ddl_need_retry_at_executor);
   int check_alter_table_partition(const obrpc::ObAlterTableArg &alter_table_arg,
                                   const share::schema::ObTableSchema &orig_table_schema,
                                   const bool is_oracle_mode,
@@ -2018,8 +2064,21 @@ private:
                               ObMySQLTransaction &trans);
   int lock_tables_in_recyclebin(const share::schema::ObDatabaseSchema &database_schema,
                                 ObMySQLTransaction &trans);
+  int get_dropping_domain_index_invisiable_aux_table_schema(
+      const uint64_t tenant_id,
+      const uint64_t data_table_id,
+      const uint64_t index_table_id,
+      const bool is_fts_index,
+      const ObString &index_name,
+      share::schema::ObSchemaGetterGuard &schema_guard,
+      ObDDLOperator &ddl_operator,
+      common::ObMySQLTransaction &trans,
+      common::ObIArray<share::schema::ObTableSchema> &new_aux_schemas);
 
 public:
+  int check_parallel_ddl_conflict(
+    share::schema::ObSchemaGetterGuard &schema_guard,
+    const obrpc::ObDDLArg &arg);
   int construct_zone_region_list(
       common::ObIArray<share::schema::ObZoneRegion> &zone_region_list,
       const common::ObIArray<common::ObZone> &zone_list);
@@ -2216,6 +2275,10 @@ private:
                            uint64_t creator_id,
                            uint64_t &user_id,
                            share::schema::ObSchemaGetterGuard &schema_guard);
+
+  int create_mysql_roles_in_trans(const uint64_t tenant_id,
+                                  const bool if_not_exist,
+                                  common::ObIArray<share::schema::ObUserInfo> &user_infos);
   int replay_alter_user(const share::schema::ObUserInfo &user_info,
       share::schema::ObSchemaGetterGuard &schema_guard);
   int set_passwd_in_trans(const uint64_t tenant_id,
@@ -2245,7 +2308,7 @@ private:
                          const common::ObString *ddl_stmt_str,
                          share::schema::ObSchemaGetterGuard &schema_guard);
   int drop_user_in_trans(const uint64_t tenant_id,
-                         const uint64_t user_id,
+                         const common::ObIArray<uint64_t> &user_ids,
                          const ObString *ddl_stmt_str);
 
   //----End of Functions for managing privileges----
@@ -2536,9 +2599,43 @@ private:
   int gen_inc_table_schema_for_add_part(
       const share::schema::ObTableSchema &orig_table_schema,
       share::schema::AlterTableSchema &inc_table_schema);
+  int gen_inc_table_schema_for_add_subpart(
+      const share::schema::ObTableSchema &orig_table_schema,
+      share::schema::AlterTableSchema &inc_table_schema);
   int gen_inc_table_schema_for_drop_part(
       const share::schema::ObTableSchema &orig_table_schema,
       share::schema::AlterTableSchema &inc_table_schema);
+  int gen_inc_table_schema_for_drop_subpart(
+      const share::schema::ObTableSchema &orig_table_schema,
+      share::schema::AlterTableSchema &inc_table_schema);
+public:
+  //not check belong to the same table
+  int check_same_partition(const bool is_oracle_mode, const ObPartition &l, const ObPartition &r,
+                           const ObPartitionFuncType part_type, bool &is_matched) const;
+  //not check belong to the same table
+  int check_same_subpartition(const bool is_oracle_mode, const ObSubPartition &l, const ObSubPartition &r,
+                              const ObPartitionFuncType part_type, bool &is_matched) const;
+private:
+  //After renaming a partition/subpartition, the consistency of the partition name between the data table and aux table is no longer guaranteed.
+  //Therefore, the partition names in the inc aux table must be synchronized with the ori aux table after assigning the data table's partition
+  //schema to the inc aux table.
+  //This function relies on the assumption that the inc table schema has a valid partition name.
+  int fix_local_idx_part_name_(const ObSimpleTableSchemaV2 &ori_data_table_schema,
+                               const ObSimpleTableSchemaV2 &ori_table_schema,
+                               ObSimpleTableSchemaV2 &inc_table_schema);
+  //This function relies on the assumption that the inc table schema has a valid subpartition name.
+  int fix_local_idx_subpart_name_(const ObSimpleTableSchemaV2 &ori_data_table_schema,
+                                  const ObSimpleTableSchemaV2 &ori_table_schema,
+                                  ObSimpleTableSchemaV2 &inc_table_schema);
+  //During the process of adding a partition/subpartition, we only check whether the partition schema of the argument is valid.
+  //It's possible for the inc aux table's partition name to duplicate with an existing partition name if one renames a partition/subpartition
+  //to another name and then adds a partition/subpartition with the same name.
+  //In this case, we will generate a name with a part/subpart id to replace the inc part/subpart name to avoid duplication.
+  int fix_local_idx_part_name_for_add_part_(const ObSimpleTableSchemaV2 &ori_table_schema,
+                                          ObSimpleTableSchemaV2 &inc_table_schema);
+
+  int fix_local_idx_part_name_for_add_subpart_(const ObSimpleTableSchemaV2 &ori_table_schema,
+                                          ObSimpleTableSchemaV2 &inc_table_schema);
   int gen_inc_table_schema_for_rename_part_(
       const share::schema::ObTableSchema &orig_table_schema,
       share::schema::AlterTableSchema &inc_table_schema);
@@ -2546,12 +2643,6 @@ private:
       const share::schema::ObTableSchema &orig_table_schema,
       share::schema::AlterTableSchema &inc_table_schema,
       share::schema::AlterTableSchema &del_table_schema);
-  int gen_inc_table_schema_for_add_subpart(
-      const share::schema::ObTableSchema &orig_table_schema,
-      share::schema::AlterTableSchema &inc_table_schema);
-  int gen_inc_table_schema_for_drop_subpart(
-      const share::schema::ObTableSchema &orig_table_schema,
-      share::schema::AlterTableSchema &inc_table_schema);
   int gen_inc_table_schema_for_rename_subpart_(
       const share::schema::ObTableSchema &orig_table_schema,
       share::schema::AlterTableSchema &inc_table_schema);
@@ -2597,34 +2688,6 @@ private:
       const share::schema::ObTenantSchema &orig_tenant_schema,
       const share::schema::ObTenantSchema &new_tenant_schema);
 
-  //not check belong to the same table
-  int check_same_partition_(const bool is_oracle_mode, const ObPartition &l, const ObPartition &r,
-                            const ObPartitionFuncType part_type, bool &is_matched) const;
-  //not check belong to the same table
-  int check_same_subpartition_(const bool is_oracle_mode, const ObSubPartition &l, const ObSubPartition &r,
-                               const ObPartitionFuncType part_type, bool &is_matched) const;
-  //After renaming a partition/subpartition, the consistency of the partition name between the data table and aux table is no longer guaranteed.
-  //Therefore, the partition names in the inc aux table must be synchronized with the ori aux table after assigning the data table's partition
-  //schema to the inc aux table.
-  //This function relies on the assumption that the inc table schema has a valid partition name.
-  int fix_local_idx_part_name_(const ObSimpleTableSchemaV2 &ori_data_table_schema,
-                                          const ObSimpleTableSchemaV2 &ori_table_schema,
-                                          ObSimpleTableSchemaV2 &inc_table_schema);
-  //This function relies on the assumption that the inc table schema has a valid subpartition name.
-  int fix_local_idx_subpart_name_(const ObSimpleTableSchemaV2 &ori_data_table_schema,
-                                          const ObSimpleTableSchemaV2 &ori_table_schema,
-                                          ObSimpleTableSchemaV2 &inc_table_schema);
-  //During the process of adding a partition/subpartition, we only check whether the partition schema of the argument is valid.
-  //It's possible for the inc aux table's partition name to duplicate with an existing partition name if one renames a partition/subpartition
-  //to another name and then adds a partition/subpartition with the same name.
-  //In this case, we will generate a name with a part/subpart id to replace the inc part/subpart name to avoid duplication.
-  int fix_local_idx_part_name_for_add_part_(const ObSimpleTableSchemaV2 &ori_table_schema,
-                                          ObSimpleTableSchemaV2 &inc_table_schema);
-
-  int fix_local_idx_part_name_for_add_subpart_(const ObSimpleTableSchemaV2 &ori_table_schema,
-                                          ObSimpleTableSchemaV2 &inc_table_schema);
-
-private:
   int check_locality_compatible_(ObTenantSchema &schema);
 
   int pre_rename_mysql_columns_online(const ObTableSchema &origin_table_schema,
@@ -2853,7 +2916,7 @@ int ObDDLService::fill_part_name(const SCHEMA &orig_schema,
   if (OB_ISNULL(part_array)) {
     ret = OB_ERR_UNEXPECTED;
     RS_LOG(WARN, "part_array is null", K(ret), K(part_array));
-  } else if (OB_FAIL(orig_schema.get_max_part_idx(max_part_id))) {
+  } else if (OB_FAIL(orig_schema.get_max_part_idx(max_part_id, orig_schema.is_external_table()))) {
     RS_LOG(WARN, "fail to get max part id", KR(ret), K(max_part_id));
   }
   // Supplement the default partition name p+OB_MAX_PARTITION_NUM_MYSQL, accumulate after judging duplicates

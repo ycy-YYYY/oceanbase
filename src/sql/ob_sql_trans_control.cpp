@@ -41,6 +41,7 @@
 #include "storage/tablet/ob_tablet.h"
 #include "sql/das/ob_das_dml_ctx_define.h"
 #include "share/deadlock/ob_deadlock_detector_mgr.h"
+#include "sql/engine/cmd/ob_table_direct_insert_ctx.h"
 
 #ifdef CHECK_SESSION
 #error "redefine macro CHECK_SESSION"
@@ -439,7 +440,10 @@ int ObSqlTransControl::do_end_trans_(ObSQLSessionInfo *session,
   transaction::ObTxDesc *&tx_ptr = session->get_tx_desc();
   bool is_detector_exist = false;
   int tmp_ret = OB_SUCCESS;
-  if (OB_ISNULL(MTL(share::detector::ObDeadLockDetectorMgr*))) {
+  const int64_t lcl_op_interval = GCONF._lcl_op_interval;
+  if (lcl_op_interval <= 0) {
+    // do nothing
+  } else if (OB_ISNULL(MTL(share::detector::ObDeadLockDetectorMgr*))) {
     tmp_ret = OB_BAD_NULL_ERROR;
     DETECT_LOG(WARN, "MTL ObDeadLockDetectorMgr is NULL", K(tmp_ret), K(tx_ptr->tid()));
   } else if (OB_TMP_FAIL(MTL(share::detector::ObDeadLockDetectorMgr*)->
@@ -727,31 +731,41 @@ int ObSqlTransControl::stmt_sanity_check_(ObSQLSessionInfo *session,
                                           ObPhysicalPlanCtx *plan_ctx)
 {
   int ret = OB_SUCCESS;
-  auto current_consist_level = plan_ctx->get_consistency_level();
+  ObConsistencyLevel current_consist_level = plan_ctx->get_consistency_level();
   CK (current_consist_level != ObConsistencyLevel::INVALID_CONSISTENCY);
-  bool is_plain_select = plan->is_plain_select();
 
   // adjust stmt's consistency level
   if (OB_SUCC(ret)) {
     // Weak read statement with inner table should be converted to strong read.
     // For example, schema refresh statement;
     if (plan->is_contain_inner_table() ||
-       (!is_plain_select && current_consist_level != ObConsistencyLevel::STRONG)) {
+      (!plan->is_plain_select() && current_consist_level != ObConsistencyLevel::STRONG)) {
       plan_ctx->set_consistency_level(ObConsistencyLevel::STRONG);
     }
   }
 
-  // check isolation with consistency type
   if (OB_SUCC(ret) && session->is_in_transaction()) {
+    // check consistency type volatile
+    ObConsistencyLevel current_consist_level = plan_ctx->get_consistency_level();
+    if (current_consist_level == ObConsistencyLevel::WEAK) {
+      // read write transaction
+      if (!session->get_tx_desc()->is_clean()) {
+        plan_ctx->set_consistency_level(ObConsistencyLevel::STRONG);
+      }
+    }
+
+    // check isolation with consistency type
     auto iso = session->get_tx_desc()->get_isolation_level();
     auto cl = plan_ctx->get_consistency_level();
-    if (ObConsistencyLevel::WEAK == cl && (iso == ObTxIsolationLevel::SERIAL || iso == ObTxIsolationLevel::RR)) {
+    if (ObConsistencyLevel::WEAK == cl &&
+      (iso == ObTxIsolationLevel::SERIAL || iso == ObTxIsolationLevel::RR)) {
       ret = OB_NOT_SUPPORTED;
       TRANS_LOG(ERROR, "statement of weak consistency is not allowed under SERIALIZABLE isolation",
                 KR(ret), "trans_id", session->get_tx_id(), "consistency_level", cl);
       LOG_USER_ERROR(OB_NOT_SUPPORTED, "weak consistency under SERIALIZABLE and REPEATABLE-READ isolation level");
     }
   }
+
   return ret;
 }
 
@@ -795,17 +809,23 @@ int ObSqlTransControl::stmt_setup_snapshot_(ObSQLSessionInfo *session,
     int64_t stmt_expire_ts = get_stmt_expire_ts(plan_ctx, *session);
     share::ObLSID first_ls_id;
     bool local_single_ls_plan = false;
+    bool is_single_tablet = false;
     const bool local_single_ls_plan_maybe = plan->is_local_plan() &&
                                             OB_PHY_PLAN_LOCAL == plan->get_location_type();
     if (local_single_ls_plan_maybe) {
-      if (OB_FAIL(get_first_lsid(das_ctx, first_ls_id))) {
+      if (OB_FAIL(get_first_lsid(das_ctx, first_ls_id, is_single_tablet))) {
       } else if (!first_ls_id.is_valid()) {
         // do nothing
+      // get_ls_read_snapshot may degenerate into get_gts, so it can be used even if the ls is not local.
+      // This is mainly to solve the problem of strong reading performance in some single-tablet scenarios.
       } else if (OB_FAIL(txs->get_ls_read_snapshot(tx_desc,
                                                    session->get_tx_isolation(),
                                                    first_ls_id,
                                                    stmt_expire_ts,
                                                    snapshot))) {
+      } else if (is_single_tablet) {
+        // performance for single tablet scenario
+        local_single_ls_plan = true;
       } else {
         local_single_ls_plan = has_same_lsid(das_ctx, snapshot, first_ls_id);
       }
@@ -935,7 +955,7 @@ uint32_t ObSqlTransControl::get_real_session_id(ObSQLSessionInfo &session)
   return session.get_xid().empty() ? 0 : (session.get_proxy_sessid() != 0 ? session.get_proxy_sessid() : session.get_sessid());
 }
 
-int ObSqlTransControl::get_first_lsid(const ObDASCtx &das_ctx, share::ObLSID &first_lsid)
+int ObSqlTransControl::get_first_lsid(const ObDASCtx &das_ctx, share::ObLSID &first_lsid, bool &is_single_tablet)
 {
   int ret = OB_SUCCESS;
   const DASTableLocList &table_locs = das_ctx.get_table_loc_list();
@@ -946,6 +966,7 @@ int ObSqlTransControl::get_first_lsid(const ObDASCtx &das_ctx, share::ObLSID &fi
       const ObDASTabletLoc *tablet_loc = tablet_locs.get_first();
       first_lsid = tablet_loc->ls_id_;
     }
+    is_single_tablet = (1 == table_locs.size() && 1 == tablet_locs.size());
   }
   return ret;
 }
@@ -1161,6 +1182,15 @@ int ObSqlTransControl::end_stmt(ObExecContext &exec_ctx, const bool rollback)
       OZ (txs->abort_tx(*tx_desc, ObTxAbortCause::TX_RESULT_INCOMPLETE));
       ret = OB_TRANS_NEED_ROLLBACK;
       LOG_WARN("trans result incomplete, trans aborted", K(ret));
+    } else if (plan->get_enable_append()
+               && plan->get_enable_inc_direct_load()
+               && OB_UNLIKELY(OB_SUCCESS != exec_errcode)) {
+      if (!rollback) {
+        LOG_ERROR("direct load failed, but rollback not issued");
+      }
+      OZ (txs->abort_tx(*tx_desc, ObTxAbortCause::TX_RESULT_INCOMPLETE));
+      ret = OB_TRANS_NEED_ROLLBACK;
+      LOG_WARN("direct load failed, trans aborted", KR(ret));
     } else if (rollback) {
       auto stmt_expire_ts = get_stmt_expire_ts(plan_ctx, *session);
       auto &touched_ls = tx_result.get_touched_ls();
@@ -1438,7 +1468,7 @@ int ObSqlTransControl::lock_table(ObExecContext &exec_ctx,
   if (part_ids.empty()) {
     ObLockTableRequest arg;
     arg.table_id_ = table_id;
-    arg.owner_id_ = 0;
+    arg.owner_id_.set_default();
     arg.lock_mode_ = lock_mode;
     arg.op_type_ = ObTableLockOpType::IN_TRANS_COMMON_LOCK;
     arg.timeout_us_ = lock_timeout_us;
@@ -1451,7 +1481,7 @@ int ObSqlTransControl::lock_table(ObExecContext &exec_ctx,
   } else {
     ObLockPartitionRequest arg;
     arg.table_id_ = table_id;
-    arg.owner_id_ = 0;
+    arg.owner_id_.set_default();
     arg.lock_mode_ = lock_mode;
     arg.op_type_ = ObTableLockOpType::IN_TRANS_COMMON_LOCK;
     arg.timeout_us_ = lock_timeout_us;
@@ -1580,8 +1610,14 @@ int ObSqlTransControl::check_ls_readable(const uint64_t tenant_id,
   int ObSqlTransControl::cmp_txn_##name##_state(const char* cur_buf, int64_t cur_len, const char* last_buf, int64_t last_len) \
   { return transaction::ObTransService::txn_free_route__cmp_##name##_state(cur_buf, cur_len, last_buf, last_len); } \
   void ObSqlTransControl::display_txn_##name##_state(ObSQLSessionInfo &sess, const char* local_buf, const int64_t local_len, const char* remote_buf, const int64_t remote_len) \
-  { transaction::ObTransService::txn_free_route__display_##name##_state("LOAL", local_buf, local_len); \
-    transaction::ObTransService::txn_free_route__display_##name##_state("REMOTE", remote_buf, remote_len); }
+  {                                                                     \
+    transaction::ObTransService::txn_free_route__display_##name##_state("LOAL", local_buf, local_len); \
+    transaction::ObTransService::txn_free_route__display_##name##_state("REMOTE", remote_buf, remote_len); \
+    ObTxDesc *tx = sess.get_tx_desc();                                  \
+    if (OB_NOT_NULL(tx)) {                                              \
+      tx->print_trace();                                                \
+    }                                                                   \
+  }
 
 DELEGATE_TO_TXN(static);
 DELEGATE_TO_TXN(dynamic);

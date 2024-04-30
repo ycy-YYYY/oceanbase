@@ -152,7 +152,64 @@ public:
   int64_t unpivot_column_count_;
 };
 
-struct ObJsonTableDef;
+enum MulModeTableType {
+  INVALID_TABLE_TYPE = 0,
+  OB_ORA_JSON_TABLE_TYPE, // 1
+  OB_ORA_XML_TABLE_TYPE = 2,
+};
+
+typedef struct ObJtColBaseInfo
+{
+  ObJtColBaseInfo();
+  ObJtColBaseInfo(const ObJtColBaseInfo& info);
+
+  int32_t col_type_;
+  int32_t truncate_;
+  int32_t format_json_;
+  int32_t wrapper_;
+  int32_t allow_scalar_;
+  int64_t output_column_idx_;
+  int64_t empty_expr_id_;
+  int64_t error_expr_id_;
+  ObString col_name_;
+  ObString path_;
+  int32_t on_empty_;
+  int32_t on_error_;
+  int32_t on_mismatch_;
+  int32_t on_mismatch_type_;
+  int64_t res_type_;
+  ObDataType data_type_;
+  int32_t parent_id_;
+  int32_t id_;
+  union {
+    int32_t value_;
+    struct {
+      int32_t is_name_quoted_ : 1;
+      int32_t reserved_ : 31;
+    };
+  };
+
+  int deep_copy(const ObJtColBaseInfo& src, ObIAllocator* allocator);
+  int assign(const ObJtColBaseInfo& src);
+
+  TO_STRING_KV(K_(col_type), K_(format_json), K_(wrapper), K_(allow_scalar),
+   K_(output_column_idx), K_(col_name), K_(path), K_(parent_id), K_(id));
+} ObJtColBaseInfo;
+
+typedef struct ObJsonTableDef {
+  ObJsonTableDef()
+    : all_cols_(),
+      doc_expr_(nullptr),
+      table_type_(MulModeTableType::INVALID_TABLE_TYPE),
+      namespace_arr_() {}
+
+  int deep_copy(const ObJsonTableDef& src, ObIRawExprCopier &expr_copier, ObIAllocator* allocator);
+  int assign(const ObJsonTableDef& src);
+  common::ObSEArray<ObJtColBaseInfo*, 4, common::ModulePageAllocator, true> all_cols_;
+  ObRawExpr *doc_expr_;
+  MulModeTableType table_type_;
+  common::ObSEArray<ObString, 16, common::ModulePageAllocator, true> namespace_arr_;
+} ObJsonTableDef;
 
 struct TableItem
 {
@@ -170,7 +227,8 @@ struct TableItem
     for_update_ = false;
     for_update_wait_us_ = -1;
     skip_locked_ = false;
-    mock_id_ = common::OB_INVALID_ID;
+    need_expand_rt_mv_ = false;
+    mview_id_ = common::OB_INVALID_ID;
     node_ = NULL;
     view_base_item_ = NULL;
     flashback_query_expr_ = nullptr;
@@ -197,7 +255,6 @@ struct TableItem
                N_FOR_UPDATE, for_update_,
                N_WAIT, for_update_wait_us_,
                K_(skip_locked),
-               N_MOCK_ID, mock_id_,
                "view_base_item",
                (NULL == view_base_item_ ? OB_INVALID_ID : view_base_item_->table_id_),
                K_(dblink_id), K_(dblink_name), K_(link_database_name), K_(is_reverse_link),
@@ -205,7 +262,7 @@ struct TableItem
                K_(is_view_table), K_(part_ids), K_(part_names), K_(cte_type),
                KPC_(function_table_expr),
                K_(flashback_query_type), KPC_(flashback_query_expr), K_(table_type),
-               K(table_values_));
+               K(table_values_), K_(exec_params), K_(mview_id), K_(need_expand_rt_mv));
 
   enum TableType
   {
@@ -220,7 +277,8 @@ struct TableItem
     LINK_TABLE,
     JSON_TABLE,
     EXTERNAL_TABLE,
-    VALUES_TABLE
+    VALUES_TABLE,
+    LATERAL_TABLE,
   };
 
   /**
@@ -255,8 +313,10 @@ struct TableItem
   bool is_function_table() const { return FUNCTION_TABLE == type_; }
   bool is_link_table() const { return OB_INVALID_ID != dblink_id_; } // why not use type_, cause type_ will be changed in dblink transform rule, but dblink id don't change
   bool is_link_type() const { return LINK_TABLE == type_; } // after dblink transformer, LINK_TABLE will be BASE_TABLE, BASE_TABLE will be LINK_TABLE
-  bool is_json_table() const { return JSON_TABLE == type_; }
+  bool is_json_table() const { return JSON_TABLE == type_; }  // json_table_def_->table_type_ == MulModeTableType::OB_ORA_JSON_TABLE_TYPE
   bool is_values_table() const { return VALUES_TABLE == type_; }//used to mark values statement: values row(1,2), row(3,4);
+
+  bool is_lateral_table() const { return LATERAL_TABLE == type_; }
   bool is_synonym() const { return !synonym_name_.empty(); }
   bool is_oracle_all_or_user_sys_view() const
   {
@@ -320,8 +380,8 @@ struct TableItem
   bool for_update_;
   int64_t for_update_wait_us_;//0 means nowait, -1 means infinite
   bool skip_locked_;
-  //在hierarchical query, 记录由当前table_item mock出来的table_item的table id
-  uint64_t mock_id_;
+  bool need_expand_rt_mv_; // for real-time materialized view
+  uint64_t mview_id_; // for materialized view, ref_id_ is mv container table id, mview_id_ is the view id
   const ParseNode* node_;
   // base table item for updatable view
   const TableItem *view_base_item_; // seems to be useful only in the resolve phase
@@ -338,6 +398,7 @@ struct TableItem
   // table partition
   common::ObSEArray<ObObjectID, 1, common::ModulePageAllocator, true> part_ids_;
   common::ObSEArray<ObString, 1, common::ModulePageAllocator, true> part_names_;
+  common::ObSEArray<ObExecParamRawExpr*, 4, common::ModulePageAllocator, true> exec_params_;
   // json table
   ObJsonTableDef* json_table_def_;
   // values table
@@ -443,55 +504,6 @@ inline uint64_t ColumnItem::hash(uint64_t seed) const
 
   return seed;
 }
-
-typedef struct ObJtColBaseInfo
-{
-  ObJtColBaseInfo();
-  ObJtColBaseInfo(const ObJtColBaseInfo& info);
-
-  int32_t col_type_;
-  int32_t truncate_;
-  int32_t format_json_;
-  int32_t wrapper_;
-  int32_t allow_scalar_;
-  int64_t output_column_idx_;
-  int64_t empty_expr_id_;
-  int64_t error_expr_id_;
-  ObString col_name_;
-  ObString path_;
-  int32_t on_empty_;
-  int32_t on_error_;
-  int32_t on_mismatch_;
-  int32_t on_mismatch_type_;
-  int64_t res_type_;
-  ObDataType data_type_;
-  int32_t parent_id_;
-  int32_t id_;
-  union {
-    int32_t value_;
-    struct {
-      int32_t is_name_quoted_ : 1;
-      int32_t reserved_ : 31;
-    };
-  };
-
-  int deep_copy(const ObJtColBaseInfo& src, ObIAllocator* allocator);
-  int assign(const ObJtColBaseInfo& src);
-
-  TO_STRING_KV(K_(col_type), K_(format_json), K_(wrapper), K_(allow_scalar),
-   K_(output_column_idx), K_(col_name), K_(path), K_(parent_id), K_(id));
-} ObJtColBaseInfo;
-
-typedef struct ObJsonTableDef {
-  ObJsonTableDef()
-    : all_cols_(),
-      doc_expr_(nullptr) {}
-
-  int deep_copy(const ObJsonTableDef& src, ObIRawExprCopier &expr_copier, ObIAllocator* allocator);
-  int assign(const ObJsonTableDef& src);
-  common::ObSEArray<ObJtColBaseInfo*, 4, common::ModulePageAllocator, true> all_cols_;
-  ObRawExpr *doc_expr_;
-} ObJsonTableDef;
 
 struct FromItem
 {
@@ -808,14 +820,17 @@ public:
   int pull_all_expr_relation_id();
   int formalize_stmt(ObSQLSessionInfo *session_info);
   int formalize_relation_exprs(ObSQLSessionInfo *session_info);
-  int formalize_stmt_expr_reference(ObRawExprFactory *expr_factory, ObSQLSessionInfo *session_info);
+  int formalize_stmt_expr_reference(ObRawExprFactory *expr_factory,
+                                    ObSQLSessionInfo *session_info,
+                                    bool explicit_for_col = false);
   int formalize_child_stmt_expr_reference(ObRawExprFactory *expr_factory,
                                           ObSQLSessionInfo *session_info);
   int set_sharable_expr_reference(ObRawExpr &expr, ExplicitedRefType ref_type);
   int check_pseudo_column_valid();
   int get_ora_rowscn_column(const uint64_t table_id, ObPseudoColumnRawExpr *&ora_rowscn);
   virtual int remove_useless_sharable_expr(ObRawExprFactory *expr_factory,
-                                           ObSQLSessionInfo *session_info);
+                                           ObSQLSessionInfo *session_info,
+                                           bool explicit_for_col);
   virtual int clear_sharable_expr_reference();
   virtual int get_from_subquery_stmts(common::ObIArray<ObSelectStmt*> &child_stmts) const;
   virtual int get_subquery_stmts(common::ObIArray<ObSelectStmt*> &child_stmts) const;
@@ -945,6 +960,11 @@ public:
   { return pseudo_column_like_exprs_; }
   const common::ObIArray<ObRawExpr *> &get_pseudo_column_like_exprs() const
   { return pseudo_column_like_exprs_; }
+  const common::ObIArray<ObMatchFunRawExpr *> &get_match_exprs() const
+  { return match_exprs_; }
+  common::ObIArray<ObMatchFunRawExpr *> &get_match_exprs()
+  { return match_exprs_; }
+  int get_match_expr_on_table(uint64_t table_id, ObMatchFunRawExpr *&match_expr) const;
   int get_table_pseudo_column_like_exprs(uint64_t table_id, ObIArray<ObRawExpr *> &pseudo_columns);
   int get_table_pseudo_column_like_exprs(ObIArray<uint64_t> &table_id, ObIArray<ObRawExpr *> &pseudo_columns);
   int rebuild_tables_hash();
@@ -1027,7 +1047,6 @@ public:
                          ObStmtExprGetter &visitor);
   int get_relation_exprs(common::ObIArray<ObRawExpr *> &relation_exprs) const;
   int get_relation_exprs(common::ObIArray<ObRawExprPointer> &relation_expr_ptrs);
-
   //this func is used for enum_set_wrapper to get exprs which need to be handled
   int get_relation_exprs_for_enum_set_wrapper(common::ObIArray<ObRawExpr*> &rel_array);
   ColumnItem *get_column_item_by_id(uint64_t table_id, uint64_t column_id) const;
@@ -1087,6 +1106,7 @@ public:
   int get_udf_exprs(common::ObIArray<ObRawExpr *> &exprs) const;
   int has_rand(bool &has_rand) const { return has_special_expr(CNT_RAND_FUNC, has_rand); }
   virtual int has_special_expr(const ObExprInfoFlag, bool &has) const;
+  int has_special_exprs(const ObSqlBitSet<> &flags, bool &has) const;
   const TransposeItem *get_transpose_item() const { return transpose_item_; }
   void set_transpose_item(const TransposeItem *transpose_item) { transpose_item_ = transpose_item; }
   const ObUnpivotInfo get_unpivot_info() const
@@ -1151,7 +1171,7 @@ public:
   int check_has_subquery_in_function_table(bool &has_subquery_in_function_table) const;
 
   int disable_writing_external_table(bool basic_stmt_is_dml = false);
-  int disable_writing_materialized_view();
+  int disable_writing_materialized_view() const;
   int formalize_query_ref_exprs();
 
   int formalize_query_ref_exec_params(ObStmtExecParamFormatter &formatter,
@@ -1164,14 +1184,19 @@ public:
 
   int do_formalize_query_ref_exprs_post();
 
+  int do_formalize_lateral_derived_table_pre();
+
+  int deep_copy_join_tables(ObIAllocator &allocator,
+                            ObIRawExprCopier &expr_copier,
+                            const ObDMLStmt &other);
+
+  int do_formalize_lateral_derived_table_post();
+
 protected:
   int create_table_item(TableItem *&table_item);
   //获取到stmt中所有查询相关的表达式(由查询语句中指定的属性生成的表达式)的root expr
 
 protected:
-  int deep_copy_join_tables(ObIAllocator &allocator,
-                            ObIRawExprCopier &expr_copier,
-                            const ObDMLStmt &other);
   int construct_join_table(const ObDMLStmt &other,
                            const JoinedTable &other_joined_table,
                            JoinedTable &joined_table);
@@ -1251,6 +1276,8 @@ protected:
    */
   int64_t dblink_id_;
   bool is_reverse_link_;
+  // fulltext search exprs
+  common::ObSEArray<ObMatchFunRawExpr*, 2, common::ModulePageAllocator, true> match_exprs_;
 };
 
 template <typename T>

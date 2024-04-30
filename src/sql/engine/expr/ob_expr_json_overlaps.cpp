@@ -43,12 +43,17 @@ int ObExprJsonOverlaps::calc_result_type2(ObExprResType &type,
   type.set_int32();
   type.set_precision(DEFAULT_PRECISION_FOR_BOOL);
   type.set_scale(ObAccuracy::DDL_DEFAULT_ACCURACY[ObIntType].scale_);
-  
-  if (OB_FAIL(ObJsonExprHelper::is_valid_for_json(type1, 1, N_JSON_OVERLAPS))) {
-    LOG_WARN("wrong type for json doc.", K(ret), K(type1.get_type()));
-  } else if (OB_FAIL(ObJsonExprHelper::is_valid_for_json(type2, 2, N_JSON_OVERLAPS))) {
-    LOG_WARN("wrong type for json doc.", K(ret), K(type2.get_type()));
+
+  if (ob_is_string_type(type1.get_type()) && type1.get_collation_type() != CS_TYPE_BINARY) {
+    type1.set_calc_type(ObJsonType);
+    type1.set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
   }
+
+  if (ob_is_string_type(type2.get_type()) && type2.get_collation_type() != CS_TYPE_BINARY) {
+    type2.set_calc_type(ObJsonType);
+    type2.set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
+  }
+  
   return ret;
 }
 

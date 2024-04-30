@@ -15,7 +15,6 @@
 
 #include "lib/utility/ob_print_utils.h"
 #include "common/ob_member_list.h"
-#include "share/ob_rpc_struct.h"
 #include "share/ob_delegate.h"
 #include "share/ob_tenant_info_proxy.h"
 #include "lib/worker.h"
@@ -383,7 +382,7 @@ public:
       const bool replay_allow_tablet_not_exist,
       ObTabletHandle &tablet_handle) const;
 
-  int flush_if_need(const bool need_flush);
+  int flush_to_recycle_clog();
   int try_sync_reserved_snapshot(const int64_t new_reserved_snapshot, const bool update_flag);
   int check_can_replay_clog(bool &can_replay);
   int check_ls_need_online(bool &need_online);
@@ -402,7 +401,6 @@ private:
   int stop_();
   void wait_();
   int prepare_for_safe_destroy_();
-  int flush_if_need_(const bool need_flush);
   int offline_(const int64_t start_ts);
   int offline_compaction_();
   int online_compaction_();
@@ -870,7 +868,16 @@ public:
   // tablet_freeze_with_rewrite_meta
   // @param [in] abs_timeout_ts, wait until timeout if lock conflict
   int tablet_freeze_with_rewrite_meta(const ObTabletID &tablet_id,
+                                      ObFuture<int> *result = nullptr,
                                       const int64_t abs_timeout_ts = INT64_MAX);
+  int tablet_freeze_task_for_direct_load(const ObTabletID &tablet_id,
+                                         const uint64_t epoch,
+                                         ObFuture<int> *result = nullptr);
+  int sync_tablet_freeze_for_direct_load(const ObTabletID &tablet_id,
+                                         const int64_t max_retry_time = 5LL * 1000LL * 1000LL /*5 seconds*/);
+  void async_tablet_freeze_for_direct_load(const ObTabletID &tablet_id);
+
+  DELEGATE_WITH_RET(ls_freezer_, wait_freeze_finished, int);
   // batch tablet freeze
   // @param [in] tablet_ids
   // @param [in] is_sync
@@ -929,6 +936,7 @@ public:
   DELEGATE_WITH_RET(reserved_snapshot_mgr_, add_dependent_medium_tablet, int);
   DELEGATE_WITH_RET(reserved_snapshot_mgr_, del_dependent_medium_tablet, int);
   int set_ls_migration_gc(bool &allow_gc);
+
 private:
   // StorageBaseUtil
   // table manager: create, remove and guard get.

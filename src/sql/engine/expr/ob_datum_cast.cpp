@@ -17,6 +17,7 @@
 #include "lib/utility/ob_fast_convert.h"
 #include "share/object/ob_obj_cast_util.h"
 #include "share/object/ob_obj_cast.h"
+#include "share/ob_json_access_utils.h"
 #include "sql/engine/expr/ob_datum_cast.h"
 #include "sql/engine/ob_exec_context.h"
 #include "sql/engine/expr/ob_expr_util.h"
@@ -30,12 +31,10 @@
 #include "sql/engine/expr/ob_expr_json_func_helper.h"
 #include "lib/geo/ob_geometry_cast.h"
 #include "sql/engine/expr/ob_geo_expr_utils.h"
-#ifdef OB_BUILD_ORACLE_XML
 #include "lib/udt/ob_udt_type.h"
 #include "sql/engine/expr/ob_expr_sql_udt_utils.h"
 #include "lib/xml/ob_xml_util.h"
 #include "sql/engine/expr/ob_expr_xml_func_helper.h"
-#endif
 #include "pl/ob_pl.h"
 #include "pl/ob_pl_user_type.h"
 #ifdef OB_BUILD_ORACLE_PL
@@ -987,7 +986,7 @@ static int common_string_int(const ObExpr &expr,
   int64_t out_val = 0;
   ret = common_string_integer(extra, in_type, in_cs_type, in_str, is_str_integer_cast, out_val);
   if (CAST_FAIL_CM(ret, extra)) {
-    LOG_WARN("string_int failed", K(ret));
+    LOG_WARN("string_int failed", K(ret), K(in_str));
   } else if (out_type < ObIntType &&
       CAST_FAIL_CM(int_range_check(out_type, out_val, out_val), extra)) {
     LOG_WARN("int_range_check failed", K(ret));
@@ -1093,8 +1092,20 @@ static OB_INLINE int common_double_float(const ObExpr &expr,
   ObObjType out_type = expr.datum_meta_.type_;
   // oracle support float/double infiniy, no need to verify data overflow.
   // C language would cast value to infinity, which is correct behavor in oracle mode
-  if (lib::is_mysql_mode() && CAST_FAIL(real_range_check(out_type, in_val, out_val))) {
-    LOG_WARN("real_range_check failed", K(ret), K(in_val));
+  if (lib::is_mysql_mode()) {
+    double truncated_val = in_val;
+    if (ob_is_float_tc(out_type) && CM_IS_COLUMN_CONVERT(expr.extra_)) {
+      // truncate float value if its ps information is fixed.
+      ObAccuracy accuracy(expr.datum_meta_.precision_, expr.datum_meta_.scale_);
+      if (CAST_FAIL(real_range_check(accuracy, truncated_val))) {
+        LOG_WARN("fail to real range check", K(ret));
+      } else {
+        out_val = static_cast<float>(truncated_val);
+      }
+    }
+    if (OB_SUCC(ret) && CAST_FAIL(real_range_check(out_type, truncated_val, out_val))) {
+      LOG_WARN("real_range_check failed", K(ret), K(in_val));
+    }
   }
   return ret;
 }
@@ -1254,6 +1265,7 @@ static OB_INLINE int common_string_number(const ObExpr &expr,
 }
 
 static int common_string_decimalint(const ObExpr &expr, const ObString &in_str,
+                                    const ObUserLoggingCtx *user_logging_ctx,
                                     ObDecimalIntBuilder &res_val)
 {// TODO: add cases
 #define SET_ZERO(int_type)                                                                         \
@@ -1355,7 +1367,8 @@ static int common_string_decimalint(const ObExpr &expr, const ObString &in_str,
       //  1 row in set (0.01 sec)
       if (ObDatumCast::need_scale_decimalint(in_scale, in_precision, out_scale, out_prec)) {
         if (OB_FAIL(ObDatumCast::common_scale_decimalint(decint, int_bytes, in_scale, out_scale,
-                                                         out_prec, expr.extra_, res_val))) {
+                                                         out_prec, expr.extra_, res_val,
+                                                         user_logging_ctx))) {
           LOG_WARN("scale decimal int failed", K(ret));
         }
       } else {
@@ -2148,7 +2161,8 @@ static int scale_const_decimalint_expr(const ObDecimalInt *decint, const int32_t
 int ObDatumCast::common_scale_decimalint(const ObDecimalInt *decint, const int32_t int_bytes,
                                          const ObScale in_scale, const ObScale out_scale,
                                          const ObPrecision out_prec, const ObCastMode cast_mode,
-                                         ObDecimalIntBuilder &val)
+                                         ObDecimalIntBuilder &val,
+                                         const ObUserLoggingCtx *user_logging_ctx)
 {
   int ret = OB_SUCCESS;
   ObDecimalIntBuilder max_v, min_v;
@@ -2179,6 +2193,12 @@ int ObDatumCast::common_scale_decimalint(const ObDecimalInt *decint, const int32
       val.from(max_v);
     } else {
       // do nothing
+    }
+    if (OB_SUCC(ret)) {
+      if (lib::is_mysql_mode() && CM_IS_COLUMN_CONVERT(cast_mode) && in_scale > out_scale &&
+            decimal_int_truncated_check(decint, int_bytes, in_scale - out_scale)) {
+        log_user_warning_truncated(user_logging_ctx);
+      }
     }
   } else {
     if (OB_FAIL(
@@ -2281,6 +2301,16 @@ int check_decimalint_accuracy(const ObCastMode cast_mode,
   return ret;
 }
 
+void log_user_warning_truncated(const ObUserLoggingCtx *user_logging_ctx)
+{
+  if (OB_ISNULL(user_logging_ctx) || user_logging_ctx->skip_logging()) {
+  } else {
+    const ObString *column_name = user_logging_ctx->get_column_name();
+    LOG_USER_WARN(OB_ERR_DATA_TRUNCATED, column_name->length(), column_name->ptr(),
+                  user_logging_ctx->get_row_num());
+  }
+}
+
 static int common_json_string(const ObExpr &expr,
                               ObEvalCtx &ctx,
                               ObIAllocator& allocator,
@@ -2295,7 +2325,7 @@ static int common_json_string(const ObExpr &expr,
               expr.args_[0]->datum_meta_, expr.args_[0]->obj_meta_.has_lob_header(), j_bin_str))) {
     LOG_WARN("fail to get real data.", K(ret), K(j_bin_str));
   } else {
-    ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length());
+    ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length(), &allocator);
     ObIJsonBase *j_base = &j_bin;
     ObJsonBuffer j_buf(&allocator);
     ObString j_str;
@@ -2765,9 +2795,14 @@ int cast_identity_enum_set(const sql::ObExpr &expr,
   UNUSED(cast_mode);
   UNUSED(str_values);
   EVAL_ARG() {
-    res_datum.set_enum(child_res->get_enum());
+    if (ob_is_null(expr.args_[0]->datum_meta_.type_)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("null type with non-null value", K(ret), K(child_res->get_enum()));
+    } else {
+      res_datum.set_enum(child_res->get_enum());
+    }
   }
-  return OB_SUCCESS;
+  return ret;
 }
 
 int cast_not_support_enum_set(const sql::ObExpr &expr,
@@ -3048,7 +3083,7 @@ CAST_FUNC_NAME(int, json)
     }
 
     ObString raw_bin;
-    if (OB_FAIL(j_base->get_raw_binary(raw_bin, &temp_allocator))) {
+    if (OB_FAIL(ObJsonWrapper::get_raw_binary(j_base, raw_bin, &temp_allocator))) {
       LOG_WARN("fail to get int json binary", K(ret), K(in_type), K(in_val));
     } else if (OB_FAIL(common_json_bin(expr, ctx, res_datum, raw_bin))) {
       LOG_WARN("fail to fill json bin lob locator", K(ret));
@@ -3314,7 +3349,7 @@ CAST_FUNC_NAME(uint, json)
     common::ObArenaAllocator &temp_allocator = tmp_alloc_g.get_allocator();
     ObString raw_bin;
 
-    if (OB_FAIL(j_base->get_raw_binary(raw_bin, &temp_allocator))) {
+    if (OB_FAIL(ObJsonWrapper::get_raw_binary(j_base, raw_bin, &temp_allocator))) {
       LOG_WARN("fail to get uint json binary", K(ret), K(in_type), K(in_val));
     } else if (OB_FAIL(common_json_bin(expr, ctx, res_datum, raw_bin))) {
       LOG_WARN("fail to fill json bin lob locator", K(ret));
@@ -3590,7 +3625,8 @@ CAST_FUNC_NAME(string, decimalint)
   {
     ObString in_str(child_res->len_, child_res->ptr_);
     ObDecimalIntBuilder res_val;
-    if (OB_FAIL(common_string_decimalint(expr, in_str, res_val))) {
+    if (OB_FAIL(common_string_decimalint(expr, in_str, ctx.exec_ctx_.get_user_logging_ctx(),
+                                         res_val))) {
       LOG_WARN("cast string to decimal int failed", K(ret));
     } else {
       res_datum.set_decimal_int(res_val.get_decimal_int(), res_val.get_int_bytes());
@@ -3707,7 +3743,7 @@ static int common_string_json(const ObExpr &expr,
 
       if (OB_SUCC(ret) && !is_null_res) {
         ObString raw_bin;
-        if (OB_FAIL(j_base->get_raw_binary(raw_bin, &temp_allocator))) {
+        if (OB_FAIL(ObJsonWrapper::get_raw_binary(j_base, raw_bin, &temp_allocator))) {
           LOG_WARN("fail to get string json binary", K(ret), K(in_type), K(raw_bin));
         } else if (OB_FAIL(common_json_bin(expr, ctx, res_datum, raw_bin))) {
           LOG_WARN("fail to fill json bin lob locator", K(ret));
@@ -3823,7 +3859,7 @@ CAST_FUNC_NAME(text, decimalint)
     ObDecimalIntBuilder res_val;
     if (OB_FAIL(get_text_full_data(expr, ctx, &temp_allocator, child_res, in_str))) {
       LOG_WARN("get string data failed", K(ret));
-    } else if (OB_FAIL(common_string_decimalint(expr, in_str, res_val))) {
+    } else if (OB_FAIL(common_string_decimalint(expr, in_str, ctx.exec_ctx_.get_user_logging_ctx(), res_val))) {
       LOG_WARN("cast string to decimal int failed", K(ret), K(in_str));
     } else {
       res_datum.set_decimal_int(res_val.get_decimal_int(), res_val.get_int_bytes());
@@ -4365,7 +4401,7 @@ static int common_number_json(const number::ObNumber &nmb, const ObObjType in_ty
     ObString raw_bin;
     if (OB_FAIL(tmp_num.from(nmb, temp_allocator))) {
       LOG_WARN("copy number failed", K(ret));
-    } else if (OB_FAIL(j_base->get_raw_binary(raw_bin, &temp_allocator))) {
+    } else if (OB_FAIL(ObJsonWrapper::get_raw_binary(j_base, raw_bin, &temp_allocator))) {
       LOG_WARN("fail to get number json binary", K(ret), K(in_type), K(nmb));
     } else if (OB_FAIL(common_json_bin(expr, ctx, res_datum, raw_bin))) {
       LOG_WARN("fail to fill json bin lob locator", K(ret));
@@ -4645,7 +4681,7 @@ CAST_FUNC_NAME(float, json)
     common::ObArenaAllocator &temp_allocator = tmp_alloc_g.get_allocator();
     ObString raw_bin;
     
-    if (OB_FAIL(j_base->get_raw_binary(raw_bin, &temp_allocator))) {
+    if (OB_FAIL(ObJsonWrapper::get_raw_binary(j_base, raw_bin, &temp_allocator))) {
       LOG_WARN("fail to get float json binary", K(ret), K(in_type), K(in_val));
     } else if (OB_FAIL(common_json_bin(expr, ctx, res_datum, raw_bin))) {
       LOG_WARN("fail to fill json bin lob locator", K(ret));
@@ -4738,7 +4774,8 @@ CAST_FUNC_NAME(float, decimalint)
       } else if (ObDatumCast::need_scale_decimalint(in_scale, in_prec, out_scale, out_prec)) {
         ObDecimalIntBuilder res_val;
         if (OB_FAIL(ObDatumCast::common_scale_decimalint(decint, val_len, in_scale, out_scale,
-                                            out_prec, expr.extra_, res_val))) {
+                                            out_prec, expr.extra_, res_val,
+                                            ctx.exec_ctx_.get_user_logging_ctx()))) {
           LOG_WARN("scale decimalint failed", K(ret));
         } else {
           res_datum.set_decimal_int(res_val.get_decimal_int(), res_val.get_int_bytes());
@@ -4889,7 +4926,8 @@ CAST_FUNC_NAME(double, decimalint)
       } else if (ObDatumCast::need_scale_decimalint(in_scale, in_prec, out_scale, out_prec)) {
         ObDecimalIntBuilder res_val;
         if (OB_FAIL(ObDatumCast::common_scale_decimalint(decint, val_len, in_scale, out_scale,
-                                            out_prec, expr.extra_, res_val))) {
+                                            out_prec, expr.extra_, res_val,
+                                            ctx.exec_ctx_.get_user_logging_ctx()))) {
           LOG_WARN("scale decimal int failed", K(ret));
         } else {
           res_datum.set_decimal_int(res_val.get_decimal_int(), res_val.get_int_bytes());
@@ -5026,7 +5064,7 @@ CAST_FUNC_NAME(double, json)
     ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);
     common::ObArenaAllocator &temp_allocator = tmp_alloc_g.get_allocator();
     ObString raw_bin;
-    if (OB_FAIL(j_base->get_raw_binary(raw_bin, &temp_allocator))) {
+    if (OB_FAIL(ObJsonWrapper::get_raw_binary(j_base, raw_bin, &temp_allocator))) {
       LOG_WARN("fail to get double json binary", K(ret), K(in_type), K(in_val));
     } else if (OB_FAIL(common_json_bin(expr, ctx, res_datum, raw_bin))) {
       LOG_WARN("fail to fill json bin lob locator", K(ret));
@@ -5511,7 +5549,7 @@ CAST_FUNC_NAME(datetime, json)
           common::ObArenaAllocator &temp_allocator = tmp_alloc_g.get_allocator();
           ObString raw_bin;
 
-          if (OB_FAIL(j_base->get_raw_binary(raw_bin, &temp_allocator))) {
+          if (OB_FAIL(ObJsonWrapper::get_raw_binary(j_base, raw_bin, &temp_allocator))) {
             LOG_WARN("fail to get datetime json binary", K(ret), K(in_type), K(in_val));
           } else if (OB_FAIL(common_json_bin(expr, ctx, res_datum, raw_bin))) {
             LOG_WARN("fail to fill json bin lob locator", K(ret));
@@ -5557,7 +5595,8 @@ CAST_FUNC_NAME(datetime, decimalint)
       } else if (ObDatumCast::need_scale_decimalint(in_scale, in_precision, out_scale, out_prec)) {
         ObDecimalIntBuilder res_val;
         if (OB_FAIL(ObDatumCast::common_scale_decimalint(decint, int_bytes, scale, out_scale,
-                                            out_prec, expr.extra_, res_val))) {
+                                            out_prec, expr.extra_, res_val,
+                                            ctx.exec_ctx_.get_user_logging_ctx()))) {
           LOG_WARN("scale decimal int failed", K(ret), K(scale), K(out_scale));
         } else {
           res_datum.set_decimal_int(res_val.get_decimal_int(), res_val.get_int_bytes());
@@ -5833,7 +5872,7 @@ CAST_FUNC_NAME(date, json)
         common::ObArenaAllocator &temp_allocator = tmp_alloc_g.get_allocator();
         ObString raw_bin;
 
-        if (OB_FAIL(j_base->get_raw_binary(raw_bin, &temp_allocator))) {
+        if (OB_FAIL(ObJsonWrapper::get_raw_binary(j_base, raw_bin, &temp_allocator))) {
           LOG_WARN("fail to get date json binary", K(ret), K(in_type), K(in_val));
         } else if (OB_FAIL(common_json_bin(expr, ctx, res_datum, raw_bin))) {
           LOG_WARN("fail to fill json bin lob locator", K(ret));
@@ -6120,7 +6159,7 @@ CAST_FUNC_NAME(year, json)
       common::ObArenaAllocator &temp_allocator = tmp_alloc_g.get_allocator();
       ObString raw_bin;
       
-      if (OB_FAIL(j_base->get_raw_binary(raw_bin, &temp_allocator))) {
+      if (OB_FAIL(ObJsonWrapper::get_raw_binary(j_base, raw_bin, &temp_allocator))) {
         LOG_WARN("fail to get year json binary", K(ret), K(in_type), K(in_val));
       } else if (OB_FAIL(common_json_bin(expr, ctx, res_datum, raw_bin))) {
         LOG_WARN("fail to fill json bin lob locator", K(ret));
@@ -6516,7 +6555,7 @@ CAST_FUNC_NAME(bit, json)
       ObIJsonBase *j_base = &j_opaque;
       ObString raw_bin;
 
-      if (OB_FAIL(j_base->get_raw_binary(raw_bin, &temp_allocator))) {
+      if (OB_FAIL(ObJsonWrapper::get_raw_binary(j_base, raw_bin, &temp_allocator))) {
         LOG_WARN("fail to get int json binary", K(ret), K(in_val), K(buf), K(BUF_LEN));
       } else if (OB_FAIL(common_json_bin(expr, ctx, res_datum, raw_bin))) {
         LOG_WARN("fail to fill json bin lob locator", K(ret));
@@ -7153,7 +7192,7 @@ CAST_FUNC_NAME(time, json)
         common::ObArenaAllocator &temp_allocator = tmp_alloc_g.get_allocator();
         ObString raw_bin;
 
-        if (OB_FAIL(j_base->get_raw_binary(raw_bin, &temp_allocator))) {
+        if (OB_FAIL(ObJsonWrapper::get_raw_binary(j_base, raw_bin, &temp_allocator))) {
           LOG_WARN("fail to get time json binary", K(ret), K(in_type), K(in_val));
         } else if (OB_FAIL(common_json_bin(expr, ctx, res_datum, raw_bin))) {
           LOG_WARN("fail to fill json bin lob locator", K(ret));
@@ -7187,7 +7226,8 @@ CAST_FUNC_NAME(time, decimalint)
     } else if (ObDatumCast::need_scale_decimalint(in_scale, in_prec, out_scale, out_prec)) {
       ObDecimalIntBuilder res_val;
       if (OB_FAIL(ObDatumCast::common_scale_decimalint(decint, int_bytes, in_scale, out_scale, out_prec,
-                                          expr.extra_, res_val))) {
+                                          expr.extra_, res_val,
+                                          ctx.exec_ctx_.get_user_logging_ctx()))) {
         LOG_WARN("scale decimal int failed", K(ret));
       } else {
         res_datum.set_decimal_int(res_val.get_decimal_int(), res_val.get_int_bytes());
@@ -7908,7 +7948,7 @@ CAST_FUNC_NAME(json, int)
                 expr.args_[0]->datum_meta_, expr.args_[0]->obj_meta_.has_lob_header(), j_bin_str))) {
       LOG_WARN("fail to get real data.", K(ret), K(j_bin_str));
     } else {
-      ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length());
+      ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length(), &temp_allocator);
       ObIJsonBase *j_base = &j_bin;
 
       if (OB_FAIL(j_bin.reset_iter())) {
@@ -7942,7 +7982,7 @@ CAST_FUNC_NAME(json, uint)
                 expr.args_[0]->datum_meta_, expr.args_[0]->obj_meta_.has_lob_header(), j_bin_str))) {
       LOG_WARN("fail to get real data.", K(ret), K(j_bin_str));
     } else {
-      ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length());
+      ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length(), &temp_allocator);
       ObIJsonBase *j_base = &j_bin;
 
       if (OB_FAIL(j_bin.reset_iter())) {
@@ -7977,7 +8017,7 @@ CAST_FUNC_NAME(json, double)
                 expr.args_[0]->datum_meta_, expr.args_[0]->obj_meta_.has_lob_header(), j_bin_str))) {
       LOG_WARN("fail to get real data.", K(ret), K(j_bin_str));
     } else {
-      ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length());
+      ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length(), &temp_allocator);
       ObIJsonBase *j_base = &j_bin;
 
       if (OB_FAIL(j_bin.reset_iter())) {
@@ -8011,7 +8051,7 @@ CAST_FUNC_NAME(json, float)
                 expr.args_[0]->datum_meta_, expr.args_[0]->obj_meta_.has_lob_header(), j_bin_str))) {
       LOG_WARN("fail to get real data.", K(ret), K(j_bin_str));
     } else {
-      ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length());
+      ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length(), &temp_allocator);
       ObIJsonBase *j_base = &j_bin;
 
       if (OB_FAIL(j_bin.reset_iter())) {
@@ -8040,7 +8080,7 @@ static int common_json_number(common::ObDatum &child_res, const ObExpr &expr,
         j_bin_str))) {
     LOG_WARN("fail to get real data", K(ret), K(j_bin_str));
   } else {
-    ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length());
+    ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length(), &alloc);
     ObIJsonBase *j_base = &j_bin;
 
     if (OB_FAIL(j_bin.reset_iter())) {
@@ -8092,7 +8132,7 @@ CAST_FUNC_NAME(json, datetime)
                   expr.args_[0]->datum_meta_, expr.args_[0]->obj_meta_.has_lob_header(), j_bin_str))) {
         LOG_WARN("fail to get real data.", K(ret), K(j_bin_str));
       } else {
-        ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length());
+        ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length(), &temp_allocator);
         ObIJsonBase *j_base = &j_bin;
 
         if (OB_FAIL(j_bin.reset_iter())) {
@@ -8124,7 +8164,7 @@ CAST_FUNC_NAME(json, date)
                 expr.args_[0]->datum_meta_, expr.args_[0]->obj_meta_.has_lob_header(), j_bin_str))) {
       LOG_WARN("fail to get real data.", K(ret), K(j_bin_str));
     } else {
-      ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length());
+      ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length(), &temp_allocator);
       ObIJsonBase *j_base = &j_bin;
 
       if (OB_FAIL(j_bin.reset_iter())) {
@@ -8155,7 +8195,7 @@ CAST_FUNC_NAME(json, time)
                 expr.args_[0]->datum_meta_, expr.args_[0]->obj_meta_.has_lob_header(), j_bin_str))) {
       LOG_WARN("fail to get real data.", K(ret), K(j_bin_str));
     } else {
-      ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length());
+      ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length(), &temp_allocator);
       ObIJsonBase *j_base = &j_bin;
 
       if (OB_FAIL(j_bin.reset_iter())) {
@@ -8187,7 +8227,7 @@ CAST_FUNC_NAME(json, year)
                 expr.args_[0]->datum_meta_, expr.args_[0]->obj_meta_.has_lob_header(), j_bin_str))) {
       LOG_WARN("fail to get real data.", K(ret), K(j_bin_str));
     } else {
-      ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length());
+      ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length(), &temp_allocator);
       ObIJsonBase *j_base = &j_bin;
 
       if (OB_FAIL(j_bin.reset_iter())) {
@@ -8219,7 +8259,7 @@ CAST_FUNC_NAME(json, raw)
     ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);
     common::ObArenaAllocator &temp_allocator = tmp_alloc_g.get_allocator();
     ObString j_bin_str = child_res->get_string();
-    ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length());
+    ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length(), &temp_allocator);
     ObIJsonBase *j_base = &j_bin;
     ObJsonBuffer j_buf(&temp_allocator);
     ObDatum t_res_datum;
@@ -8270,7 +8310,7 @@ CAST_FUNC_NAME(json, string)
                 expr.args_[0]->datum_meta_, expr.args_[0]->obj_meta_.has_lob_header(), j_bin_str))) {
       LOG_WARN("fail to get real data.", K(ret), K(j_bin_str));
     } else {
-      ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length());
+      ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length(), &temp_allocator);
       ObIJsonBase *j_base = &j_bin;
       ObJsonBuffer j_buf(&temp_allocator);
 
@@ -8325,7 +8365,7 @@ CAST_FUNC_NAME(json, bit)
                 expr.args_[0]->datum_meta_, expr.args_[0]->obj_meta_.has_lob_header(), j_bin_str))) {
       LOG_WARN("fail to get real data.", K(ret), K(j_bin_str));
     } else {
-      ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length());
+      ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length(), &temp_allocator);
       ObIJsonBase *j_base = &j_bin;
       uint64_t out_val;
       ObObjType out_type = expr.datum_meta_.type_;
@@ -8358,7 +8398,7 @@ CAST_FUNC_NAME(json, otimestamp)
                 expr.args_[0]->datum_meta_, expr.args_[0]->obj_meta_.has_lob_header(), j_bin_str))) {
       LOG_WARN("fail to get real data.", K(ret), K(j_bin_str));
     } else {
-      ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length());
+      ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length(), &temp_allocator);
       ObIJsonBase *j_base = &j_bin;
 
       if (OB_FAIL(j_bin.reset_iter())) {
@@ -8773,7 +8813,8 @@ CAST_FUNC_NAME(geometry, decimalint)
       ObDecimalIntBuilder res_val;
       if (OB_FAIL(ObTextStringHelper::read_real_string_data(temp_allocator, *child_res, expr.args_[0]->datum_meta_, expr.args_[0]->obj_meta_.has_lob_header(), in_str))) {
         LOG_WARN("failed to get real data", K(ret), K(in_str));
-      } else if (OB_FAIL(common_string_decimalint(expr, in_str, res_val))) {
+      } else if (OB_FAIL(common_string_decimalint(expr, in_str,
+                                                  ctx.exec_ctx_.get_user_logging_ctx(), res_val))) {
         LOG_WARN("failed to cast string to decimal int", K(ret), K(in_str));
         ret = OB_ERR_TRUNCATED_WRONG_VALUE_FOR_FIELD; // compatible with mysql
       } else {
@@ -9015,7 +9056,6 @@ CAST_FUNC_NAME(string, udt)
 {
   EVAL_STRING_ARG()
   {
-#ifdef OB_BUILD_ORACLE_XML
   const ObObjMeta &in_obj_meta = expr.args_[0]->obj_meta_;
   ObObjType in_type = expr.args_[0]->datum_meta_.type_;
   ObObjType out_type = expr.datum_meta_.type_;
@@ -9063,9 +9103,6 @@ CAST_FUNC_NAME(string, udt)
       LOG_WARN("pack_xml_res failed", K(ret));
     }
   }
-#else
-  ret = OB_NOT_SUPPORTED;
-#endif
   }
   return ret;
 }
@@ -9089,7 +9126,6 @@ CAST_FUNC_NAME(udt, string)
     // udt(xmltype) can be null: select dump(xmlparse(document NULL)) from dual;
     res_datum.set_null();
   } else {
-#ifdef OB_BUILD_ORACLE_XML
     ObString blob_data = child_res->get_string();
     ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);
     common::ObArenaAllocator &temp_allocator = tmp_alloc_g.get_allocator();
@@ -9120,9 +9156,6 @@ CAST_FUNC_NAME(udt, string)
         LOG_WARN("fail to deep copy str", K(ret));
       }
     }
-#else
-  ret = OB_NOT_SUPPORTED;
-#endif
   }
   return ret;
 }
@@ -9151,7 +9184,6 @@ CAST_FUNC_NAME(udt, udt)
 {
   EVAL_STRING_ARG()
   {
-#ifdef OB_BUILD_ORACLE_XML
     const ObObjMeta &in_obj_meta = expr.args_[0]->obj_meta_;
     const ObObjMeta &out_obj_meta = expr.obj_meta_;
     uint64_t in_udt_id = T_OBJ_NOT_SUPPORTED;
@@ -9171,9 +9203,6 @@ CAST_FUNC_NAME(udt, udt)
     } else {
       ret = cast_udt_to_other_not_support(expr, ctx, res_datum);
     }
-#else
-  ret = OB_NOT_SUPPORTED;
-#endif
   }
   return ret;
 }
@@ -9182,7 +9211,7 @@ CAST_FUNC_NAME(pl_extend, string)
 {
   EVAL_STRING_ARG()
   {
-#ifdef OB_BUILD_ORACLE_XML
+#ifdef OB_BUILD_ORACLE_PL
     const ObObjMeta &in_obj_meta = expr.args_[0]->obj_meta_;
     const ObObjMeta &out_obj_meta = expr.obj_meta_;
      if (pl::PL_OPAQUE_TYPE == in_obj_meta.get_extend_type()) {
@@ -9402,7 +9431,7 @@ CAST_FUNC_NAME(pl_extend, sql_udt)
   // should set subschema_id on output obj_meta in code generation
   EVAL_STRING_ARG()
   {
-#ifdef OB_BUILD_ORACLE_XML
+#ifdef OB_BUILD_ORACLE_PL
     const ObObjMeta &in_obj_meta = expr.args_[0]->obj_meta_;
     const ObObjType in_type = in_obj_meta.get_type();
     const ObObjMeta &out_obj_meta = expr.obj_meta_;
@@ -9836,7 +9865,7 @@ CAST_FUNC_NAME(number, decimalint)
     } else if (ObDatumCast::need_scale_decimalint(in_scale, int_bytes, out_scale, out_bytes)) {
       ObDecimalIntBuilder res_val;
       if (OB_FAIL(ObDatumCast::common_scale_decimalint(decint, int_bytes, in_scale, out_scale, out_prec,
-                                          expr.extra_, res_val))) {
+                                          expr.extra_, res_val, ctx.exec_ctx_.get_user_logging_ctx()))) {
         LOG_WARN("scale decimal int failed", K(ret), K(in_scale), K(out_scale));
       } else {
         res_datum.set_decimal_int(res_val.get_decimal_int(), res_val.get_int_bytes());
@@ -10633,7 +10662,8 @@ CAST_FUNC_NAME(decimalint, decimalint)
     if (ObDatumCast::need_scale_decimalint(in_scale, in_prec, out_scale, out_prec)) {
       ObDecimalIntBuilder res_val;
       if (OB_FAIL(ObDatumCast::common_scale_decimalint(child_res->decimal_int_, child_res->len_, in_scale,
-                                          out_scale, out_prec, expr.extra_, res_val))) {
+                                          out_scale, out_prec, expr.extra_, res_val,
+                                          ctx.exec_ctx_.get_user_logging_ctx()))) {
         LOG_WARN("scale decimal int failed", K(ret));
       } else {
         res_datum.set_decimal_int(res_val.get_decimal_int(), res_val.get_int_bytes());
@@ -11271,11 +11301,16 @@ int number_range_check_v2(const ObCastMode &cast_mode,
         LOG_WARN("out_val.from failed", K(ret), K(in_val));
       } else if (OB_FAIL(out_val.round(scale))) {
         LOG_WARN("out_val.round failed", K(ret), K(scale));
-      } else if (CM_IS_ERROR_ON_SCALE_OVER(cast_mode) &&
-        in_val.compare(out_val) != 0) {
-        ret = OB_OPERATE_OVERFLOW;
-        LOG_WARN("input value is out of range.", K(scale), K(in_val));
-      } else {
+      } else if (!in_val.is_equal(out_val)) {
+        if (CM_IS_ERROR_ON_SCALE_OVER(cast_mode)) {
+          ret = OB_OPERATE_OVERFLOW;
+          LOG_WARN("input value is out of range.", K(ret), K(scale), K(in_val));
+        } else if (lib::is_mysql_mode()) {
+          // MySQL emits warnings for decimal column truncation, regardless of sql_mode settings.
+          warning = OB_ERR_DATA_TOO_LONG;
+        }
+      }
+      if (OB_SUCC(ret)) {
         res_datum.set_number(out_val);
         is_finish = true;
       }

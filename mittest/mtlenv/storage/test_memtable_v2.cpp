@@ -47,19 +47,19 @@ int ObMvccWriteGuard::write_auth(storage::ObStoreCtx &) { return OB_SUCCESS; }
 
 ObMvccWriteGuard::~ObMvccWriteGuard() {}
 
-void *ObMemtableCtx::callback_alloc(const int64_t size)
+void *ObMemtableCtx::alloc_mvcc_row_callback()
 {
   void* ret = NULL;
-  if (OB_ISNULL(ret = std::malloc(size))) {
-    TRANS_LOG_RET(ERROR, OB_ALLOCATE_MEMORY_FAILED, "callback alloc error, no memory", K(size), K(*this));
+  if (OB_ISNULL(ret = std::malloc(sizeof(ObMvccRowCallback)))) {
+    TRANS_LOG_RET(ERROR, OB_ALLOCATE_MEMORY_FAILED, "callback alloc error, no memory", K(*this));
   } else {
-    ATOMIC_FAA(&callback_mem_used_, size);
+    ATOMIC_FAA(&callback_mem_used_, sizeof(ObMvccRowCallback));
     ATOMIC_INC(&callback_alloc_count_);
   }
   return ret;
 }
 
-void ObMemtableCtx::callback_free(ObITransCallback *cb)
+void ObMemtableCtx::free_mvcc_row_callback(ObITransCallback *cb)
 {
   if (OB_ISNULL(cb)) {
     TRANS_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "cb is null, unexpected error", KP(cb), K(*this));
@@ -412,7 +412,6 @@ public:
     store_ctx->mvcc_acc_ctx_.tx_ctx_ = tx_ctx;
     store_ctx->mvcc_acc_ctx_.mem_ctx_ = &(tx_ctx->mt_ctx_);
     store_ctx->mvcc_acc_ctx_.mem_ctx_->set_trans_ctx(tx_ctx);
-    store_ctx->mvcc_acc_ctx_.mem_ctx_->get_tx_table_guard()->init(&tx_table_);
     tx_ctx->mt_ctx_.log_gen_.set(&(tx_ctx->mt_ctx_.trans_mgr_),
                                  &(tx_ctx->mt_ctx_));
     store_ctx->mvcc_acc_ctx_.snapshot_.tx_id_ = tx_id;
@@ -491,7 +490,7 @@ public:
     if (OB_FAIL(context.init(query_flag, *wtx, allocator_, trans_version_range))) {
       TRANS_LOG(WARN, "Fail to init access context", K(ret));
     }
-    ret = memtable->set(iter_param_, context, columns_, write_row, encrypt_meta_);
+    ret = memtable->set(iter_param_, context, columns_, write_row, encrypt_meta_, false);
     if (ret == -5024) {
       TRANS_LOG(ERROR, "nima", K(ret), K(write_row));
     }
@@ -3405,14 +3404,16 @@ TEST_F(TestMemtableV2, test_seq_set_violation)
                                              context,
                                              columns_,
                                              write_row,
-                                             encrypt_meta_)));
+                                             encrypt_meta_,
+                                             false)));
 
   start_pdml_stmt(wtx, scn_3000, read_seq_no, 1000000000/*expire_time*/);
   EXPECT_EQ(OB_ERR_PRIMARY_KEY_DUPLICATE, (ret = memtable->set(iter_param_,
                                                                context,
                                                                columns_,
                                                                write_row,
-                                                               encrypt_meta_)));
+                                                               encrypt_meta_,
+                                                               false)));
   memtable->destroy();
 }
 
@@ -3579,10 +3580,13 @@ int ObTxCtxTable::release_ref_()
 
   return ret;
 }
+void ObITabletMemtable::unset_logging_blocked_for_active_memtable_()
+{
+}
 } // namespace storage
 
-namespace memtable
-{
+namespace memtable{
+
 int ObMemtable::lock_row_on_frozen_stores_(
     const storage::ObTableIterParam &,
     const ObTxNodeArg &,
@@ -3597,9 +3601,6 @@ int ObMemtable::lock_row_on_frozen_stores_(
   } else {
     return OB_SUCCESS;
   }
-}
-void ObMemtable::unset_logging_blocked_for_active_memtable()
-{
 }
 }
 

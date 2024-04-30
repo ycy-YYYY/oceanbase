@@ -122,7 +122,9 @@ public:
       das_task_node_(),
       agg_tasks_(nullptr),
       cur_agg_list_(nullptr),
-      op_result_(nullptr)
+      op_result_(nullptr),
+      attach_ctdef_(nullptr),
+      attach_rtdef_(nullptr)
   {
     das_task_node_.get_data() = this;
   }
@@ -137,6 +139,8 @@ public:
   void set_ls_id(const share::ObLSID &ls_id) { ls_id_ = ls_id; }
   const share::ObLSID &get_ls_id() const { return ls_id_; }
   void set_tablet_loc(const ObDASTabletLoc *tablet_loc) { tablet_loc_ = tablet_loc; }
+  // tablet_loc_ will not be serialized, therefore it cannot be accessed during the execution phase
+  // of DASTaskOp. It can only be touched through das_ref and data_access_service layer.
   const ObDASTabletLoc *get_tablet_loc() const { return tablet_loc_; }
   inline int64_t get_ref_table_id() const { return tablet_loc_->loc_meta_->ref_table_id_; }
   virtual int decode_task_result(ObIDASTaskResult *task_result) = 0;
@@ -166,6 +170,9 @@ public:
   DasTaskNode &get_node() { return das_task_node_; }
   int get_errcode() const { return errcode_; }
   void set_errcode(int errcode) { errcode_ = errcode; }
+  void set_attach_ctdef(const ObDASBaseCtDef *attach_ctdef) { attach_ctdef_ = attach_ctdef; }
+  void set_attach_rtdef(ObDASBaseRtDef *attach_rtdef) { attach_rtdef_ = attach_rtdef; }
+  ObDASBaseRtDef *get_attach_rtdef() { return attach_rtdef_; }
   VIRTUAL_TO_STRING_KV(K_(tenant_id),
                        K_(task_id),
                        K_(op_type),
@@ -252,18 +259,32 @@ protected:
   int16_t write_branch_id_;  // branch id for parallel write, required for partially rollback
   common::ObTabletID tablet_id_;
   share::ObLSID ls_id_;
-  const ObDASTabletLoc *tablet_loc_; //does not need serialize it
+  // tablet_loc_ will not be serialized, therefore it cannot be accessed during the execution phase
+  // of DASTaskOp. It can only be touched through das_ref and data_access_service layer.
+  const ObDASTabletLoc *tablet_loc_;
   common::ObIAllocator &op_alloc_;
-  //in DML DAS Task,related_ctdefs_ means related local index ctdefs
-  //in Scan DAS Task, related_ctdefs_ have only one element, means the lookup ctdef
+  //In DML DAS Task,related_ctdefs_ means related local index ctdefs
+  //In Scan DAS Task for normal secondary index, related_ctdefs_ have only one element, means the lookup ctdef
+  //In Scan DAS TASK for domain index, related_ctdefs_ means related local index scan ctdefs,
+  //For detailed arrangement information, please refer to the description in ObDASScanOp.
+  //The related_ctdef is used solely to retain the fundamental computational information executed with the data table and its index table,
+  //such as insert_ctdef, scan_ctdef, etc.
+  //It does not include other pushed-down operations bound and executed with the task,
+  //such as aux lookup ctdef, etc.
   DASCtDefFixedArray related_ctdefs_;
   DASRtDefFixedArray related_rtdefs_;
+  //The related_tablet_ids_ usually correspond to the related_ctdefs information.
   ObTabletIDFixedArray related_tablet_ids_;
   ObDasTaskStatus task_status_;  // do not serialize
   DasTaskNode das_task_node_;  // tasks's linked list node, do not serialize
-  ObDasAggregatedTasks *agg_tasks_;  // task's agg task, do not serialize
-  DasTaskLinkedList *cur_agg_list_;  // task's agg_list, do not serialize
+  ObDasAggregatedTasks *agg_tasks_;  //task's agg task, do not serialize
+  DasTaskLinkedList *cur_agg_list_;  //task's agg_list, do not serialize
   ObIDASTaskResult *op_result_;
+  //The attach_ctdef describes the computations that are pushed down and executed as an attachment to the ObDASTaskOp,
+  //such as the back table operation for full-text indexes,
+  //rowkey merging for index merge operations, and so on.
+  const ObDASBaseCtDef *attach_ctdef_;
+  ObDASBaseRtDef *attach_rtdef_;
 };
 typedef common::ObObjStore<ObIDASTaskOp*, common::ObIAllocator&> DasTaskList;
 typedef DasTaskList::Iterator DASTaskIter;
@@ -412,17 +433,22 @@ struct DASCtEncoder
   static int encode(char *buf, const int64_t buf_len, int64_t &pos, const T *val)
   {
     int ret = common::OB_SUCCESS;
-    int64_t idx = 0;
+    int64_t idx = common::OB_INVALID_INDEX;
     const ObDASBaseCtDef *ctdef = val;
     ObDASRemoteInfo *remote_info = ObDASRemoteInfo::get_remote_info();
-    if (OB_ISNULL(val) || OB_ISNULL(remote_info)) {
+    if (OB_ISNULL(remote_info)) {
       ret = common::OB_ERR_UNEXPECTED;
-      SQL_DAS_LOG(WARN, "val is nullptr", K(ret), K(val), K(remote_info));
+      SQL_DAS_LOG(WARN, "val is nullptr", K(ret), K(remote_info));
+    } else if (OB_ISNULL(val)) {
+      idx = common::OB_INVALID_INDEX;
     } else if (!common::has_exist_in_array(remote_info->ctdefs_, ctdef, &idx)) {
       ret = common::OB_ERR_UNEXPECTED;
       SQL_DAS_LOG(WARN, "val not found in ctdefs", K(ret), K(val), KPC(val));
-    } else if (OB_FAIL(common::serialization::encode_i32(buf, buf_len, pos, static_cast<int32_t>(idx)))) {
-      SQL_DAS_LOG(WARN, "encode idx failed", K(ret), K(idx));
+    }
+    if (OB_SUCC(ret)) {
+      if (OB_FAIL(common::serialization::encode_i32(buf, buf_len, pos, static_cast<int32_t>(idx)))) {
+        SQL_DAS_LOG(WARN, "encode idx failed", K(ret), K(idx));
+      }
     }
     return ret;
   }
@@ -430,13 +456,15 @@ struct DASCtEncoder
   static int decode(const char *buf, const int64_t data_len, int64_t &pos, const T *&val)
   {
     int ret = common::OB_SUCCESS;
-    int32_t idx = 0;
+    int32_t idx = common::OB_INVALID_INDEX;
     ObDASRemoteInfo *remote_info = ObDASRemoteInfo::get_remote_info();
     if (OB_ISNULL(remote_info)) {
       ret = common::OB_ERR_UNEXPECTED;
       SQL_DAS_LOG(WARN, "remote_info is nullptr", K(ret), K(remote_info));
     } else if (OB_FAIL(common::serialization::decode_i32(buf, data_len, pos, &idx))) {
       SQL_DAS_LOG(WARN, "decode idx failed", K(ret), K(idx));
+    } else if (OB_UNLIKELY(common::OB_INVALID_INDEX == idx)) {
+      val = nullptr;
     } else if (OB_UNLIKELY(idx < 0) || OB_UNLIKELY(idx >= remote_info->ctdefs_.count())) {
       ret = common::OB_ERR_UNEXPECTED;
       SQL_DAS_LOG(WARN, "idx is invalid", K(ret), K(idx), K(remote_info->ctdefs_.count()));
@@ -449,7 +477,7 @@ struct DASCtEncoder
   static int64_t encoded_length(const T *val)
   {
     UNUSED(val);
-    int32_t idx = 0;
+    int32_t idx = common::OB_INVALID_INDEX;
     return common::serialization::encoded_length_i32(idx);
   }
 };
@@ -460,17 +488,22 @@ struct DASRtEncoder
   static int encode(char *buf, const int64_t buf_len, int64_t &pos, const T *val)
   {
     int ret = common::OB_SUCCESS;
-    int64_t idx = 0;
+    int64_t idx = common::OB_INVALID_INDEX;
     ObDASBaseRtDef *rtdef = const_cast<T*>(val);
     ObDASRemoteInfo *remote_info = ObDASRemoteInfo::get_remote_info();
-    if (OB_ISNULL(val) || OB_ISNULL(remote_info)) {
+    if (OB_ISNULL(remote_info)) {
       ret = common::OB_ERR_UNEXPECTED;
       SQL_DAS_LOG(WARN, "val is nullptr", K(ret), K(val), K(remote_info));
+    } else if (OB_ISNULL(val)) {
+      idx = common::OB_INVALID_INDEX;
     } else if (!common::has_exist_in_array(remote_info->rtdefs_, rtdef, &idx)) {
       ret = common::OB_ERR_UNEXPECTED;
       SQL_DAS_LOG(WARN, "val not found in rtdefs", K(ret), K(val), KPC(val));
-    } else if (OB_FAIL(common::serialization::encode_i32(buf, buf_len, pos, static_cast<int32_t>(idx)))) {
-      SQL_DAS_LOG(WARN, "encode idx failed", K(ret), K(idx));
+    }
+    if (OB_SUCC(ret)) {
+      if (OB_FAIL(common::serialization::encode_i32(buf, buf_len, pos, static_cast<int32_t>(idx)))) {
+        SQL_DAS_LOG(WARN, "encode idx failed", K(ret), K(idx));
+      }
     }
     return ret;
   }
@@ -485,6 +518,8 @@ struct DASRtEncoder
       SQL_DAS_LOG(WARN, "remote_info is nullptr", K(ret), K(remote_info));
     } else if (OB_FAIL(common::serialization::decode_i32(buf, data_len, pos, &idx))) {
       SQL_DAS_LOG(WARN, "decode idx failed", K(ret), K(idx));
+    } else if (OB_UNLIKELY(common::OB_INVALID_INDEX == idx)) {
+      val = nullptr;
     } else if (OB_UNLIKELY(idx < 0) || OB_UNLIKELY(idx >= remote_info->rtdefs_.count())) {
       ret = common::OB_ERR_UNEXPECTED;
       SQL_DAS_LOG(WARN, "idx is invalid", K(ret), K(idx), K(remote_info->rtdefs_.count()));

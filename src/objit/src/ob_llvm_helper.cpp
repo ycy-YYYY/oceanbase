@@ -505,7 +505,10 @@ int ObLLVMHelper::init()
   int ret = OB_SUCCESS;
   OB_LLVM_MALLOC_GUARD("PlJit");
 
-  if (nullptr == (jc_ = OB_NEWx(core::JitContext, (&allocator_)))) {
+  if (is_inited_) {
+    ret = OB_INIT_TWICE;
+    LOG_WARN("ObLLVMHelper has been inited", K(ret), K(lbt()));
+  } else if (nullptr == (jc_ = OB_NEWx(core::JitContext, (&allocator_)))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("failed to alloc memory for jit context", K(ret));
 #ifndef ORC2
@@ -513,10 +516,24 @@ int ObLLVMHelper::init()
 #else
   } else if (nullptr == (jit_ = core::ObOrcJit::create(allocator_))) {
 #endif
+    jc_->~JitContext();
+    allocator_.free(jc_);
+    jc_ = nullptr;
+
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("failed to alloc memory for jit", K(ret));
+  } else if (OB_FAIL(jc_->InitializeModule(*jit_))) {
+    jit_->~ObOrcJit();
+    allocator_.free(jit_);
+    jit_ = nullptr;
+
+    jc_->~JitContext();
+    allocator_.free(jc_);
+    jc_ = nullptr;
+
+    LOG_WARN("failed to initialize module", K(ret));
   } else {
-    jc_->InitializeModule(*jit_);
+    is_inited_ = true;
   }
 
   return ret;
@@ -2224,6 +2241,21 @@ ObDWARFHelper::~ObDWARFHelper() {
     Allocator.free(Context);
     Context = nullptr;
   }
+}
+
+int ObLLVMHelper::add_compiled_object(size_t length, const char *ptr)
+{
+  int ret = OB_SUCCESS;
+  CK (OB_NOT_NULL(jit_));
+  CK (OB_NOT_NULL(ptr));
+  CK (OB_LIKELY(length > 0));
+  OX (jit_->add_compiled_object(length, ptr));
+  return ret;
+}
+
+const ObString& ObLLVMHelper::get_compiled_object()
+{
+  return jit_->get_compiled_object();
 }
 
 } // namespace jit
