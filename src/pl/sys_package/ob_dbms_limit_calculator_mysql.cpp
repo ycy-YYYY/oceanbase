@@ -16,6 +16,7 @@
 #include "lib/utility/ob_macro_utils.h"
 #include "lib/utility/utility.h"
 #include "share/inner_table/ob_inner_table_schema_constants.h"
+#include "share/ob_all_server_tracer.h"
 #include "share/resource_limit_calculator/ob_resource_limit_calculator.h"
 #include "share/ob_unit_table_operator.h"
 #include "share/ob_all_server_tracer.h"
@@ -91,6 +92,7 @@ int ObDBMSLimitCalculator::phy_res_calculate_by_unit(
   char* ptr = NULL;
   int64_t pos = 0;
   int64_t timeout = -1;
+  bool is_active = false;
   const int64_t curr_tenant_id = MTL_ID();
   if (!is_sys_tenant(curr_tenant_id)) {
     ret = OB_OP_NOT_ALLOW;
@@ -103,6 +105,18 @@ int ObDBMSLimitCalculator::phy_res_calculate_by_unit(
   } else if (FALSE_IT(addr_str = params.at(1).get_varchar())) {
   } else if (OB_FAIL(addr.parse_from_string(addr_str))) {
     LOG_WARN("parse address failed", K(ret), K(addr_str));
+  } else if (OB_FAIL(SVR_TRACER.check_server_alive(addr, is_active))) {
+    LOG_WARN("check server active failed", K(ret), K(addr));
+    if (OB_ENTRY_NOT_EXIST == ret) {
+      is_active = false;
+      ret = OB_SUCCESS;
+    }
+  }
+  if (OB_FAIL(ret)) {
+  } else if (!is_active) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_USER_ERROR(OB_INVALID_ARGUMENT, "calculate physical resource needed by unit. "
+                                        "The observer is not active or not in cluster.");
   } else if (OB_ISNULL(ptr = static_cast<char *>(ctx.get_allocator().alloc(MAX_RES_LEN)))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("allocate memory failed", K(ret), K(MAX_RES_LEN));
@@ -267,7 +281,7 @@ int ObDBMSLimitCalculator::get_max_value_of_logical_res_(
       }
     }//end for j for get each logical resource of servers
     if (OB_SUCC(ret)) {
-      std::sort(tmp_logical_resource.begin(), tmp_logical_resource.end());
+      lib::ob_sort(tmp_logical_resource.begin(), tmp_logical_resource.end());
       int64_t index = 0;//下标
       while (OB_SUCC(ret) && index < server_cnt) {
         const int64_t logical_index = primary_server_cnt - 1 - index;
@@ -380,6 +394,7 @@ int ObDBMSLimitCalculator::get_server_resource_info_(
       }
     }
     if (OB_TMP_FAIL(proxy.wait_all(return_code_array))) {
+      // overwrite ret
       ret = OB_SUCC(ret) ? tmp_ret : ret;
       LOG_WARN("wait all batch result failed", KR(ret), KR(tmp_ret));
     } else if (OB_FAIL(ret)) {

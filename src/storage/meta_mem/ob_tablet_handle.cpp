@@ -297,5 +297,49 @@ int ObTabletTableIterator::refresh_read_tables_from_tablet(
   return ret;
 }
 
+int ObTabletTableIterator::get_mds_sstables_from_tablet(const int64_t snapshot_version)
+{
+  int ret = OB_SUCCESS;
+
+  if (OB_UNLIKELY(!tablet_handle_.is_valid())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("try to refresh tables in tablet table iter with invalid tablet handle", K(ret));
+  } else if (OB_FAIL(tablet_handle_.get_obj()->get_mds_tables(snapshot_version, table_store_iter_))) {
+    LOG_WARN("fail to get mds tables", K(ret), K(snapshot_version));
+  }
+
+  return ret;
+}
+
+int ObTabletTableIterator::get_read_tables_from_tablet(
+    const int64_t snapshot_version,
+    const bool allow_no_ready_read,
+    const bool major_sstable_only,
+    ObIArray<ObITable *> &tables)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(refresh_read_tables_from_tablet(snapshot_version, allow_no_ready_read, major_sstable_only))) {
+    LOG_WARN("failed to refresh read tables", K(ret), K(snapshot_version), K(allow_no_ready_read), K(major_sstable_only), KPC(this));
+  } else {
+    while(OB_SUCC(ret)) {
+      ObITable *table = nullptr;
+      if (OB_FAIL(table_store_iter_.get_next(table))) {
+          if (OB_LIKELY(OB_ITER_END == ret)) {
+          ret = OB_SUCCESS;
+          break;
+        } else {
+          STORAGE_LOG(WARN, "failed to get next table iter", K(ret), KPC(this));
+        }
+      } else if (OB_ISNULL(table)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("get nullptr table", K(ret), KP(table), KPC(this));
+      } else if (OB_FAIL(tables.push_back(table))) {
+        LOG_WARN("failed to push back table", K(ret), K(tables), KPC(table));
+      }
+    }
+  }
+  return ret;
+}
+
 } // end namespace storage
 } // end namespace oceanbase

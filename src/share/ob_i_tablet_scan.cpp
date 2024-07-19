@@ -25,6 +25,7 @@ namespace common
 OB_SERIALIZE_MEMBER(ObLimitParam, offset_, limit_);
 OB_SERIALIZE_MEMBER(SampleInfo, table_id_, method_, scope_, percent_, seed_, force_block_);
 OB_SERIALIZE_MEMBER(ObEstRowCountRecord, table_id_, table_type_, version_range_, logical_row_count_, physical_row_count_);
+OB_SERIALIZE_MEMBER(ObTableScanOption, io_read_batch_size_, io_read_gap_size_, storage_rowsets_size_);
 
 uint64_t SampleInfo::hash(uint64_t seed) const
 {
@@ -59,10 +60,15 @@ DEF_TO_STRING(ObVTableScanParam)
        N_WAIT, for_update_wait_timeout_,
        N_FROZEN_VERSION, frozen_version_,
        K_(is_get),
+       K_(pd_storage_flag),
        KPC_(output_exprs),
        KPC_(op_filters),
+       K_(table_scan_opt),
        K_(external_file_format),
-       K_(external_file_location));
+       K_(external_file_location),
+       K_(auto_split_filter),
+       K_(auto_split_params),
+       K_(is_tablet_spliting));
   J_OBJ_END();
   return pos;
 }

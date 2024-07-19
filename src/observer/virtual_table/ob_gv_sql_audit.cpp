@@ -431,7 +431,7 @@ int ObGvSqlAudit::extract_tenant_ids()
       if (is_always_false) {
         tenant_id_array_.reset();
       } else {
-        std::sort(tenant_id_array_.begin(), tenant_id_array_.end());
+        lib::ob_sort(tenant_id_array_.begin(), tenant_id_array_.end());
         SERVER_LOG(DEBUG, "get tenant ids from req mgr map", K(tenant_id_array_));
       }
     }
@@ -499,7 +499,7 @@ int ObGvSqlAudit::extract_tenant_ids()
       if (is_always_false) {
         tenant_id_array_.reset();
       } else {
-        std::sort(tenant_id_array_.begin(), tenant_id_array_.end());
+        lib::ob_sort(tenant_id_array_.begin(), tenant_id_array_.end());
         SERVER_LOG(DEBUG, "get tenant ids from req mgr map", K(tenant_id_array_));
       }
     }
@@ -567,7 +567,7 @@ int ObGvSqlAudit::fill_cells(obmysql::ObMySQLRequestRecord &record)
   ObObj *cells = cur_row_.cells_;
   const bool is_perf_event_closed = record.data_.is_perf_event_closed_;
 
-  if (OB_ISNULL(cells)) {
+  if (OB_ISNULL(cells) || OB_ISNULL(allocator_)) {
     ret = OB_INVALID_ARGUMENT;
     SERVER_LOG(WARN, "invalid argument", K(cells));
   } else {
@@ -1074,13 +1074,29 @@ int ObGvSqlAudit::fill_cells(obmysql::ObMySQLRequestRecord &record)
           cells[cell_idx].set_int(set_v);
         } break;
         case TOTAL_MEMSTORE_READ_ROW_COUNT: {
-          cells[cell_idx].set_int(record.data_.total_memstore_read_row_count_);
+          if (record.data_.sql_len_ > 0) {
+            // qc thread
+            cells[cell_idx].set_int(record.data_.exec_record_.memstore_read_row_count_
+                                + record.data_.total_memstore_read_row_count_);
+          } else {
+            // work thread
+            cells[cell_idx].set_int(record.data_.exec_record_.memstore_read_row_count_);
+          }
         } break;
         case TOTAL_SSSTORE_READ_ROW_COUNT: {
-          cells[cell_idx].set_int(record.data_.total_ssstore_read_row_count_);
+          if (record.data_.sql_len_ > 0) {
+            // qc thread
+            cells[cell_idx].set_int(record.data_.exec_record_.ssstore_read_row_count_
+                                  + record.data_.total_ssstore_read_row_count_);
+          } else {
+            // work thread
+            cells[cell_idx].set_int(record.data_.exec_record_.ssstore_read_row_count_);
+          }
         } break;
         case PROXY_USER_NAME: {
-          cells[cell_idx].set_null();
+          int64_t len = min(record.data_.proxy_user_name_len_, OB_MAX_USER_NAME_LENGTH);
+          cells[cell_idx].set_varchar(record.data_.proxy_user_name_,
+                                      static_cast<ObString::obstr_size_t>(len));
         } break;
         //format_sql_id
         case FORMAT_SQL_ID: {

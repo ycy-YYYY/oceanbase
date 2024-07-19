@@ -71,6 +71,7 @@
   #include "src/storage/multi_data_source/ob_tablet_create_mds_ctx.h"
   #include "src/storage/multi_data_source/ob_start_transfer_in_mds_ctx.h"
   #include "src/storage/multi_data_source/ob_finish_transfer_in_mds_ctx.h"
+  #include "src/share/ob_standby_upgrade.h"
 #endif
 /**************************************************************************************************/
 
@@ -171,6 +172,14 @@ _GENERATE_MDS_FRAME_CODE_FOR_TRANSACTION_(HELPER_CLASS, BUFFER_CTX_TYPE, ID, ENU
   //                                         ::oceanbase::storage::mds::ObAbortTransferInMdsCtx,\
   //                                         32,\
   //                                         TRANSFER_IN_ABORTED)
+  GENERATE_MDS_FRAME_CODE_FOR_TRANSACTION(::oceanbase::share::ObUpgradeDataVersionMDSHelper, \
+                                          ::oceanbase::storage::mds::MdsCtx, \
+                                          33,\
+                                          STANDBY_UPGRADE_DATA_VERSION)
+  GENERATE_MDS_FRAME_CODE_FOR_TRANSACTION(::oceanbase::storage::ObTabletBindingMdsHelper,\
+                                          ::oceanbase::storage::mds::MdsCtx,\
+                                          34,\
+                                          TABLET_BINDING)
   // # 余留位置（此行之前占位）
 #undef GENERATE_MDS_FRAME_CODE_FOR_TRANSACTION
 #endif
@@ -236,6 +245,9 @@ _GENERATE_MDS_UNIT_(KEY_TYPE, VALUE_TYPE, NEED_MULTI_VERSION)
   GENERATE_MDS_UNIT(::oceanbase::compaction::ObMediumCompactionInfoKey,\
                     ::oceanbase::compaction::ObMediumCompactionInfo,\
                     false)
+  // GENERATE_MDS_UNIT(::oceanbase::storage::mds::DummyKey,\
+  //                   ::oceanbase::storage::ObTabletSplitMdsUserData,\
+  //                   false)
   // # 余留位置（此行之前占位）
 #endif
 

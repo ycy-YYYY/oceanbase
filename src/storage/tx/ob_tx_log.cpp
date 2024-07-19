@@ -15,6 +15,7 @@
 #include "logservice/ob_log_base_type.h"
 #include "storage/memtable/ob_memtable_mutator.h"
 #include "storage/blocksstable/ob_row_reader.h"
+#include "storage/tx/ob_multi_data_source_printer.h"
 #include "common/cell/ob_cell_reader.h"
 
 namespace oceanbase
@@ -40,7 +41,8 @@ ObTxLogTypeChecker::need_replay_barrier(const ObTxLogType log_type,
         || data_source_type == ObTxDataSourceType::START_TRANSFER_OUT
         || data_source_type == ObTxDataSourceType::START_TRANSFER_OUT_PREPARE
         || data_source_type == ObTxDataSourceType::FINISH_TRANSFER_OUT
-        || data_source_type == ObTxDataSourceType::START_TRANSFER_IN) {
+        || data_source_type == ObTxDataSourceType::START_TRANSFER_IN
+        || data_source_type == ObTxDataSourceType::TABLET_BINDING) {
 
       barrier_flag = logservice::ObReplayBarrierType::PRE_BARRIER;
 
@@ -196,8 +198,8 @@ int ObCtxRedoInfo::before_serialize()
     if (OB_FAIL(compat_bytes_.set_all_member_need_ser())) {
       TRANS_LOG(WARN, "reset all compat_bytes_ valid failed", K(ret));
     } else {
-      // skip serialize cluster_version, since 4.3, cluster_version put in LogBlockHeader
-      TX_NO_NEED_SER(cluster_version_ >= DATA_VERSION_4_3_0_0, 1, compat_bytes_);
+      // skip serialize cluster_version, since 4.2.4, cluster_version put in LogBlockHeader
+      TX_NO_NEED_SER(true, 1, compat_bytes_);
     }
   } else {
     if (OB_FAIL(compat_bytes_.init(1))) {
@@ -297,7 +299,8 @@ OB_TX_SERIALIZE_MEMBER(ObTxActiveInfoLog,
                        /* 16 */ cluster_version_,
                        /* 17 */ max_submitted_seq_no_,
                        /* 18 */ xid_,
-                       /* 19 */ serial_final_seq_no_);
+                       /* 19 */ serial_final_seq_no_,
+                       /* 20 */ associated_session_id_);
 
 OB_TX_SERIALIZE_MEMBER(ObTxCommitInfoLog,
                        compat_bytes_,
@@ -383,7 +386,7 @@ int ObTxActiveInfoLog::before_serialize()
     TX_NO_NEED_SER(last_op_sn_ == 0, 13, compat_bytes_);
     TX_NO_NEED_SER(!first_seq_no_.is_valid(), 14, compat_bytes_);
     TX_NO_NEED_SER(!last_seq_no_.is_valid(), 15, compat_bytes_);
-    TX_NO_NEED_SER((cluster_version_ == 0 || cluster_version_ >= DATA_VERSION_4_3_0_0), 16, compat_bytes_);
+    TX_NO_NEED_SER(true, 16, compat_bytes_);
     TX_NO_NEED_SER(!max_submitted_seq_no_.is_valid(), 17, compat_bytes_);
     TX_NO_NEED_SER(xid_.empty(), 18, compat_bytes_);
     TX_NO_NEED_SER(!serial_final_seq_no_.is_valid(), 19, compat_bytes_);
@@ -414,7 +417,7 @@ int ObTxCommitInfoLog::before_serialize()
     TX_NO_NEED_SER(is_dup_tx_ == false, 5, compat_bytes_);
     TX_NO_NEED_SER(can_elr_ == false, 6, compat_bytes_);
     TX_NO_NEED_SER(incremental_participants_.empty(), 7, compat_bytes_);
-    TX_NO_NEED_SER((cluster_version_ == 0 || cluster_version_ >= DATA_VERSION_4_3_0_0), 8, compat_bytes_);
+    TX_NO_NEED_SER(true, 8, compat_bytes_);
     TX_NO_NEED_SER(app_trace_id_str_.empty(), 9, compat_bytes_);
     TX_NO_NEED_SER(app_trace_info_.empty(), 10, compat_bytes_);
     TX_NO_NEED_SER(prev_record_lsn_.is_valid() == false, 11, compat_bytes_);
@@ -1179,7 +1182,7 @@ int ObTxMultiDataSourceLog::ob_admin_dump(ObAdminMutatorStringArg &arg)
     arg.writer_ptr_->start_object();
     for (int64_t i = 0; i < data_.count(); i++) {
       arg.writer_ptr_->dump_key("type");
-        arg.writer_ptr_->dump_string(to_cstring(static_cast<int64_t>(data_[i].get_data_source_type())));
+        arg.writer_ptr_->dump_string(ObMultiDataSourcePrinter::to_str_mds_type(data_[i].get_data_source_type()));
         arg.writer_ptr_->dump_key("buf_len");
         arg.writer_ptr_->dump_string(to_cstring(data_[i].get_data_size()));
         arg.writer_ptr_->dump_key("content");
@@ -1294,9 +1297,7 @@ int ObTxLogBlockHeader::before_serialize()
       if (cluster_version_ == 0) {
         ob_abort();
       }
-      if (cluster_version_ >= DATA_VERSION_4_3_0_0) {
-        TX_NO_NEED_SER(true, 2, compat_bytes_);
-      }
+      TX_NO_NEED_SER(true, 2, compat_bytes_);
       if (serialize_size_ == 0) {
         calc_serialize_size_();
       }

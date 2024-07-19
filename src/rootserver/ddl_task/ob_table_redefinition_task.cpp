@@ -272,7 +272,7 @@ int ObTableRedefinitionTask::send_build_replica_request_by_sql()
     LOG_WARN("ddl sim failure", K(tenant_id_), K(task_id_));
   } else if (OB_FAIL(check_modify_autoinc(modify_autoinc))) {
     LOG_WARN("failed to check modify autoinc", K(ret));
-  } else if (OB_FAIL(ObDDLTask::push_execution_id(tenant_id_, task_id_, is_ddl_retryable_, data_format_version_, new_execution_id))) {
+  } else if (OB_FAIL(ObDDLTask::push_execution_id(tenant_id_, task_id_, task_type_, is_ddl_retryable_, data_format_version_, new_execution_id))) {
     LOG_WARN("failed to fetch new execution id", K(ret));
   } else {
     ObSQLMode sql_mode = alter_table_arg_.sql_mode_;
@@ -283,8 +283,8 @@ int ObTableRedefinitionTask::send_build_replica_request_by_sql()
     if (OB_FAIL(ObDDLUtil::get_sys_ls_leader_addr(GCONF.cluster_id, tenant_id_, alter_table_arg_.inner_sql_exec_addr_))) {
       LOG_WARN("get sys ls leader addr fail", K(ret), K(tenant_id_));
       ret = OB_SUCCESS; // ignore ret
-    } else {
-      set_sql_exec_addr(alter_table_arg_.inner_sql_exec_addr_); // set to switch_status, if task cancel, we should kill session with inner_sql_exec_addr_
+    } else if (OB_FAIL(set_sql_exec_addr(alter_table_arg_.inner_sql_exec_addr_))) {
+      LOG_WARN("failed to set sql execute addr", K(ret), K(alter_table_arg_.inner_sql_exec_addr_));
     }
     ObSchemaGetterGuard schema_guard;
     const ObTableSchema *orig_table_schema = nullptr;
@@ -356,10 +356,10 @@ int ObTableRedefinitionTask::check_ddl_can_retry(const bool ddl_need_retry_at_ex
     LOG_WARN("invalid arguments", K(ret), KP(table_schema));
   } else if (OB_FAIL(check_use_heap_table_ddl_plan(table_schema))) {
     LOG_WARN("check use heap table ddl plan failed", K(ret));
-  } else if (DDL_MVIEW_COMPLETE_REFRESH == task_type_) {
+  } else if (data_format_version_ >= DATA_VERSION_4_3_1_0 && DDL_MVIEW_COMPLETE_REFRESH == task_type_) {
     is_ddl_retryable_ = false;
   } else {
-    if (ObDDLUtil::use_idempotent_mode(data_format_version_)) {
+    if (ObDDLUtil::use_idempotent_mode(data_format_version_, task_type_)) {
       if (use_heap_table_ddl_plan_) {
         is_ddl_retryable_ = false;
         LOG_INFO("ddl schedule will not retry for heap table", K(use_heap_table_ddl_plan_), K_(task_id));
@@ -413,6 +413,9 @@ int ObTableRedefinitionTask::table_redefinition(const ObDDLTaskStatus next_task_
     } else if (!need_exec_new_inner_sql) {
       is_build_replica_end = true;
     } else if (OB_FAIL(send_build_replica_request())) {
+      if (OB_TASK_EXPIRED == ret) {
+        is_build_replica_end = true;
+      }
       LOG_WARN("fail to send build replica request", K(ret));
     } else {
       TCWLockGuard guard(lock_);
@@ -440,6 +443,7 @@ int ObTableRedefinitionTask::table_redefinition(const ObDDLTaskStatus next_task_
       }
     }
     if (OB_FAIL(switch_status(next_task_status, true, ret))) {
+      // overwrite ret
       LOG_WARN("fail to switch task status", K(ret));
     }
   }
@@ -482,8 +486,8 @@ int ObTableRedefinitionTask::copy_table_indexes()
     int64_t active_task_cnt = 0;
     // check if has rebuild index
     if (has_rebuild_index_) {
-    } else if (OB_FAIL(ObDDLTaskRecordOperator::get_create_index_task_cnt(GCTX.root_service_->get_sql_proxy(), dst_tenant_id_, target_object_id_, active_task_cnt))) {
-      LOG_WARN("failed to check index task cnt", K(ret));
+    } else if (OB_FAIL(ObDDLTaskRecordOperator::get_create_index_or_mlog_task_cnt(GCTX.root_service_->get_sql_proxy(), dst_tenant_id_, target_object_id_, active_task_cnt))) {
+      LOG_WARN("failed to check index or mlog task cnt", K(ret));
     } else if (active_task_cnt >= MAX_ACTIVE_TASK_CNT) {
       ret = OB_EAGAIN;
     } else {
@@ -560,7 +564,7 @@ int ObTableRedefinitionTask::copy_table_indexes()
             } else {
               create_index_arg.index_type_ = index_schema->get_index_type();
               ObCreateDDLTaskParam param(dst_tenant_id_,
-                                         ObDDLType::DDL_CREATE_INDEX,
+                                         ((DATA_VERSION_4_2_2_0 <= data_format_version_ && data_format_version_ < DATA_VERSION_4_3_0_0) || data_format_version_ >= DATA_VERSION_4_3_2_0) && index_schema->is_storage_local_index_table() && index_schema->is_partitioned_table() ? ObDDLType::DDL_CREATE_PARTITIONED_LOCAL_INDEX : ObDDLType::DDL_CREATE_INDEX,
                                          table_schema,
                                          index_schema,
                                          0/*object_id*/,
@@ -872,7 +876,9 @@ int ObTableRedefinitionTask::take_effect(const ObDDLTaskStatus next_task_status)
     LOG_WARN("table schema not exist", K(ret), K(target_object_id_));
   } else if (!table_schema->is_user_hidden_table()) {
     LOG_INFO("target schema took effect", K(target_object_id_));
-  } else if (table_schema->is_heap_table() && !use_heap_table_ddl_plan_ && OB_FAIL(sync_tablet_autoinc_seq())) {
+  } else if (table_schema->is_heap_table()
+      && !(DDL_ALTER_PARTITION_BY == task_type_ || DDL_DROP_PRIMARY_KEY == task_type_)
+      && OB_FAIL(sync_tablet_autoinc_seq())) {
     if (OB_TIMEOUT == ret || OB_NOT_MASTER == ret) {
       ret = OB_SUCCESS;
       new_status = ObDDLTaskStatus::TAKE_EFFECT;
@@ -897,11 +903,14 @@ int ObTableRedefinitionTask::take_effect(const ObDDLTaskStatus next_task_status)
             LOG_WARN("get ddl rpc timeout fail", K(ret));
   } else if (OB_FAIL(root_service->get_ddl_service().get_common_rpc()->to(obrpc::ObRpcProxy::myaddr_).timeout(ddl_rpc_timeout).
       execute_ddl_task(alter_table_arg_, objs))) {
-    LOG_WARN("fail to swap original and hidden table state", K(ret));
-    if (OB_TIMEOUT == ret) {
+    int tmp_ret = OB_SUCCESS;
+    bool has_took_effect_succ = false;
+    if (OB_TMP_FAIL(check_take_effect_succ(has_took_effect_succ))) {
+      LOG_WARN("check took effect failed", K(ret), K(tmp_ret), K(target_object_id_));
+    } else if (has_took_effect_succ) {
       ret = OB_SUCCESS;
-      new_status = ObDDLTaskStatus::TAKE_EFFECT;
     }
+    LOG_WARN("swap orig and hidden table state failed", K(ret), K(tmp_ret), K(has_took_effect_succ), K(target_object_id_));
   }
   DEBUG_SYNC(TABLE_REDEFINITION_TAKE_EFFECT);
   if (new_status == next_task_status || OB_FAIL(ret)) {
@@ -924,6 +933,29 @@ int ObTableRedefinitionTask::take_effect(const ObDDLTaskStatus next_task_status)
   return ret;
 }
 
+int ObTableRedefinitionTask::check_take_effect_succ(bool &has_took_effect_succ)
+{
+  int ret = OB_SUCCESS;
+  has_took_effect_succ = false;
+  ObSchemaGetterGuard schema_guard;
+  const ObTableSchema *table_schema = nullptr;
+  if (OB_UNLIKELY(!is_inited_)) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("ObTableRedefinitionTask has not been inited", K(ret));
+  } else if (OB_FAIL(ObMultiVersionSchemaService::get_instance().get_tenant_schema_guard(dst_tenant_id_, schema_guard))) {
+    LOG_WARN("get tenant schema guard failed", K(ret));
+  } else if (OB_FAIL(schema_guard.get_table_schema(dst_tenant_id_, target_object_id_, table_schema))) {
+    LOG_WARN("get table schema failed", K(ret), K(dst_tenant_id_));
+  } else if (OB_ISNULL(table_schema)) {
+    ret = OB_TABLE_NOT_EXIST;
+    LOG_WARN("table schema not exist", K(ret), K(target_object_id_));
+  } else if (!table_schema->is_user_hidden_table()) {
+    has_took_effect_succ = true;
+    LOG_INFO("target schema took effect", K(target_object_id_));
+  }
+  return ret;
+}
+
 int ObTableRedefinitionTask::repending(const share::ObDDLTaskStatus next_task_status)
 {
   int ret = OB_SUCCESS;
@@ -936,7 +968,7 @@ int ObTableRedefinitionTask::repending(const share::ObDDLTaskStatus next_task_st
     switch (task_type_) {
       case DDL_DIRECT_LOAD:
       case DDL_DIRECT_LOAD_INSERT:
-        if (get_is_do_finish()) {
+        if (get_is_do_finish() || get_is_abort()) {
           if (OB_FAIL(switch_status(next_task_status, true, ret))) {
             LOG_WARN("fail to switch status", K(ret));
           }
@@ -1284,7 +1316,8 @@ int ObTableRedefinitionTask::collect_longops_stat(ObLongopsValue &value)
         if (OB_FAIL(databuff_printf(stat_info_.message_,
                                     MAX_LONG_OPS_MESSAGE_LENGTH,
                                     pos,
-                                    "STATUS: REPLICA BUILD, ROW_SCANNED: %ld, ROW_SORTED: %ld, ROW_INSERTED_TMP_FILE: %ld, ROW_INSERTED: %ld out of %ld column group rows",
+                                    "STATUS: REPLICA BUILD, PARALLELISM: %ld, ROW_SCANNED: %ld, ROW_SORTED: %ld, ROW_INSERTED_TMP_FILE: %ld, ROW_INSERTED: %ld out of %ld column group rows",
+                                    ObDDLUtil::get_real_parallelism(parallelism_, alter_table_arg_.mview_refresh_info_.is_mview_complete_refresh_),
                                     row_scanned,
                                     row_sorted,
                                     row_inserted_file,
@@ -1296,7 +1329,8 @@ int ObTableRedefinitionTask::collect_longops_stat(ObLongopsValue &value)
         if (OB_FAIL(databuff_printf(stat_info_.message_,
                                     MAX_LONG_OPS_MESSAGE_LENGTH,
                                     pos,
-                                    "STATUS: REPLICA BUILD, ROW_SCANNED: %ld, ROW_SORTED: %ld, ROW_INSERTED: %ld",
+                                    "STATUS: REPLICA BUILD, PARALLELISM: %ld, ROW_SCANNED: %ld, ROW_SORTED: %ld, ROW_INSERTED: %ld",
+                                    ObDDLUtil::get_real_parallelism(parallelism_, alter_table_arg_.mview_refresh_info_.is_mview_complete_refresh_),
                                     row_scanned,
                                     row_sorted,
                                     row_inserted_file))) {

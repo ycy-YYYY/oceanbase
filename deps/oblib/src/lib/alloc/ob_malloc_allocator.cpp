@@ -17,11 +17,11 @@
 #include "lib/alloc/object_set.h"
 #include "lib/alloc/memory_sanity.h"
 #include "lib/alloc/memory_dump.h"
-#include "lib/utility/ob_tracepoint.h"
 #include "lib/allocator/ob_mem_leak_checker.h"
 #include "lib/allocator/ob_page_manager.h"
 #include "lib/rc/ob_rc.h"
 #include "lib/rc/context.h"
+#include "common/ob_smart_var.h"
 
 using namespace oceanbase::lib;
 using namespace oceanbase::common;
@@ -102,7 +102,7 @@ void *ObMallocAllocator::alloc(const int64_t size, const oceanbase::lib::ObMemAt
 #else
   SANITY_DISABLE_CHECK_RANGE(); // prevent sanity_check_range
   ObDisableDiagnoseGuard disable_diagnose_guard;
-  int ret = OB_E(EventTable::EN_4) OB_SUCCESS;
+  int ret = OB_SUCCESS;
   void *ptr = NULL;
   ObTenantCtxAllocatorGuard allocator = NULL;
   lib::ObMemAttr attr = _attr;
@@ -138,12 +138,12 @@ void *ObMallocAllocator::alloc(const int64_t size, const oceanbase::lib::ObMemAt
       allocator = get_tenant_ctx_allocator(inner_attr.tenant_id_, inner_attr.ctx_id_);
     }
   }
-
+  int tmp_ret = OB_SUCCESS;
   if (OB_ISNULL(allocator)) {
-    // ignore ret
-    ret = OB_ENTRY_NOT_EXIST;
+    tmp_ret = OB_ENTRY_NOT_EXIST;
+    ret = OB_SUCC(ret) ? tmp_ret : ret;
     LOG_ERROR("tenant allocator not exist", K(inner_attr.tenant_id_), K(inner_attr.ctx_id_),
-              K(ret));
+              K(ret), K(tmp_ret));
   }
 
   if (OB_SUCC(ret)) {
@@ -184,23 +184,10 @@ void *ObMallocAllocator::realloc(
   ObDisableDiagnoseGuard disable_diagnose_guard;
   // Won't create tenant allocator!!
   void *nptr = NULL;
-  int ret = OB_E(EventTable::EN_4) OB_SUCCESS;
-  if (NULL != ptr) {
-    AObject *obj = reinterpret_cast<AObject*>((char*)ptr - AOBJECT_HEADER_SIZE);
-    abort_unless(NULL != obj);
-    abort_unless(obj->MAGIC_CODE_ == AOBJECT_MAGIC_CODE
-                 || obj->MAGIC_CODE_ == BIG_AOBJECT_MAGIC_CODE);
-    abort_unless(obj->in_use_);
-
-    get_mem_leak_checker().on_free(*obj);
-  }
-  oceanbase::lib::ObMemAttr inner_attr = attr;
   ObTenantCtxAllocatorGuard allocator = NULL;
-  if (OB_FAIL(ret) && NULL == ptr) {
+  if (OB_ISNULL(allocator = get_tenant_ctx_allocator(attr.tenant_id_, attr.ctx_id_))) {
     // do nothing
-  } else if (OB_ISNULL(allocator = get_tenant_ctx_allocator(inner_attr.tenant_id_, inner_attr.ctx_id_))) {
-    // do nothing
-  } else if (OB_ISNULL(nptr = allocator->realloc(ptr, size, inner_attr))) {
+  } else if (OB_ISNULL(nptr = allocator->realloc(ptr, size, attr))) {
     // do nothing
   }
   return nptr;
@@ -510,37 +497,31 @@ void ObMallocAllocator::print_tenant_memory_usage(uint64_t tenant_id) const
 {
   int ret = OB_SUCCESS;
   with_resource_handle_invoke(tenant_id, [&](ObTenantMemoryMgr *mgr) {
-    CREATE_WITH_TEMP_CONTEXT(ContextParam().set_label(ObModIds::OB_TEMP_VARIABLES)) {
-      static const int64_t BUFLEN = 1 << 17;
-      char *buf = (char *)ctxalp(BUFLEN);
-      if (OB_ISNULL(buf)) {
-        ret = OB_ALLOCATE_MEMORY_FAILED;
-        LIB_LOG(WARN, "no memory", K(ret));
-      } else {
-        int64_t ctx_pos = 0;
-        const volatile int64_t *ctx_hold_bytes = mgr->get_ctx_hold_bytes();
-        for (uint64_t i = 0; i < ObCtxIds::MAX_CTX_ID; i++) {
-          if (ctx_hold_bytes[i] > 0) {
-            int64_t limit = 0;
-            IGNORE_RETURN mgr->get_ctx_limit(i, limit);
-            ret = databuff_printf(buf, BUFLEN, ctx_pos,
-                "[MEMORY] ctx_id=%25s hold_bytes=%'15ld limit=%'26ld\n",
-                get_global_ctx_info().get_ctx_name(i), ctx_hold_bytes[i], limit);
-          }
+    static const int64_t BUFLEN = 1 << 16;
+    SMART_VAR(char[BUFLEN], buf) {
+      int64_t ctx_pos = 0;
+      const volatile int64_t *ctx_hold_bytes = mgr->get_ctx_hold_bytes();
+      for (uint64_t i = 0; OB_SUCC(ret) && i < ObCtxIds::MAX_CTX_ID; i++) {
+        if (ctx_hold_bytes[i] > 0) {
+          int64_t limit = 0;
+          IGNORE_RETURN mgr->get_ctx_limit(i, limit);
+          ret = databuff_printf(buf, BUFLEN, ctx_pos,
+              "[MEMORY] ctx_id=%25s hold_bytes=%'15ld limit=%'26ld\n",
+              get_global_ctx_info().get_ctx_name(i), ctx_hold_bytes[i], limit);
         }
-        buf[std::min(ctx_pos, BUFLEN - 1)] = '\0';
-        allow_next_syslog();
-        _LOG_INFO("[MEMORY] tenant: %lu, limit: %'lu hold: %'lu rpc_hold: %'lu cache_hold: %'lu "
-                  "cache_used: %'lu cache_item_count: %'lu \n%s",
-            tenant_id,
-            mgr->get_limit(),
-            mgr->get_sum_hold(),
-            mgr->get_rpc_hold(),
-            mgr->get_cache_hold(),
-            mgr->get_cache_hold(),
-            mgr->get_cache_item_count(),
-            buf);
       }
+      buf[std::min(ctx_pos, BUFLEN - 1)] = '\0';
+      allow_next_syslog();
+      _LOG_INFO("[MEMORY] tenant: %lu, limit: %'lu hold: %'lu rpc_hold: %'lu cache_hold: %'lu "
+                "cache_used: %'lu cache_item_count: %'lu \n%s",
+          tenant_id,
+          mgr->get_limit(),
+          mgr->get_sum_hold(),
+          mgr->get_rpc_hold(),
+          mgr->get_cache_hold(),
+          mgr->get_cache_hold(),
+          mgr->get_cache_item_count(),
+          buf);
     }
     return ret;
   });

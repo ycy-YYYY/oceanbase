@@ -70,6 +70,8 @@ public:
                                   const ObColumnResolveStat &stat);
   int check_alter_geo_column_allowed(const share::schema::AlterColumnSchema &alter_column_schema,
                                      const share::schema::ObColumnSchemaV2 &origin_col_schema);
+  int check_alter_multivalue_depend_column_allowed(const share::schema::AlterColumnSchema &alter_column_schema,
+                                                   const share::schema::ObColumnSchemaV2 &data_column_schema);
   int resolve_modify_column(const ParseNode &node,
                             bool &is_modify_column_visibility,
                             ObReducedVisibleColSet &reduced_visible_col_set);
@@ -195,7 +197,6 @@ private:
   int resolve_column_group_for_column();
   int generate_index_arg_cascade();
   int resolve_alter_column_groups(const ParseNode &node);
-  bool is_ttl_column(const common::ObString &orig_column_name, const ObIArray<common::ObString> &ttl_columns);
 
   int check_alter_column_schemas_valid(ObAlterTableStmt &stmt);
 

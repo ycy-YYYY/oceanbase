@@ -63,6 +63,8 @@ typedef common::ParamStore ParamStore;
 
 class ObPLCacheCtx;
 
+class ObPLProfilerTimeStack;
+
 enum ObPLObjectType
 {
   INVALID_OBJECT_TYPE = -1,
@@ -95,7 +97,9 @@ public:
                                const ObPLDataType &pl_type,
                                common::ObObjParam &obj,
                                bool set_allocator = false,
-                               bool set_null = true) const;
+                               bool set_null = true);
+
+  virtual int calc_expr(uint64_t package_id, int64_t expr_idx, ObObjParam &result);
 };
 
 class ObPLFunctionBase
@@ -246,11 +250,19 @@ public:
   inline jit::ObLLVMHelper &get_helper() { return helper_; }
   inline jit::ObLLVMDIHelper &get_di_helper() { return di_helper_; }
 
+  inline const sql::ObExecEnv &get_exec_env() const { return exec_env_; }
+  inline sql::ObExecEnv &get_exec_env() { return exec_env_; }
+  inline void set_exec_env(const sql::ObExecEnv &env) { exec_env_ = env; }
+
   jit::ObDIRawData get_debug_info() const { return helper_.get_debug_info(); }
 
   virtual void reset();
   virtual void dump_deleted_log_info(const bool is_debug_log = true) const;
   virtual int check_need_add_cache_obj_stat(ObILibCacheCtx &ctx, bool &need_real_add);
+
+  OB_INLINE std::pair<uint64_t, ObProcType> get_profiler_unit_info() const { return profiler_unit_info_; }
+  OB_INLINE void set_profiler_unit_info(uint64_t unit_id, ObProcType type) { profiler_unit_info_ = std::make_pair(unit_id, type); }
+  OB_INLINE void set_profiler_unit_info(const std::pair<uint64_t, ObProcType> &unit_info) { profiler_unit_info_ = unit_info; }
 
   TO_STRING_KV(K_(routine_table), K_(can_cached),
                K_(tenant_schema_version), K_(sys_schema_version));
@@ -264,6 +276,9 @@ protected:
   jit::ObLLVMDIHelper di_helper_;
 
   bool can_cached_;
+  sql::ObExecEnv exec_env_;
+
+  std::pair<uint64_t, ObProcType> profiler_unit_info_;
 
   DISALLOW_COPY_AND_ASSIGN(ObPLCompileUnit);
 };
@@ -391,7 +406,6 @@ public:
     sql_infos_(allocator_),
     in_args_(),
     out_args_(),
-    exec_env_(),
     action_(0),
     di_buf_(NULL),
     di_len_(0),
@@ -425,9 +439,6 @@ public:
   inline const common::ObBitSet<common::OB_DEFAULT_BITSET_SIZE> &get_out_args() const { return out_args_; }
   inline void set_out_args(const common::ObBitSet<common::OB_DEFAULT_BITSET_SIZE> &out_idx) { out_args_ = out_idx; }
   inline int add_out_arg(int64_t i) { return out_args_.add_member(i); }
-  inline const sql::ObExecEnv &get_exec_env() const { return exec_env_; }
-  inline sql::ObExecEnv &get_exec_env() { return exec_env_; }
-  inline void set_exec_env(const sql::ObExecEnv &env) { exec_env_ = env; }
   inline ObFuncPtr get_action() const { return action_; }
   inline void set_action(ObFuncPtr action) { action_ = action; }
 
@@ -514,7 +525,6 @@ private:
   common::ObFixedArray<ObPLSqlInfo, common::ObIAllocator> sql_infos_;
   common::ObBitSet<common::OB_DEFAULT_BITSET_SIZE> in_args_;
   common::ObBitSet<common::OB_DEFAULT_BITSET_SIZE> out_args_;
-  sql::ObExecEnv exec_env_;
   ObFuncPtr action_;
   char *di_buf_;
   int64_t di_len_;
@@ -645,8 +655,8 @@ struct ObPLExecCtx : public ObPLINS
   virtual int get_user_type(uint64_t type_id,
                                 const ObUserDefinedType *&user_type,
                                 ObIAllocator *allocator = NULL) const;
+  virtual int calc_expr(uint64_t package_id, int64_t expr_idx, ObObjParam &result);
 
-  //Note: 不实现虚函数，省得llvm解析的时候需要处理vtable麻烦
   common::ObIAllocator *allocator_;
   sql::ObExecContext *exec_ctx_;
   ParamStore *params_; // param stroe, 对应PL Function的符号表
@@ -711,7 +721,9 @@ public:
     dwarf_helper_(NULL),
     pure_sql_exec_time_(0),
     pure_plsql_exec_time_(0),
-    pure_sub_plsql_exec_time_(0) {}
+    pure_sub_plsql_exec_time_(0),
+    profiler_time_stack_(nullptr)
+  { }
   virtual ~ObPLExecState();
 
   int init(const ParamStore *params = NULL, bool is_anonymous = false);
@@ -780,6 +792,10 @@ public:
   int64_t get_sub_plsql_exec_time() { return pure_sub_plsql_exec_time_; }
   void reset_sub_plsql_exec_time() { pure_sub_plsql_exec_time_ = 0; }
 
+  inline void set_profiler_time_stack(ObPLProfilerTimeStack *time_stack) { profiler_time_stack_ = time_stack;}
+
+  inline ObPLProfilerTimeStack *get_profiler_time_stack() { return profiler_time_stack_; }
+
   TO_STRING_KV(K_(inner_call),
                K_(top_call),
                K_(need_reset_physical_plan),
@@ -810,6 +826,7 @@ private:
   int64_t pure_sql_exec_time_;
   int64_t pure_plsql_exec_time_;
   int64_t pure_sub_plsql_exec_time_;
+  ObPLProfilerTimeStack *profiler_time_stack_;
 };
 
 class ObPLContext
@@ -1111,6 +1128,7 @@ public:
   int check_exec_priv(sql::ObExecContext &ctx,
                       const ObString &database_name,
                       ObPLFunction *routine);
+
 private:
   // for normal routine
   int get_pl_function(sql::ObExecContext &ctx,
@@ -1137,11 +1155,6 @@ private:
                            const uint64_t stmt_id,
                            bool is_anonymous_text = false);
 
-  // for normal routine
-  int generate_pl_function(sql::ObExecContext &ctx,
-                           uint64_t proc_id,
-                           ObCacheObjGuard& cacheobj_guard);
-
   // for inner common execute
   int execute(sql::ObExecContext &ctx,
               ObIAllocator &allocator,
@@ -1158,10 +1171,13 @@ private:
               uint64_t loc = 0,
               bool is_called_from_sql = false);
 
-  // add pl to cache
-  int add_pl_lib_cache(ObPLFunction *pl_func, ObPLCacheCtx &pc_ctx);
-
 public:
+  // for normal routine
+  static int generate_pl_function(sql::ObExecContext &ctx,
+                           uint64_t proc_id,
+                           ObCacheObjGuard& cacheobj_guard);
+  // add pl to cache
+  static int add_pl_lib_cache(ObPLFunction *pl_func, ObPLCacheCtx &pc_ctx);
   static int execute_proc(ObPLExecCtx &ctx,
                           uint64_t package_id,
                           uint64_t proc_id,
@@ -1190,7 +1206,7 @@ public:
 
   static int check_trigger_arg(const ParamStore &params, const ObPLFunction &func);
 
-  ObBucketLock& get_jit_lock() { return jit_lock_; }
+  std::pair<common::ObBucketLock, common::ObBucketLock>& get_jit_lock() { return jit_lock_; }
 
   static int check_session_alive(const ObBasicSessionInfo &session);
 
@@ -1199,7 +1215,9 @@ private:
   ObPLPackageManager package_manager_;
   ObPLInterfaceService interface_service_;
   common::ObBucketLock codegen_lock_;
-  common::ObBucketLock jit_lock_;
+
+  // first bucket is for deduplication, second bucket is for concurrency control
+  std::pair<common::ObBucketLock, common::ObBucketLock> jit_lock_;
 };
 
 class LinkPLStackGuard

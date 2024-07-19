@@ -47,6 +47,7 @@
 #include "pl/debug/ob_pl_debugger.h"
 #include "pl/debug/ob_pl_debugger_manager.h"
 #include "pl/opaque/ob_pl_json_type.h"
+#include "pl/ob_pl_profiler.h"
 #endif
 #include "pl/pl_cache/ob_pl_cache_mgr.h"
 #include "sql/engine/dml/ob_trigger_handler.h"
@@ -185,10 +186,17 @@ int ObPL::init(common::ObMySQLProxy &sql_proxy)
                                 (void*)(sql::ObSPIService::spi_add_ref_cursor_refcount));
   jit::ObLLVMHelper::add_symbol(ObString("spi_handle_ref_cursor_refcount"),
                                 (void*)(sql::ObSPIService::spi_handle_ref_cursor_refcount));
+  jit::ObLLVMHelper::add_symbol(ObString("spi_opaque_assign_null"),
+                                (void*)(sql::ObSPIService::spi_opaque_assign_null));
+  jit::ObLLVMHelper::add_symbol(ObString("spi_pl_profiler_before_record"),
+                                (void*)(sql::ObSPIService::spi_pl_profiler_before_record));
+  jit::ObLLVMHelper::add_symbol(ObString("spi_pl_profiler_after_record"),
+                                (void*)(sql::ObSPIService::spi_pl_profiler_after_record));
 
   sql_proxy_ = &sql_proxy;
   OZ (codegen_lock_.init(1024));
-  OZ (jit_lock_.init(32));
+  OZ (jit_lock_.first.init(1024));
+  OZ (jit_lock_.second.init(1024));
   OZ (interface_service_.init());
   OX (serialize_composite_callback = ObUserDefinedType::serialize_obj);
   OX (deserialize_composite_callback = ObUserDefinedType::deserialize_obj);
@@ -843,15 +851,20 @@ void ObPLContext::destory(
         } else if (session_info.associated_xa()) {
           IS_DBLINK_TRANS;
           if (is_dblink) {
-            transaction::ObTransID tx_id;
-            const bool force_disconnect = false;
-            int rl_ret = OB_SUCCESS;
-            if (OB_SUCCESS != (rl_ret = ObTMService::tm_rollback(ctx, tx_id))) {
-              LOG_WARN("failed to rollback for dblink trans", K(ret), K(rl_ret), K(tx_id), K(xid), K(global_tx_type));
-            } else if (OB_SUCCESS != (rl_ret = session_info.get_dblink_context().clean_dblink_conn(force_disconnect))) {
-              LOG_WARN("dblink trans failed to release dblink connections", K(ret), K(rl_ret), K(tx_id), K(xid));
+            if (in_nested_sql_ctrl()) {
+              // rollback or commit by the top sql.
+            } else {
+              transaction::ObTransID tx_id;
+              const bool force_disconnect = false;
+              int rl_ret = OB_SUCCESS;
+              if (OB_SUCCESS != (rl_ret = ObTMService::tm_rollback(ctx, tx_id))) {
+                LOG_WARN("failed to rollback for dblink trans", K(ret), K(rl_ret), K(tx_id), K(xid), K(global_tx_type));
+              } else if (OB_SUCCESS != (rl_ret =
+                                        session_info.get_dblink_context().clean_dblink_conn(force_disconnect))) {
+                LOG_WARN("dblink trans failed to release dblink connections", K(ret), K(rl_ret), K(tx_id), K(xid));
+              }
+              ret = OB_SUCCESS == ret ? rl_ret : ret;
             }
-            ret = OB_SUCCESS == ret ? rl_ret : ret;
           } else if (OB_TRANS_XA_BRANCH_FAIL != ret) {
             tmp_ret = ObDbmsXA::xa_rollback_savepoint(ctx);
             if (OB_SUCCESS != tmp_ret) {
@@ -1762,6 +1775,10 @@ int ObPL::parameter_anonymous_block(ObExecContext &ctx,
       }
     }
   }
+  // generate sql_id using paramiterized sql, and overwrite privious sql_id
+  OZ (ObSQLUtils::md5(pc_key, ctx.get_sql_ctx()->sql_id_,
+                      (int32_t)sizeof(ctx.get_sql_ctx()->sql_id_)));
+  OX (ctx.get_my_session()->set_cur_sql_id(ctx.get_sql_ctx()->sql_id_));
   OZ (get_pl_function(ctx, params, OB_INVALID_ID, pc_key, cacheobj_guard));
   return ret;
 }
@@ -1825,7 +1842,9 @@ int ObPL::execute(ObExecContext &ctx, ParamStore &params, const ObStmtNodeTree *
 
   OZ (ObPLContext::valid_execute_context(ctx));
 
-  OX (is_forbid_anony_parameter = is_forbid_anony_parameter || ctx.get_my_session()->is_pl_debug_on());
+  OX (is_forbid_anony_parameter = is_forbid_anony_parameter
+                                    || ctx.get_my_session()->is_pl_debug_on()
+                                    || ctx.get_my_session()->get_pl_profiler() != nullptr);
 
   OX (param.set_mem_attr(ctx.get_my_session()->get_effective_tenant_id(),
                          ObModIds::OB_PL_TEMP,
@@ -2285,6 +2304,8 @@ int ObPL::get_pl_function(ObExecContext &ctx,
     pc_ctx.key_.namespace_ = ObLibCacheNameSpace::NS_ANON;
     pc_ctx.key_.db_id_ = database_id;
     pc_ctx.key_.sessid_ = ctx.get_my_session()->is_pl_debug_on() ? ctx.get_my_session()->get_sessid() : 0;
+    pc_ctx.key_.mode_ = ctx.get_my_session()->get_pl_profiler() != nullptr
+                          ? ObPLObjectKey::ObjectMode::PROFILE : ObPLObjectKey::ObjectMode::NORMAL;
 
     if (OB_SUCC(ret)) {
       if (stmt_id != OB_INVALID_ID) {
@@ -2439,6 +2460,8 @@ int ObPL::get_pl_function(ObExecContext &ctx,
     pc_ctx.key_.db_id_ = database_id;
     pc_ctx.key_.key_id_ = routine_id;
     pc_ctx.key_.sessid_ = ctx.get_my_session()->is_pl_debug_on() ? ctx.get_my_session()->get_sessid() : 0;
+    pc_ctx.key_.mode_ =  ctx.get_my_session()->get_pl_profiler() != nullptr
+                           ? ObPLObjectKey::ObjectMode::PROFILE : ObPLObjectKey::ObjectMode::NORMAL;
 
     if (OB_FAIL(ret)) {
     } else if (OB_FAIL(ObPLCacheMgr::get_pl_cache(ctx.get_my_session()->get_plan_cache(), cacheobj_guard, pc_ctx))) {
@@ -2873,6 +2896,17 @@ int ObPLExecCtx::get_user_type(uint64_t type_id,
   return ret;
 }
 
+int ObPLExecCtx::calc_expr(uint64_t package_id, int64_t expr_idx, ObObjParam &result)
+{
+  int ret = OB_SUCCESS;
+  if (OB_INVALID_ID == package_id) {
+    OZ (ObSPIService::spi_calc_expr_at_idx(this, expr_idx, OB_INVALID_INDEX, &result));
+  } else {
+    OZ (ObSPIService::spi_calc_package_expr(this, package_id, expr_idx, &result));
+  }
+  return ret;
+}
+
 int ObPLExecState::final(int ret)
 {
   int tmp_ret = OB_SUCCESS;
@@ -3008,6 +3042,35 @@ int ObPLExecState::final(int ret)
       LOG_WARN("failed to destruct pl object", K(tmp_ret));
     }
   }
+
+#ifdef OB_BUILD_ORACLE_PL
+  // save profiler time stack data
+  if (OB_NOT_NULL(profiler_time_stack_)) {
+    ObPLProfiler *profiler = nullptr;
+
+    if (OB_NOT_NULL(ctx_.exec_ctx_)
+          && OB_NOT_NULL(ctx_.exec_ctx_->get_my_session())
+          && OB_NOT_NULL(profiler = ctx_.exec_ctx_->get_my_session()->get_pl_profiler())) {
+      int ret = OB_SUCCESS;
+
+      if (OB_FAIL(profiler_time_stack_->pop_all(*profiler))) {
+        LOG_WARN("[DBMS_PROFILER] failed to flush pl profiler time stack", K(ret), K(lbt()));
+      }
+
+      if (is_top_call()) {
+        if (OB_FAIL(profiler->flush_data())) {
+          LOG_WARN("[DBMS_PROFILER] failed to flush pl profiler data", K(ret), K(lbt()));
+        }
+      }
+    }
+
+    profiler_time_stack_->~ObPLProfilerTimeStack();
+    if (OB_NOT_NULL(get_allocator())) {
+      get_allocator()->free(profiler_time_stack_);
+    }
+    profiler_time_stack_ = nullptr;
+  }
+#endif // OB_BUILD_ORACLE_PL
 
   if (OB_NOT_NULL(top_context_)
       && top_context_->get_exec_stack().count() > 0
@@ -3240,6 +3303,9 @@ int ObPLExecState::check_routine_param_legal(ParamStore *params)
               }
             }
             CK (OB_NOT_NULL(ctx_.exec_ctx_->get_pl_ctx()));
+            if (OB_FAIL(ret)) {
+              ObUserDefinedType::destruct_obj(dst, session);
+            }
             OZ (ctx_.exec_ctx_->get_pl_ctx()->add(dst));
             OX (param = dst);
             OX (param.set_param_meta());
@@ -3398,8 +3464,9 @@ do {                                                                  \
             ObObjMeta null_meta = get_params().at(i).get_meta();
             get_params().at(i) = params->at(i); // 空值不做cast
             params->at(i).is_null() ? get_params().at(i).set_null_meta(null_meta) : (void)NULL;
-          } else if (params->at(i).get_meta().get_type() == get_params().at(i).get_meta().get_type()
-                     && params->at(i).get_meta().is_numeric_type()) {
+          } else if (lib::is_oracle_mode()
+                       && params->at(i).get_meta().get_type() == get_params().at(i).get_meta().get_type()
+                       && params->at(i).get_meta().is_numeric_type()) {
             ObObj tmp;
             if (pl_type.is_pl_integer_type()) {
               OZ (ObExprPLIntegerChecker::calc(tmp,
@@ -3787,6 +3854,9 @@ int ObPL::check_exec_priv(
                                       exec_ctx.get_my_session()->get_database_name(),
                                       session_priv))) {
           LOG_WARN("fail to get_session_priv_info", K(ret));
+      } else if (OB_FAIL(exec_ctx.get_my_session()->get_security_version(
+                                                          session_priv.security_version_))) {
+        LOG_WARN("fail to get security version", K(ret));
       } else if (OB_UNLIKELY(!session_priv.is_valid())) {
           ret = OB_INVALID_ARGUMENT;
           LOG_WARN("Session priv is invalid", "tenant_id", session_priv.tenant_id_,
@@ -3971,7 +4041,8 @@ int ObPLExecState::check_pl_execute_priv(ObSchemaGetterGuard &guard,
                           OBJ_PRIV_ID_EXECUTE,
                           CHECK_FLAG_NORMAL,
                           obj_owner_id,
-                          role_id_array));
+                          role_id_array),
+                          K(obj_tenant_id), K(user_id), K(database_name), K(obj_id), K(obj_owner_id), K(role_id_array));
     }
     if (ROUTINE_SCHEMA == schema_type && ret == OB_TABLE_NOT_EXIST) {
       ret = OB_WRONG_COLUMN_NAME;
@@ -4244,7 +4315,9 @@ ObPLCompileUnit::ObPLCompileUnit(sql::ObLibCacheNameSpace ns,
                                  lib::MemoryContext &mem_context)
     : ObPLCacheObject(ns, mem_context), routine_table_(allocator_),
       type_table_(), helper_(allocator_), di_helper_(allocator_),
-      can_cached_(true)
+      can_cached_(true),
+      exec_env_(),
+      profiler_unit_info_(std::make_pair(OB_INVALID_ID, INVALID_PROC_TYPE))
 {
 #ifndef USE_MCJIT
   int ret = OB_SUCCESS;
@@ -4453,11 +4526,18 @@ int ObPLFunction::is_special_pkg_invoke_right(ObSchemaGetterGuard &guard, bool &
   return ret;
 }
 
+int ObPLINS::calc_expr(uint64_t package_id, int64_t expr_idx, ObObjParam &result)
+{
+  int ret = OB_NOT_SUPPORTED;
+  LOG_USER_WARN(OB_NOT_SUPPORTED, "call expr on base class ObIPLNS");
+  return ret;
+}
+
 int ObPLINS::init_complex_obj(ObIAllocator &allocator,
                               const ObPLDataType &pl_type,
                               common::ObObjParam &obj,
                               bool set_allocator,
-                              bool set_null) const
+                              bool set_null)
 {
   int ret = OB_SUCCESS;
   int64_t init_size = 0;
@@ -4489,16 +4569,36 @@ int ObPLINS::init_complex_obj(ObIAllocator &allocator,
     OX (record = reinterpret_cast<ObPLRecord*>(ptr));
     for (int64_t i = 0; OB_SUCC(ret) && i < record_type->get_member_count(); ++i) {
       CK (OB_NOT_NULL(record_type->get_member(i)));
+      CK (OB_NOT_NULL(record_type->get_record_member(i)));
       OZ (record->get_element(i, member));
       CK (OB_NOT_NULL(member));
-      if (record_type->get_member(i)->is_obj_type()) {
-        OX (new (member) ObObj(ObNullType));
+      OX (new (member) ObObj(ObNullType));
+      if (OB_FAIL(ret)) {
+      } else if (record_type->get_record_member(i)->get_default() != OB_INVALID_INDEX) {
+        ObObjParam default_v;
+        if (record_type->is_package_type()) {
+          OZ (calc_expr(extract_package_id(pl_type.get_user_type_id()),
+                        record_type->get_record_member(i)->get_default(),
+                        default_v));
+        } else {
+          OZ (calc_expr(OB_INVALID_ID,
+                        record_type->get_record_member(i)->get_default(),
+                        default_v));
+        }
+        if (OB_FAIL(ret)) {
+        } else if (record_type->get_member(i)->is_obj_type()) {
+          OZ (deep_copy_obj(allocator, default_v, *member));
+        } else {
+          OZ (ObUserDefinedType::deep_copy_obj(allocator, default_v, *member));
+        }
       } else {
-        int64_t init_size = OB_INVALID_SIZE;
-        int64_t member_ptr = 0;
-        OZ (record_type->get_member(i)->get_size(PL_TYPE_INIT_SIZE, init_size));
-        OZ (record_type->get_member(i)->newx(allocator, this, member_ptr));
-        OX (member->set_extend(member_ptr, record_type->get_member(i)->get_type(), init_size));
+        if (!record_type->get_member(i)->is_obj_type()) {
+          int64_t init_size = OB_INVALID_SIZE;
+          int64_t member_ptr = 0;
+          OZ (record_type->get_member(i)->get_size(PL_TYPE_INIT_SIZE, init_size));
+          OZ (record_type->get_member(i)->newx(allocator, this, member_ptr));
+          OX (member->set_extend(member_ptr, record_type->get_member(i)->get_type(), init_size));
+        }
       }
     }
     // f(self object_type, p1 out object_type), p1 will be init here, we have to set it null

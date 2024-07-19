@@ -120,9 +120,11 @@ int ObMPStmtPrexecute::before_process()
     }
 
     // sql
-    if (OB_SUCC(ret) && OB_FAIL(ObMySQLUtil::get_length(pos, sql_len_))) {
-      LOG_WARN("failed to get length", K(ret));
-    } else {
+    PS_DEFENSE_CHECK(1)
+    {
+      if (OB_FAIL(ObMySQLUtil::get_length(pos, sql_len_))) {
+        LOG_WARN("failed to get length", K(ret));
+      }
       PS_DEFENSE_CHECK(sql_len_)
       {
         sql_.assign_ptr(pos, static_cast<ObString::obstr_size_t>(sql_len_));
@@ -245,7 +247,7 @@ int ObMPStmtPrexecute::before_process()
                     if (OB_FAIL(gctx_.sql_engine_->stmt_prepare(sql_,
                                                                 get_ctx(),
                                                                 result,
-                                                                false/*is_inner_sql*/))) {
+                                                                false /*is_inner_sql*/))) {
                       set_exec_start_timestamp(ObTimeUtility::current_time());
                       int cli_ret = OB_SUCCESS;
                       get_retry_ctrl().test_and_save_retry_state(gctx_,
@@ -359,6 +361,11 @@ int ObMPStmtPrexecute::before_process()
                     ret = OB_ERR_PREPARE_STMT_CHECKSUM;
                     LOG_ERROR("ps stmt checksum fail", K(ret), "session_id", session->get_sessid(),
                                                     K(ps_stmt_checksum), K(*ps_session_info));
+                    LOG_DBA_ERROR_V2(OB_SERVER_PS_STMT_CHECKSUM_MISMATCH, ret,
+                                     "ps stmt checksum fail. ",
+                                     "the ps stmt checksum is ", ps_stmt_checksum,
+                                     ", but current session stmt checksum is ", ps_session_info->get_ps_stmt_checksum(),
+                                     ". current session id is ", session->get_sessid(), ". ");
                 } else {
                   PS_DEFENSE_CHECK(4) // extend_flag
                   {
@@ -471,7 +478,12 @@ int ObMPStmtPrexecute::execute_response(ObSQLSessionInfo &session,
       ObPLExecCtx pl_ctx(cursor->get_allocator(), &result.get_exec_context(), NULL/*params*/,
                         NULL/*result*/, &ret, NULL/*func*/, true);
       get_ctx().cur_sql_ = sql_;
-      if (OB_FAIL(ObSPIService::dbms_dynamic_open(&pl_ctx, *cursor))) {
+      if (
+#ifdef ERRSIM
+          OB_FAIL(common::EventTable::COM_STMT_PREXECUTE_PS_CURSOR_OPEN_ERROR) ||
+#endif
+          OB_FAIL(ObSPIService::dbms_dynamic_open(&pl_ctx, *cursor))
+      ) {
         LOG_WARN("cursor open faild.", K(cursor->get_id()));
         // select do not support arraybinding
         if (!THIS_WORKER.need_retry()) {
@@ -497,6 +509,7 @@ int ObMPStmtPrexecute::execute_response(ObSQLSessionInfo &session,
         bool last_row = false;
         bool ac = true;
         int8_t has_result = 0;
+        ObSchemaGetterGuard schema_guard;
         if (0 != iteration_count_ && cursor->get_field_columns().count() > 0) {
           has_result = 1;
           LOG_DEBUG("has result set.", K(stmt_id_));
@@ -506,6 +519,8 @@ int ObMPStmtPrexecute::execute_response(ObSQLSessionInfo &session,
         } else if (OB_FAIL(response_param_query_header(session, &cursor->get_field_columns(),
                                           get_params(), stmt_id_, has_result, 0))) {
           LOG_WARN("send header packet faild.", K(ret));
+        } else if (OB_FAIL(gctx_.schema_service_->get_tenant_schema_guard(session.get_effective_tenant_id(), schema_guard))) {
+          LOG_WARN("get tenant schema guard failed ", K(ret), K(session.get_effective_tenant_id()));
         }
         if (-1 == cursor->get_current_position() && iteration_count_ > 0) {
           // execute 如果返回数据，需要更新一下cursor的指针位置
@@ -524,7 +539,7 @@ int ObMPStmtPrexecute::execute_response(ObSQLSessionInfo &session,
           ++cur;
           cursor->set_current_position(cur);
           is_fetched = true;
-          if (OB_FAIL(response_row(session, row, &cursor->get_field_columns(), cursor->is_packed()))) {
+          if (OB_FAIL(response_row(session, row, &cursor->get_field_columns(), cursor->is_packed(), &result.get_exec_context(), true, &schema_guard))) {
             LOG_WARN("response row fail at line: ", K(ret), K(row_num));
           } else {
             ++row_num;
@@ -546,6 +561,7 @@ int ObMPStmtPrexecute::execute_response(ObSQLSessionInfo &session,
           const ObWarningBuffer *warnings_buf = common::ob_get_tsi_warning_buffer();
           uint16_t warning_count = 0;
           if (OB_ISNULL(warnings_buf)) {
+            // ignore ret
             LOG_WARN("can not get thread warnings buffer");
           } else {
             warning_count = static_cast<uint16_t>(warnings_buf->get_readable_warning_count());
@@ -596,11 +612,11 @@ int ObMPStmtPrexecute::execute_response(ObSQLSessionInfo &session,
       LOG_WARN("execute server cursor failed.", K(ret));
     }
   } else if (OB_FAIL(gctx_.sql_engine_->stmt_execute(stmt_id_,
-                                                    stmt_type_,
-                                                    params,
-                                                    ctx,
-                                                    result,
-                                                    false /* is_inner_sql */))) {
+                                                     stmt_type_,
+                                                     params,
+                                                     ctx,
+                                                     result,
+                                                     false /* is_inner_sql */))) {
     set_exec_start_timestamp(ObTimeUtility::current_time());
     if (!THIS_WORKER.need_retry()) {
       int cli_ret = OB_SUCCESS;
@@ -676,6 +692,7 @@ int ObMPStmtPrexecute::execute_response(ObSQLSessionInfo &session,
     } else if (OB_FAIL(response_result(result, session, force_sync_resp, async_resp_used))) {
       ObPhysicalPlanCtx *plan_ctx = result.get_exec_context().get_physical_plan_ctx();
       if (OB_ISNULL(plan_ctx)) {
+        // ignore ret
         LOG_ERROR("execute query fail, and plan_ctx is NULL", K(ret));
       } else {
         LOG_WARN("execute query fail",
@@ -1027,7 +1044,7 @@ int ObMPStmtPrexecute::response_returning_rows(ObSQLSessionInfo &session,
         arraybinding_row_->get_cell(i+2) = value;
       }
       arraybinding_row_->get_cell(arraybinding_row_->get_count() - 1).set_null();
-      if (OB_SUCCESS != (response_ret = response_row(session, *arraybinding_row_, arraybinding_columns_, is_packed))) {
+      if (OB_SUCCESS != (response_ret = response_row(session, *arraybinding_row_, arraybinding_columns_, is_packed, &result.get_exec_context()))) {
         LOG_WARN("fail to response row to client", K(response_ret));
       }
     }
@@ -1046,7 +1063,7 @@ int ObMPStmtPrexecute::response_returning_rows(ObSQLSessionInfo &session,
       }
       arraybinding_row_->get_cell(arraybinding_row_->get_count() - 1).set_varchar(ob_oracle_strerror(ret));
       LOG_DEBUG("error occured before send arraybinding_row_", KPC(arraybinding_row_));
-      if (OB_SUCCESS != (response_ret = response_row(session, *arraybinding_row_, arraybinding_columns_, false))) {
+      if (OB_SUCCESS != (response_ret = response_row(session, *arraybinding_row_, arraybinding_columns_, false, &result.get_exec_context()))) {
         LOG_WARN("fail to response row to client", K(response_ret));
       }
       if (is_save_exception_) {

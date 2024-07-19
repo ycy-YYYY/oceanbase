@@ -10,10 +10,10 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include "ob_multi_data_source.h"
+#include "storage/tx/ob_multi_data_source.h"
 #include "lib/ob_abort.h"
 #include "lib/ob_errno.h"
-#include "ob_trans_define.h"
+#include "storage/tx/ob_trans_define.h"
 #include "share/ob_errno.h"
 #include "storage/ddl/ob_ddl_clog.h"
 #include "storage/tx/ob_trans_part_ctx.h"
@@ -26,6 +26,8 @@
 #include "storage/multi_data_source/compile_utility/mds_register.h"
 #undef NEED_MDS_REGISTER_DEFINE
 #include "share/ob_standby_upgrade.h"  // ObStandbyUpgrade
+#include "storage/multi_data_source/runtime_utility/mds_tlocal_info.h"
+#include "share/allocator/ob_shared_memory_allocator_mgr.h"
 
 namespace oceanbase
 {
@@ -37,73 +39,6 @@ using namespace transaction::tablelock;
 
 namespace transaction
 {
-
-//#####################################################
-// ObTxBufferNode
-//#####################################################
-
-OB_SERIALIZE_MEMBER(ObTxBufferNode, type_, data_, register_no_);
-
-int ObTxBufferNode::init(const ObTxDataSourceType type,
-                         const ObString &data,
-                         const share::SCN &base_scn,
-                         mds::BufferCtx *ctx)
-{
-  int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(type <= ObTxDataSourceType::UNKNOWN || type >= ObTxDataSourceType::MAX_TYPE)) {
-    ret = OB_INVALID_ARGUMENT;
-    TRANS_LOG(WARN, "invalid argument", KR(ret), K(type));
-  } else {
-    reset();
-    type_ = type;
-    data_ = data;
-    mds_base_scn_ = base_scn;
-    buffer_ctx_node_.set_ctx(ctx);
-  }
-  return ret;
-}
-
-int ObTxBufferNode::set_mds_register_no(const uint64_t register_no)
-{
-  int ret = OB_SUCCESS;
-  if (register_no <= 0 || !is_valid()) {
-    ret = OB_INVALID_ARGUMENT;
-    TRANS_LOG(WARN, "invalid argument", K(ret), K(register_no), KPC(this));
-  } else if (register_no_ > 0) {
-    ret = OB_ERR_UNEXPECTED;
-    TRANS_LOG(WARN, "invalid register no", K(ret), K(register_no), KPC(this));
-  } else {
-    register_no_ = register_no;
-    // TRANS_LOG(INFO, "set register no in mds node", K(ret), KPC(this));
-  }
-
-  return ret;
-}
-
-void ObTxBufferNode::replace_data(const common::ObString &data)
-{
-  if (nullptr != data_.ptr()) {
-    ob_free(data_.ptr());
-    data_.assign_ptr(nullptr, 0);
-  }
-
-  data_ = data;
-  has_submitted_ = false;
-  has_synced_ = false;
-}
-
-bool ObTxBufferNode::operator==(const ObTxBufferNode &buffer_node) const
-{
-  bool is_same = false;
-
-  if (has_submitted_ == buffer_node.has_submitted_ && has_synced_ == buffer_node.has_synced_
-      && mds_base_scn_ == buffer_node.mds_base_scn_ && type_ == buffer_node.type_
-      && data_ == buffer_node.data_) {
-    is_same = true;
-  }
-
-  return is_same;
-}
 
 //#####################################################
 // ObMulSourceTxDataNotifier
@@ -220,10 +155,11 @@ int ObMulSourceTxDataNotifier::notify(const ObTxBufferNodeArray &array,
         }
         }
       } else {
-        mds::TLOCAL_MDS_TRANS_NOTIFY_TYPE = notify_type;
+        mds::TLOCAL_MDS_INFO.notify_type_ = notify_type;
+        mds::BufferCtx &buffer_ctx = *const_cast<mds::BufferCtx*>(node.get_buffer_ctx_node().get_ctx());
         if (arg.is_incomplete_replay_) {
           // pass incomplete replay arg
-          const_cast<mds::BufferCtx*>(node.get_buffer_ctx_node().get_ctx())->set_incomplete_replay(arg.is_incomplete_replay_);
+          buffer_ctx.set_incomplete_replay(arg.is_incomplete_replay_);
         }
         switch (node.type_) {
           #define NEED_GENERATE_MDS_FRAME_CODE_FOR_TRANSACTION
@@ -232,49 +168,58 @@ int ObMulSourceTxDataNotifier::notify(const ObTxBufferNodeArray &array,
             switch (notify_type) {\
               case NotifyType::REGISTER_SUCC:\
               {\
+                if (std::is_base_of<mds::MdsCtx, BUFFER_CTX_TYPE>::value ||\
+                    std::is_same<mds::MdsCtx, BUFFER_CTX_TYPE>::value) {\
+                  static_cast<mds::MdsCtx&>(buffer_ctx).set_seq_no(node.get_seq_no());\
+                }\
                 if (!arg.for_replay_) {\
-                  if (OB_FAIL(HELPER_CLASS::on_register(buf, len, *const_cast<mds::BufferCtx*>(node.get_buffer_ctx_node().get_ctx())))) {\
+                  if (OB_FAIL(HELPER_CLASS::on_register(buf, len, buffer_ctx))) {\
                     MDS_LOG(WARN, "call user helper on_register failed", KR(ret));\
                   } else {\
-                    MDS_LOG(TRACE, "call user helper on_register success", K(node));\
+                    MDS_LOG(INFO, "buffer ctx on_register", K(node), KP(&buffer_ctx), K(buffer_ctx));\
                   }\
                 } else {\
-                  if (OB_FAIL(HELPER_CLASS::on_replay(buf, len, arg.scn_, *const_cast<mds::BufferCtx*>(node.get_buffer_ctx_node().get_ctx())))) {\
+                  if (OB_FAIL(HELPER_CLASS::on_replay(buf, len, arg.scn_, buffer_ctx))) {\
                     MDS_LOG(WARN, "call user helper on_replay failed", KR(ret));\
                   } else {\
-                    MDS_LOG(TRACE, "call user helper on_replay success", K(node));\
+                    MDS_LOG(INFO, "buffer ctx on_replay", K(node), KP(&buffer_ctx), K(buffer_ctx));\
                   }\
                 }\
               }\
               break;\
               case NotifyType::ON_REDO:\
-              node.get_buffer_ctx_node().on_redo(arg.scn_);\
+              MDS_LOG(INFO, "buffer ctx on_redo", K(node), KP(&buffer_ctx), K(buffer_ctx));\
+              buffer_ctx.on_redo(arg.scn_);\
               break;\
               case NotifyType::TX_END:\
-              node.get_buffer_ctx_node().before_prepare();\
+              MDS_LOG(INFO, "buffer ctx before_prepare", K(node), KP(&buffer_ctx), K(buffer_ctx));\
+              buffer_ctx.before_prepare();\
               break;\
               case NotifyType::ON_PREPARE:\
-              node.get_buffer_ctx_node().on_prepare(arg.trans_version_);\
+              MDS_LOG(INFO, "buffer ctx on_prepare", K(node), KP(&buffer_ctx), K(buffer_ctx));\
+              buffer_ctx.on_prepare(arg.trans_version_);\
               break;\
               case NotifyType::ON_COMMIT:\
+              MDS_LOG(INFO, "buffer ctx on_commit", K(node), KP(&buffer_ctx), K(buffer_ctx));\
               if (OB_FAIL(common::meta::MdsCommitForOldMdsWrapper<HELPER_CLASS>::\
-                                        on_commit_for_old_mds(buf,\
-                                                              len,\
-                                                              tmp_notify_arg))) {\
+                          on_commit_for_old_mds(buf,\
+                                                len,\
+                                                tmp_notify_arg))) {\
                 MDS_LOG(WARN, "fail to on_commit_for_old_mds", KR(ret));\
               } else if (arg.for_replay_ && !common::meta::MdsCheckCanReplayWrapper<HELPER_CLASS>::\
-                                     check_can_replay_commit(buf,\
-                                                             len,\
-                                                             arg.scn_,\
-                                                             *const_cast<mds::BufferCtx*>(node.get_buffer_ctx_node().get_ctx()))) {\
+                                            check_can_replay_commit(buf,\
+                                                                    len,\
+                                                                    arg.scn_,\
+                                                                    buffer_ctx)) {\
                 ret = OB_EAGAIN;\
                 MDS_LOG(INFO, "check can replay commit return false", KR(ret), K(node));\
               } else {\
-                node.get_buffer_ctx_node().on_commit(arg.trans_version_, arg.scn_);\
+                buffer_ctx.on_commit(arg.trans_version_, arg.scn_);\
               }\
               break;\
               case NotifyType::ON_ABORT:\
-              node.get_buffer_ctx_node().on_abort(arg.scn_);\
+              MDS_LOG(INFO, "buffer ctx on_abort", K(node), KP(&buffer_ctx), K(buffer_ctx));\
+              buffer_ctx.on_abort(arg.scn_);\
               break;\
               default:\
               ob_abort();\
@@ -286,7 +231,7 @@ int ObMulSourceTxDataNotifier::notify(const ObTxBufferNodeArray &array,
           default:
             ob_abort();
         }
-        mds::TLOCAL_MDS_TRANS_NOTIFY_TYPE = NotifyType::UNKNOWN;
+        mds::TLOCAL_MDS_INFO.reset();
       }
       if (OB_FAIL(ret)) {
         TRANS_LOG(WARN, "notify data source failed", KR(ret), K(node));
@@ -575,8 +520,7 @@ int ObMDSInnerSQLStr::set(const char *msd_buf,
                           const ObRegisterMdsFlag &register_flag)
 {
   int ret = OB_SUCCESS;
-  if (OB_ISNULL(msd_buf) || 0 == msd_buf_len || ObTxDataSourceType::UNKNOWN == type
-      || !ls_id.is_valid()) {
+  if (OB_ISNULL(msd_buf) || 0 == msd_buf_len || ObTxDataSourceType::UNKNOWN == type || !ls_id.is_valid()) {
     ret = OB_INVALID_ARGUMENT;
     TRANS_LOG(WARN, "invalid arguments", K(ret), KP(msd_buf), K(msd_buf_len), K(type), K(ls_id));
   } else if (!mds_str_.empty()) {

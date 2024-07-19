@@ -127,7 +127,8 @@ ObOpSpec::ObOpSpec(ObIAllocator &alloc, const ObPhyOperatorType type)
     plan_depth_(0),
     max_batch_size_(0),
     need_check_output_datum_(false),
-    use_rich_format_(false)
+    use_rich_format_(false),
+    compress_type_(NONE_COMPRESSOR)
 {
 }
 
@@ -148,7 +149,8 @@ OB_SERIALIZE_MEMBER(ObOpSpec,
                     plan_depth_,
                     max_batch_size_,
                     need_check_output_datum_,
-                    use_rich_format_);
+                    use_rich_format_,
+                    compress_type_);
 
 DEF_TO_STRING(ObOpSpec)
 {
@@ -164,7 +166,8 @@ DEF_TO_STRING(ObOpSpec)
        K_(rows),
        K_(max_batch_size),
        K_(filters),
-       K_(use_rich_format));
+       K_(use_rich_format),
+       K_(compress_type));
   J_OBJ_END();
   return pos;
 }
@@ -616,27 +619,67 @@ int ObOperator::output_expr_sanity_check()
 int ObOperator::output_expr_sanity_check_batch()
 {
   int ret = OB_SUCCESS;
-  // TODO: add sanity check for different vector formats
 
-  // for (int64_t i = 0; OB_SUCC(ret) && i < spec_.output_.count(); ++i) {
-  //   const ObExpr *expr = spec_.output_[i];
-  //   if (OB_ISNULL(expr)) {
-  //     ret = OB_ERR_UNEXPECTED;
-  //     LOG_WARN("error unexpected, expr is nullptr", K(ret));
-  //   } else if (OB_FAIL(expr->eval_batch(eval_ctx_, *brs_.skip_, brs_.size_))) {
-  //     LOG_WARN("evaluate expression failed", K(ret));
-  //   } else if (!expr->is_batch_result()){
-  //     const ObDatum &datum = expr->locate_expr_datum(eval_ctx_);
-  //     SANITY_CHECK_RANGE(datum.ptr_, datum.len_);
-  //   } else {
-  //     const ObDatum *datums = expr->locate_batch_datums(eval_ctx_);
-  //     for (int64_t j = 0; j < brs_.size_; j++) {
-  //       if (!brs_.skip_->at(j)) {
-  //         SANITY_CHECK_RANGE(datums[j].ptr_, datums[j].len_);
-  //       }
-  //     }
-  //   }
-  // }
+  for (int64_t i = 0; OB_SUCC(ret) && i < spec_.output_.count(); ++i) {
+    const ObExpr *expr = spec_.output_[i];
+    if (OB_ISNULL(expr)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("error unexpected, expr is nullptr", K(ret));
+    } else if (OB_FAIL(expr->eval_vector(eval_ctx_, brs_))) {
+      LOG_WARN("eval vector failed", K(ret));
+    } else {
+      VectorFormat vec_fmt = expr->get_format(eval_ctx_);
+      ObIVector *ivec = expr->get_vector(eval_ctx_);
+      if (vec_fmt == VEC_UNIFORM || vec_fmt == VEC_UNIFORM_CONST) {
+        ObUniformBase *uni_data = static_cast<ObUniformBase *>(ivec);
+        if (vec_fmt == VEC_UNIFORM_CONST) {
+          if (brs_.skip_->accumulate_bit_cnt(brs_.size_) < brs_.size_) {
+            ObDatum &datum = uni_data->get_datums()[0];
+            SANITY_CHECK_RANGE(datum.ptr_, datum.len_);
+          }
+        } else {
+          ObDatum *datums = uni_data->get_datums();
+          for (int j = 0; j < brs_.size_; j++) {
+            if (!brs_.skip_->at(j)) {
+              SANITY_CHECK_RANGE(datums[j].ptr_, datums[j].len_);
+            }
+          }
+        }
+      } else if (vec_fmt == VEC_FIXED) {
+        ObFixedLengthBase *fixed_data = static_cast<ObFixedLengthBase *>(ivec);
+        ObBitmapNullVectorBase *nulls = static_cast<ObBitmapNullVectorBase *>(ivec);
+        int32_t len = fixed_data->get_length();
+        for (int j = 0; j < brs_.size_; j++) {
+          if (!brs_.skip_->at(j) && !nulls->is_null(j)) {
+            SANITY_CHECK_RANGE(fixed_data->get_data() + j * len, len);
+          }
+        }
+      } else if (vec_fmt == VEC_DISCRETE) {
+        ObDiscreteBase *dis_data = static_cast<ObDiscreteBase *>(ivec);
+        ObBitmapNullVectorBase *nulls = static_cast<ObBitmapNullVectorBase *>(ivec);
+        char **ptrs = dis_data->get_ptrs();
+        ObLength *lens = dis_data->get_lens();
+        for (int j = 0; j < brs_.size_; j++) {
+          if (!brs_.skip_->at(j) && !nulls->is_null(j)) {
+            SANITY_CHECK_RANGE(ptrs[j], lens[j]);
+          }
+        }
+      } else if (vec_fmt == VEC_CONTINUOUS) {
+        ObContinuousBase *cont_base = static_cast<ObContinuousBase *>(ivec);
+        ObBitmapNullVectorBase *nulls = static_cast<ObBitmapNullVectorBase *>(ivec);
+        uint32_t *offsets = cont_base->get_offsets();
+        char *data = cont_base->get_data();
+        for (int j = 0; j < brs_.size_; j++) {
+          if (!brs_.skip_->at(j) && !nulls->is_null(j)) {
+            SANITY_CHECK_RANGE(data + offsets[j], offsets[j + 1] - offsets[j]);
+          }
+        }
+      } else {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected format", K(ret), K(vec_fmt));
+      }
+    }
+  }
   return ret;
 }
 
@@ -1004,6 +1047,7 @@ int ObOperator::try_deregister_rt_monitor_node()
       && ctx_.is_rt_monitor_node_registered()) {
     ObPlanMonitorNodeList *list = MTL(ObPlanMonitorNodeList*);
     if (OB_ISNULL(list)) {
+      // ignore ret
       LOG_WARN("fail to revert monitor node", K(list));
     } else if (OB_FAIL(list->revert_monitor_node(op_monitor_info_))) {
       LOG_ERROR("fail to revert monitor node", K(ret), K(op_monitor_info_));
@@ -1018,39 +1062,35 @@ int ObOperator::close()
 {
   int ret = OB_SUCCESS;
   int child_ret = OB_SUCCESS;
-  if (OB_FAIL(check_stack_overflow())) {
-    LOG_WARN("failed to check stack overflow", K(ret));
-  } else {
-    OperatorOpenOrder open_order = get_operator_open_order();
-    if (OPEN_SELF_ONLY != open_order) {
-      //first call close of children
-      for (int64_t i = 0; i < child_cnt_; ++i) {
-        // children_ pointer is checked before operator open, no need check again.
-        int tmp_ret = children_[i]->close();
-        if (OB_SUCCESS != tmp_ret) {
-          ret = OB_SUCCESS == ret ? tmp_ret : ret;
-          LOG_WARN("Close child operator failed", K(child_ret), "op_type", op_name());
-        }
+  OperatorOpenOrder open_order = get_operator_open_order();
+  if (OPEN_SELF_ONLY != open_order) {
+    //first call close of children
+    for (int64_t i = 0; i < child_cnt_; ++i) {
+      // children_ pointer is checked before operator open, no need check again.
+      int tmp_ret = SMART_CALL(children_[i]->close());
+      if (OB_SUCCESS != tmp_ret) {
+        ret = OB_SUCCESS == ret ? tmp_ret : ret;
+        LOG_WARN("Close child operator failed", K(child_ret), "op_type", op_name());
       }
     }
+  }
 
-    // no matter what, must call operator's close function
-    int tmp_ret = inner_close();
-    if (OB_SUCCESS != tmp_ret) {
-      ret = tmp_ret; // overwrite child's error code.
-      LOG_WARN("Close this operator failed", K(ret), "op_type", op_name());
-    }
-    IGNORE_RETURN submit_op_monitor_node();
-    IGNORE_RETURN setup_op_feedback_info();
-    #ifdef ENABLE_DEBUG_LOG
+  // no matter what, must call operator's close function
+  int tmp_ret = inner_close();
+  if (OB_SUCCESS != tmp_ret) {
+    ret = tmp_ret; // overwrite child's error code.
+    LOG_WARN("Close this operator failed", K(ret), "op_type", op_name());
+  }
+  IGNORE_RETURN submit_op_monitor_node();
+  IGNORE_RETURN setup_op_feedback_info();
+  #ifdef ENABLE_DEBUG_LOG
     if (nullptr != dummy_mem_context_) {
       if (nullptr != dummy_ptr_) {
         dummy_mem_context_->get_malloc_allocator().free(dummy_ptr_);
         dummy_ptr_ = nullptr;
       }
     }
-    #endif
-  }
+  #endif
   return ret;
 }
 
@@ -1315,7 +1355,7 @@ int ObOperator::get_next_batch(const int64_t max_row_cnt, const ObBatchRows *&ba
           }
         }
 #ifdef ENABLE_SANITY
-        if (OB_SUCC(ret) && !all_filtered) {
+        if (OB_SUCC(ret) && spec_.use_rich_format_ && !all_filtered) {
           if (OB_FAIL(output_expr_sanity_check_batch())) {
             LOG_WARN("output expr sanity check batch failed", K(ret));
           }

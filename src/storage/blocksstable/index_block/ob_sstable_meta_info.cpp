@@ -285,10 +285,10 @@ int ObRootBlockInfo::read_block_data(
     handle.reset();
     read_info.io_desc_.set_mode(ObIOMode::READ);
     read_info.io_desc_.set_wait_event(ObWaitEventIds::DB_FILE_DATA_READ);
-    read_info.io_desc_.set_group_id(ObIOModule::ROOT_BLOCK_IO);
     read_info.io_timeout_ms_ = GCONF._data_storage_io_timeout / 1000L;
     read_info.buf_ = buf;
-    read_info.io_desc_.set_group_id(ObIOModule::ROOT_BLOCK_IO);
+    read_info.io_desc_.set_resource_group_id(THIS_WORKER.get_group_id());
+    read_info.io_desc_.set_sys_module_id(ObIOModule::ROOT_BLOCK_IO);
     if (OB_FAIL(addr.get_block_addr(read_info.macro_block_id_, read_info.offset_, read_info.size_))) {
       LOG_WARN("fail to get block address", K(ret), K(addr));
     } else if (OB_FAIL(ObBlockManager::read_block(read_info, handle))) {
@@ -462,7 +462,7 @@ int ObRootBlockInfo::deep_copy(
   const int64_t variable_size = get_variable_size();
   if (OB_ISNULL(buf) || OB_UNLIKELY(buf_len < variable_size + pos)) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid argument", K(ret), KP(buf), K(buf_len), K(variable_size), K(pos));
+    LOG_WARN("invalid argument", K(ret), KP(buf), K(buf_len), K(variable_size), K(pos), K(block_data_));
   } else if (ObMicroBlockData::DDL_BLOCK_TREE == block_data_.type_) {
     dest.block_data_ = block_data_;
     dest.addr_ = addr_;

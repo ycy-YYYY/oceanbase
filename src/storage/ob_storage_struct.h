@@ -309,6 +309,9 @@ struct ObGetMergeTablesResult
   share::ObScnRange scn_range_;
   share::ObDiagnoseLocation *error_location_;
   ObStorageSnapshotInfo snapshot_info_;
+  //for backfill
+  bool is_backfill_;
+  share::SCN backfill_scn_;
   ObGetMergeTablesResult();
   bool is_valid() const;
   void reset_handle_and_range();
@@ -316,8 +319,9 @@ struct ObGetMergeTablesResult
   void reset();
   int assign(const ObGetMergeTablesResult &src);
   int copy_basic_info(const ObGetMergeTablesResult &src);
+  share::SCN get_merge_scn() const;
   TO_STRING_KV(K_(version_range), K_(scn_range), K_(merge_version),
-      K_(handle), K_(update_tablet_directly), K_(schedule_major));
+      K_(handle), K_(update_tablet_directly), K_(schedule_major), K_(is_backfill), K_(backfill_scn));
 };
 
 OB_INLINE bool is_valid_migrate_status(const ObMigrateStatus &status)
@@ -343,6 +347,18 @@ public:
   int64_t data_format_version_;
 };
 
+struct UpdateUpperTransParam final
+{
+public:
+  UpdateUpperTransParam();
+  ~UpdateUpperTransParam();
+  void reset();
+  TO_STRING_KV(K_(new_upper_trans), K_(last_minor_end_scn));
+public:
+  ObIArray<int64_t> *new_upper_trans_;
+  share::SCN last_minor_end_scn_;
+};
+
 struct ObUpdateTableStoreParam
 {
   ObUpdateTableStoreParam() = default;
@@ -351,6 +367,12 @@ struct ObUpdateTableStoreParam
     const int64_t multi_version_start,
     const ObStorageSchema *storage_schema,
     const int64_t rebuild_seq);
+  ObUpdateTableStoreParam(
+    const int64_t snapshot_version,
+    const int64_t multi_version_start,
+    const ObStorageSchema *storage_schema,
+    const int64_t rebuild_seq,
+    const UpdateUpperTransParam upper_trans_param);
   ObUpdateTableStoreParam(
     const blocksstable::ObSSTable *sstable,
     const int64_t snapshot_version,
@@ -380,7 +402,7 @@ struct ObUpdateTableStoreParam
                K_(need_report), KPC_(storage_schema), K_(rebuild_seq), K_(update_with_major_flag),
                K_(need_check_sstable), K_(ddl_info), K_(allow_duplicate_sstable),
                "merge_type", merge_type_to_str(merge_type_),
-               K_(need_check_transfer_seq), K_(transfer_seq));
+               K_(need_check_transfer_seq), K_(transfer_seq), K_(upper_trans_param));
 
   const blocksstable::ObSSTable *sstable_;
   int64_t snapshot_version_;
@@ -396,6 +418,7 @@ struct ObUpdateTableStoreParam
   bool need_check_transfer_seq_;
   int64_t transfer_seq_;
   compaction::ObMergeType merge_type_; // set merge_type only when update tablet in compaction
+  UpdateUpperTransParam upper_trans_param_; // set upper_trans_param_ only when update upper_trans_version
 };
 
 struct ObBatchUpdateTableStoreParam final
@@ -408,7 +431,7 @@ struct ObBatchUpdateTableStoreParam final
   int get_max_clog_checkpoint_scn(share::SCN &clog_checkpoint_scn) const;
 
   TO_STRING_KV(K_(tables_handle), K_(rebuild_seq), K_(is_transfer_replace),
-      K_(start_scn), KP_(tablet_meta), K_(update_ddl_sstable), K_(restore_status));
+      K_(start_scn), KP_(tablet_meta), K_(restore_status));
 
   ObTablesHandleArray tables_handle_;
 #ifdef ERRSIM
@@ -418,7 +441,6 @@ struct ObBatchUpdateTableStoreParam final
   bool is_transfer_replace_;
   share::SCN start_scn_;
   const ObMigrationTabletParam *tablet_meta_;
-  bool update_ddl_sstable_;
   ObTabletRestoreStatus::STATUS restore_status_;
 
   DISALLOW_COPY_AND_ASSIGN(ObBatchUpdateTableStoreParam);

@@ -358,6 +358,10 @@ int ObRemoteBaseExecuteP<T>::sync_send_result(ObExecContext &exec_ctx,
         //scanner.set_force_rollback(plan_ctx->is_force_rollback());
       }
 
+      scanner.set_memstore_read_row_count(
+        my_session->get_raw_audit_record().exec_record_.get_cur_memstore_read_row_count());
+      scanner.set_ssstore_read_row_count(
+        my_session->get_raw_audit_record().exec_record_.get_cur_ssstore_read_row_count());
       // set last_insert_id no matter success or fail after open
       scanner.set_last_insert_id_to_client(plan_ctx->calc_last_insert_id_to_client());
       scanner.set_last_insert_id_session(plan_ctx->calc_last_insert_id_session());
@@ -612,12 +616,10 @@ void ObRemoteBaseExecuteP<T>::record_sql_audit_and_plan_stat(
         if (!exec_ctx_.get_sql_ctx()->self_add_plan_ && exec_ctx_.get_sql_ctx()->plan_cache_hit_) {
           mutable_plan->update_plan_stat(audit_record,
                                         false, // false mean not first update plan stat
-                                        exec_ctx_.get_is_evolution(),
                                         table_row_count_list);
         } else if (exec_ctx_.get_sql_ctx()->self_add_plan_ && !exec_ctx_.get_sql_ctx()->plan_cache_hit_) {
           mutable_plan->update_plan_stat(audit_record,
                                         true,
-                                        exec_ctx_.get_is_evolution(),
                                         table_row_count_list);
 
         }
@@ -706,7 +708,7 @@ int ObRemoteBaseExecuteP<T>::execute_with_sql(ObRemoteTask &task)
         NG_TRACE_EXT(execute_task, OB_ID(task), task, OB_ID(stmt_type), plan->get_stmt_type());
         if (OB_FAIL(execute_remote_plan(exec_ctx_, *plan))) {
           LOG_WARN("execute remote plan failed", K(ret), K(task), K(exec_ctx_.get_das_ctx().get_snapshot()));
-        } else if (plan->need_record_plan_info()) {
+        } else if (plan->try_record_plan_info()) {
           if(exec_ctx_.get_feedback_info().is_valid() &&
              plan->get_logical_plan().is_valid() &&
              OB_FAIL(plan->set_feedback_info(exec_ctx_))) {

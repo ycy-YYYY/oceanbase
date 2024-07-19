@@ -285,7 +285,7 @@ int ObLogGroupBy::do_re_est_cost(EstimateCostInfo &param, double &card, double &
         need_ndv /= selectivity;
       }
       if (child_card > 0) {
-        param.need_row_count_ = child_card * (1 - std::pow((1 - need_ndv / child_ndv), child_ndv / child_card));
+        param.need_row_count_ = child_card * need_ndv / child_ndv;
         param.need_row_count_ /= number_of_copies;
       } else {
         param.need_row_count_ = 0;
@@ -703,13 +703,13 @@ int ObLogGroupBy::compute_op_ordering()
       LOG_WARN("failed to set op ordering.", K(ret));
     } else {
       is_range_order_ = child->get_is_range_order();
-      is_local_order_ = is_fully_partition_wise() && !get_op_ordering().empty();
+      is_local_order_ = is_fully_partition_wise() && !get_op_ordering().empty() && !is_range_order_;
     }
   } else if (OB_FAIL(set_op_ordering(child->get_op_ordering()))) {
     LOG_WARN("failed to set op ordering", K(ret));
   } else {
     is_range_order_ = child->get_is_range_order();
-    is_local_order_ = is_fully_partition_wise() && !get_op_ordering().empty();
+    is_local_order_ = is_fully_partition_wise() && !get_op_ordering().empty() && !is_range_order_;
   }
   return ret;
 }
@@ -901,5 +901,20 @@ int ObLogGroupBy::get_card_without_filter(double &card)
 {
   int ret = OB_SUCCESS;
   card = get_distinct_card();
+  return ret;
+}
+
+int ObLogGroupBy::check_use_child_ordering(bool &used, int64_t &inherit_child_ordering_index)
+{
+  int ret = OB_SUCCESS;
+  used = true;
+  inherit_child_ordering_index = first_child;
+  if (HASH_AGGREGATE == get_algo()) {
+    inherit_child_ordering_index = -1;
+    used = false;
+  } else if (get_group_by_exprs().empty() &&
+             get_rollup_exprs().empty()) {
+    used = false;
+  }
   return ret;
 }

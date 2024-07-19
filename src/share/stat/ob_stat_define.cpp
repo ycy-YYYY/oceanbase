@@ -225,6 +225,7 @@ int ObTableStatParam::assign_common_property(const ObTableStatParam &other)
   need_approx_ndv_ = other.need_approx_ndv_;
   duration_time_ = other.duration_time_;
   allocator_ = other.allocator_;
+  online_sample_percent_ = other.online_sample_percent_;
   return ret;
 }
 
@@ -283,6 +284,36 @@ bool ObTableStatParam::is_specify_column_gather() const
   }
   return is_specify;
 }
+
+int64_t ObTableStatParam::get_need_gather_column() const
+{
+  int64_t valid_column = 0;
+  for (int64_t i = 0; i < column_params_.count(); ++i) {
+    if (column_params_.at(i).need_basic_stat()) {
+      ++ valid_column;
+    }
+  }
+  return valid_column;
+}
+
+int64_t ObOptStatGatherParam::get_need_gather_column() const
+{
+  int64_t valid_column = 0;
+  for (int64_t i = 0; i < column_params_.count(); ++i) {
+    if (column_params_.at(i).need_basic_stat()) {
+      ++ valid_column;
+    }
+  }
+  return valid_column;
+}
+
+OB_SERIALIZE_MEMBER(ObOptDmlStat,
+                    tenant_id_,
+                    table_id_,
+                    tablet_id_,
+                    insert_row_count_,
+                    update_row_count_,
+                    delete_row_count_);
 
 }
 }

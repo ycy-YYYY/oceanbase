@@ -154,12 +154,22 @@ struct ObConv2JsonParam {
   format_json_(format_json),
   is_schema_(is_schema)
   {}
+
+  ObConv2JsonParam(bool to_bin, bool has_lob_header, bool deep_copy, bool relax_type, bool format_json, bool is_schema, bool is_wrap_fail) :
+    to_bin_(to_bin),
+    has_lob_header_(has_lob_header),
+    deep_copy_(deep_copy),
+    relax_type_(relax_type),
+    format_json_(format_json),
+    is_schema_(is_schema),
+    wrap_on_fail_(is_wrap_fail) {}
   bool to_bin_;
   bool has_lob_header_;
   bool deep_copy_ = false;
   bool relax_type_ = true;
   bool format_json_ = false;
   bool is_schema_ = false;
+  bool wrap_on_fail_ = false;
 };
 
 class ObJsonExprHelper final
@@ -267,6 +277,10 @@ public:
   static int get_json_val(const common::ObObj &data, ObExecContext *ctx,
                           bool is_bool, common::ObIAllocator *allocator,
                           ObIJsonBase*& j_base, bool to_bin= false);
+  static int refine_range_json_value_const(
+                          const common::ObObj &data, ObExecContext *ctx,
+                          bool is_bool, common::ObIAllocator *allocator,
+                          ObIJsonBase*& j_base, bool to_bin = false);
   static int get_json_val(const common::ObDatum &data,
                           ObExecContext &ctx,
                           ObExpr* expr,
@@ -303,6 +317,15 @@ public:
   static int is_json_zero(const ObString& data, int& result);
 
   static int is_json_true(const ObString& data, int& result);
+
+  static int get_sql_scalar_type(ObEvalCtx& ctx,
+                                 int64_t origin,
+                                 ObObjType& scalar_type,
+                                 int32_t& scalar_len,
+                                 int32_t& precision,
+                                 int32_t& scale,
+                                 ObAccuracy& accuracy,
+                                 ObLengthSemantics& length_semantics);
   
   /*
   try to transfrom scalar data to jsonBase

@@ -301,10 +301,9 @@ int ObTransformTempTable::check_stmt_can_materialize(ObSelectStmt *stmt, bool is
       }
     } else {
       // Currently, we will not push `limit` in stmt into cte
-      ObAggFunRawExpr *dummy = NULL;
       bool can_use_fast_min_max = false;
       STOP_OPT_TRACE;
-      if (OB_FAIL(ObTransformMinMax::check_transform_validity(*ctx_, stmt, dummy, can_use_fast_min_max))) {
+      if (OB_FAIL(ObTransformMinMax::check_transform_validity(*ctx_, stmt, can_use_fast_min_max))) {
         LOG_WARN("failed to check fast min max", K(ret));
       }
       RESUME_OPT_TRACE;
@@ -2203,7 +2202,7 @@ int ObTransformTempTable::sort_materialize_stmts(Ob2DArray<MaterializeStmts *> &
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("unexpect null stmts", K(ret));
     } else {
-      std::sort(subqueries->begin(), subqueries->end(), cmp_func1);
+      lib::ob_sort(subqueries->begin(), subqueries->end(), cmp_func1);
     }
   }
   for (int64_t i = 0; OB_SUCC(ret) && i < materialize_stmts.count(); ++i) {
@@ -2218,7 +2217,7 @@ int ObTransformTempTable::sort_materialize_stmts(Ob2DArray<MaterializeStmts *> &
       LOG_WARN("failed to push back index", K(ret));
     }
   }
-  std::sort(index_map.begin(), index_map.end(), cmp_func2);
+  lib::ob_sort(index_map.begin(), index_map.end(), cmp_func2);
   for (int64_t i = 0; OB_SUCC(ret) && i < index_map.count(); ++i) {
     int index = index_map.at(i).first;
     if (index < 0 || index >= materialize_stmts.count()) {
@@ -2396,7 +2395,7 @@ int ObTransformTempTable::accept_cte_transform(ObDMLStmt &origin_root_stmt,
   double temp_table_costs = 0.0;
   double dummy = 0.0;
   double temp_table_profit = 0.0;
-  STOP_OPT_TRACE;
+  BEGIN_OPT_TRACE_EVA_COST;
   if (OB_ISNULL(ctx_) || OB_UNLIKELY(origin_stmts.count() != trans_stmts.count())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected param", K(ret), K(ctx_));
@@ -2417,7 +2416,7 @@ int ObTransformTempTable::accept_cte_transform(ObDMLStmt &origin_root_stmt,
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected array size", K(origin_costs), K(trans_costs), K(trans_happened));
   }
-  RESUME_OPT_TRACE;
+  END_OPT_TRACE_EVA_COST;
   if (OB_SUCC(ret)) {
     if (!force_accept) {
       // Only consider stmt whose cost is reduced after extracting cte.

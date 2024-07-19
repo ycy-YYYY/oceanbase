@@ -16,6 +16,8 @@
 #include "storage/memtable/mvcc/ob_mvcc_iterator.h"
 #include "storage/memtable/ob_lock_wait_mgr.h"
 #include "storage/tx_table/ob_tx_table_guards.h"
+#include "storage/access/ob_rows_info.h"
+#include "storage/ddl/ob_tablet_ddl_kv.h"
 
 namespace oceanbase {
 using namespace common;
@@ -122,16 +124,31 @@ int ObRowConflictHandler::check_row_locked(const storage::ObTableIterParam &para
           } else if (max_trans_version < lock_state.trans_version_) {
             max_trans_version = lock_state.trans_version_;
           }
-        } else if (stores->at(i)->is_sstable()) {
-          blocksstable::ObSSTable *sstable = static_cast<blocksstable::ObSSTable *>(stores->at(i));
-          if (OB_FAIL(sstable->check_row_locked(param, rowkey, context, lock_state, row_state))) {
+        } else if (stores->at(i)->is_direct_load_memtable()) {
+          ObDDLKV *ddl_kv = static_cast<ObDDLKV *>(stores->at(i));
+          if (OB_FAIL(ddl_kv->check_row_locked(param, rowkey, context, lock_state, row_state))) {
             TRANS_LOG(WARN, "sstable check row lock fail", K(ret), K(rowkey));
           } else if (lock_state.is_locked_) {
             break;
           } else if (max_trans_version < row_state.max_trans_version_) {
             max_trans_version = row_state.max_trans_version_;
           }
-          TRANS_LOG(DEBUG, "check_row_locked meet sstable", K(ret), K(rowkey), K(row_state), K(*sstable));
+          TRANS_LOG(DEBUG, "check_row_locked meet direct load memtable", K(ret), K(rowkey), K(row_state), K(*ddl_kv));
+        } else if (stores->at(i)->is_sstable()) {
+          blocksstable::ObSSTable *sstable = static_cast<blocksstable::ObSSTable *>(stores->at(i));
+          if (OB_FAIL(sstable->check_row_locked(param, rowkey, context, lock_state, row_state))) {
+            TRANS_LOG(WARN, "sstable check row lock fail", K(ret), K(rowkey));
+          } else if (lock_state.is_locked_) {
+            break;
+          } else {
+            if (max_trans_version < lock_state.trans_version_) {
+              max_trans_version = lock_state.trans_version_;
+            }
+            if (max_trans_version < row_state.max_trans_version_) {
+              max_trans_version = row_state.max_trans_version_;
+            }
+          }
+          TRANS_LOG(DEBUG, "check_row_locked meet sstable", K(ret), K(rowkey), K(lock_state), K(row_state), K(*sstable));
         } else {
           ret = OB_ERR_UNEXPECTED;
           TRANS_LOG(ERROR, "unknown store type", K(ret));
@@ -267,6 +284,7 @@ int ObRowConflictHandler::post_row_read_conflict(ObMvccAccessCtx &acc_ctx,
               K(conflict_tx_id), K(acc_ctx), K(lock_wait_expire_ts));
   } else if (OB_ISNULL(lock_wait_mgr = MTL_WITH_CHECK_TENANT(ObLockWaitMgr*,
                                                   tx_desc->get_tenant_id()))) {
+    ret = OB_ERR_UNEXPECTED;
     TRANS_LOG(WARN, "can not get tenant lock_wait_mgr MTL", K(tx_desc->get_tenant_id()));
   } else {
     int tmp_ret = OB_SUCCESS;
@@ -313,8 +331,10 @@ int ObRowConflictHandler::post_row_read_conflict(ObMvccAccessCtx &acc_ctx,
                                        remote_tx,
                                        last_compact_cnt,
                                        total_trans_node_cnt,
+                                       tx_desc->get_assoc_session_id(),
                                        tx_id,
                                        conflict_tx_id,
+                                       ls_id,
                                        recheck_func);
     if (OB_SUCCESS != tmp_ret) {
       TRANS_LOG(WARN, "post_lock after tx conflict failed",

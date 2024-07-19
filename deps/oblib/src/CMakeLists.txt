@@ -18,10 +18,9 @@ target_include_directories(
   ${DEP_DIR}/include
   ${DEP_DIR}/include/libxml2
   ${DEVTOOLS_DIR}
-  ${DEP_3RD_DIR}/usr/local/include
-  ${DEP_3RD_DIR}/usr/include/
   ${DEP_DIR}/include/apr-1/
   ${DEP_DIR}/include/icu/common
+  ${DEP_DIR}/include/apache-arrow
   ${USSL_INCLUDE_DIRS}
 )
 
@@ -29,6 +28,12 @@ if(OB_BUILD_OPENSOURCE)
   target_include_directories(
     oblib_base_base_base INTERFACE
     ${DEP_DIR}/include/mariadb
+    )
+else()
+  target_include_directories(
+    oblib_base_base_base INTERFACE
+    ${DEP_3RD_DIR}/usr/local/include
+    ${DEP_3RD_DIR}/usr/include/
     )
 endif()
 
@@ -186,25 +191,30 @@ target_link_libraries(oblib_base_base_base
   INTERFACE
   oss
   easy
-  ${DEP_DIR}/lib/libisal.a
   ${DEP_DIR}/lib/libcurl.a
   ${DEP_DIR}/lib/libssl.a
   ${DEP_DIR}/lib/libcrypto.a
   ${DEP_DIR}/lib/libs2.a
+  ${DEP_DIR}/lib/libroaring.a
   ${LGPL_DEPS}
   $<$<STREQUAL:"${ARCHITECTURE}","x86_64">:${DEP_DIR}/lib/libunwind.a>
   ${DEP_DIR}/lib/libz.a
   ${DEP_DIR}/lib/libs2.a
+  ${DEP_DIR}/lib/libroaring.a
   ${DEP_DIR}/lib/libicui18n.a
   ${DEP_DIR}/lib/libicustubdata.a
   ${DEP_DIR}/lib/libicuuc.a
   ${DEP_DIR}/lib/libprotobuf-c.a
+  ${DEP_DIR}/lib64/libarrow.a
+  ${DEP_DIR}/lib64/libparquet.a
+  ${DEP_DIR}/lib64/libarrow_bundled_dependencies.a
   -L${DEP_DIR}/var/usr/lib64
   -L${DEP_DIR}/var/usr/lib
   -L${DEP_3RD_DIR}/usr/lib
   -L${DEP_3RD_DIR}/usr/lib64
   -laio -lpthread -ldl -lrt
   ${ARCH_LDFLAGS}
+  ${DEP_DIR}/lib/libisal.a
  )
 else()
 set(ignoreMe OB_STATIC_LINK_LGPL_DEPS)
@@ -212,24 +222,28 @@ target_link_libraries(oblib_base_base_base
   INTERFACE
   oss
   easy
-  ${DEP_DIR}/lib/libisal.a
   $<$<STREQUAL:"${ARCHITECTURE}","x86_64">:${DEP_DIR}/lib/libunwind.a>
   ${DEP_DIR}/lib/libcurl.a
   ${DEP_3RD_DIR}/usr/local/babassl-ob/lib/libssl.a
   ${DEP_3RD_DIR}/usr/local/babassl-ob/lib/libcrypto.a
   ${DEP_3RD_DIR}/u01/obclient/lib/libobclnt.a
   ${DEP_DIR}/lib/libs2.a
+  ${DEP_DIR}/lib/libroaring.a
   ${DEP_DIR}/lib/libz.a
   ${DEP_DIR}/lib/libicui18n.a
   ${DEP_DIR}/lib/libicustubdata.a
   ${DEP_DIR}/lib/libicuuc.a
   ${DEP_DIR}/lib/libprotobuf-c.a
+  ${DEP_DIR}/lib64/libarrow.a
+  ${DEP_DIR}/lib64/libparquet.a
+  ${DEP_DIR}/lib64/libarrow_bundled_dependencies.a
   -L${DEP_DIR}/var/usr/lib64
   -L${DEP_DIR}/var/usr/lib
   -L${DEP_3RD_DIR}/usr/lib
   -L${DEP_3RD_DIR}/usr/lib64
   -laio -lpthread -ldl -lrt
   ${ARCH_LDFLAGS}
+  ${DEP_DIR}/lib/libisal.a
  )
 endif()
 target_link_libraries(oblib_base_base INTERFACE oblib_base_base_base)

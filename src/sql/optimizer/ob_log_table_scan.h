@@ -35,6 +35,7 @@ struct ObTextRetrievalInfo
     topk_limit_expr_(NULL),
     topk_offset_expr_(NULL),
     with_ties_(false),
+    need_calc_relevance_(true),
     inv_idx_tid_(OB_INVALID_ID),
     fwd_idx_tid_(OB_INVALID_ID),
     doc_id_idx_tid_(OB_INVALID_ID),
@@ -50,7 +51,8 @@ struct ObTextRetrievalInfo
   ~ObTextRetrievalInfo() {}
 
   TO_STRING_KV(K_(match_expr), K_(pushdown_match_filter), K_(sort_key), K_(topk_limit_expr),
-               K_(topk_offset_expr), K_(with_ties), K_(inv_idx_tid), K_(fwd_idx_tid), K_(doc_id_idx_tid));
+               K_(topk_offset_expr), K_(with_ties), K_(need_calc_relevance), K_(inv_idx_tid),
+               K_(fwd_idx_tid), K_(doc_id_idx_tid));
 
   bool need_sort() const { return sort_key_.expr_ != nullptr; }
 
@@ -60,6 +62,7 @@ struct ObTextRetrievalInfo
   ObRawExpr *topk_limit_expr_;
   ObRawExpr *topk_offset_expr_;
   bool with_ties_;
+  bool need_calc_relevance_;  // match expr just for retireval (accurate score is not required)
   uint64_t inv_idx_tid_;  // choosed aux inverted index table id (word-doc)
   uint64_t fwd_idx_tid_;  // choosed aux forward index table id (doc-word)
   uint64_t doc_id_idx_tid_; // choosed aux doc_id index table id (doc-rowkey)
@@ -72,6 +75,25 @@ struct ObTextRetrievalInfo
   ObAggFunRawExpr *total_doc_cnt_;  // count(doc_id_column)
   ObAggFunRawExpr *doc_token_cnt_;  // sum(token_cnt_column)
   ObRawExpr *relevance_expr_; // BM25
+};
+
+struct ObRawFilterMonotonicity
+{
+  ObRawFilterMonotonicity() : filter_expr_(NULL),
+                              col_expr_(NULL),
+                              mono_(PushdownFilterMonotonicity::MON_NON),
+                              assist_exprs_() {}
+
+
+
+  ObRawExpr *filter_expr_;
+  ObColumnRefRawExpr *col_expr_;
+  PushdownFilterMonotonicity mono_;
+  common::ObFixedArray<ObRawExpr *, common::ObIAllocator> assist_exprs_;
+  TO_STRING_KV(K_(filter_expr),
+               K_(col_expr),
+               K_(mono),
+               K_(assist_exprs));
 };
 
 class ObLogTableScan : public ObLogicalOperator
@@ -125,7 +147,6 @@ public:
         tablet_id_type_(0),
         calc_part_id_expr_(NULL),
         trans_info_expr_(NULL),
-        rcte_op_(nullptr),
         identify_seq_expr_(nullptr),
         global_index_back_table_partition_info_(NULL),
         has_index_scan_filter_(false),
@@ -133,7 +154,9 @@ public:
         table_type_(share::schema::MAX_TABLE_TYPE),
         use_column_store_(false),
         doc_id_table_id_(common::OB_INVALID_ID),
-        text_retrieval_info_()
+        text_retrieval_info_(),
+        das_keep_ordering_(false),
+        filter_monotonicity_()
   {
   }
 
@@ -498,7 +521,8 @@ public:
   int copy_filter_before_index_back();
   void set_use_batch(bool use_batch) { use_batch_ = use_batch; }
   bool use_batch() const { return use_batch_; }
-  // only use group_id_expr_ when use_batch() is true.
+  // use group_id_expr_ when batch rescan or keep order for global lookup.
+  bool use_group_id() const { return use_batch_ || (is_index_global_ && index_back_ && das_keep_ordering_); }
   inline const ObRawExpr *get_group_id_expr() const { return group_id_expr_; }
   int extract_bnlj_param_idxs(common::ObIArray<int64_t> &bnlj_params);
 
@@ -548,15 +572,28 @@ public:
   inline ObTextRetrievalInfo &get_text_retrieval_info() { return text_retrieval_info_; }
   inline const ObTextRetrievalInfo &get_text_retrieval_info() const { return text_retrieval_info_; }
   int prepare_text_retrieval_dep_exprs();
-  // jinmao TODO: 之后要判断这个标，一期统一设置为 true
-  inline bool need_text_retrieval_calc_relevance() const { return true; }
+  inline bool need_text_retrieval_calc_relevance() const { return text_retrieval_info_.need_calc_relevance_; }
   inline bool need_doc_id_index_back() const { return is_text_retrieval_scan() || is_multivalue_index_scan() ; }
   inline void set_doc_id_index_table_id(const uint64_t doc_id_index_table_id) { doc_id_table_id_ = doc_id_index_table_id; }
   inline uint64_t get_doc_id_index_table_id() const { return doc_id_table_id_; }
   virtual int get_card_without_filter(double &card) override;
-  inline ObLogSet *get_rcte_op() { return rcte_op_; }
   inline ObRawExpr *get_identify_seq_expr() { return identify_seq_expr_; }
+  inline int has_exec_param(bool &bool_ret) const
+  {
+    return est_cost_info_ == NULL ? common::OB_SUCCESS : est_cost_info_->has_exec_param(bool_ret);
+  }
+  void set_identify_seq_expr(ObRawExpr *expr) { identify_seq_expr_ = expr; }
 
+  inline bool das_need_keep_ordering() const { return das_keep_ordering_; }
+
+  int check_das_need_keep_ordering();
+
+  const ObIArray<ObRawFilterMonotonicity>& get_filter_monotonicity() const
+  { return filter_monotonicity_; }
+  int get_filter_monotonicity(const ObRawExpr *filter,
+                              const ObColumnRefRawExpr *col_expr,
+                              PushdownFilterMonotonicity &mono,
+                              ObIArray<ObRawExpr *> &assist_exprs) const;
 private: // member functions
   //called when index_back_ set
   int pick_out_query_range_exprs();
@@ -572,11 +609,14 @@ private: // member functions
   int add_mapping_columns_for_vt(ObIArray<ObRawExpr*> &access_exprs);
   int get_mbr_column_exprs(const uint64_t table_id, ObIArray<ObRawExpr *> &mbr_exprs);
   int allocate_lookup_trans_info_expr();
+  int allocate_group_id_expr();
   int extract_doc_id_index_back_expr(ObIArray<ObRawExpr *> &exprs);
   int extract_text_retrieval_access_expr(ObIArray<ObRawExpr *> &exprs);
   int get_text_retrieval_calc_exprs(ObIArray<ObRawExpr *> &all_exprs);
   int print_text_retrieval_annotation(char *buf, int64_t buf_len, int64_t &pos, ExplainType type);
   int find_nearest_rcte_op(ObLogSet *&rcte_op);
+  int generate_filter_monotonicity();
+  int get_filter_assist_exprs(ObIArray<ObRawExpr *> &assist_exprs);
 protected: // memeber variables
   // basic info
   uint64_t table_id_; //table id or alias table id
@@ -678,7 +718,6 @@ protected: // memeber variables
   ObRawExpr *trans_info_expr_;
 
   //for batch search recursive cte
-  ObLogSet *rcte_op_;
   ObRawExpr *identify_seq_expr_;
 
   // begin for global index lookup
@@ -693,6 +732,9 @@ protected: // memeber variables
   ObTextRetrievalInfo text_retrieval_info_;
 
   ObPxRFStaticInfo px_rf_info_;
+  bool das_keep_ordering_;
+  typedef common::ObSEArray<ObRawFilterMonotonicity, 4, common::ModulePageAllocator, true> FilterMonotonicity;
+  FilterMonotonicity filter_monotonicity_;
   // disallow copy and assign
   DISALLOW_COPY_AND_ASSIGN(ObLogTableScan);
 };

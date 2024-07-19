@@ -174,7 +174,7 @@ int ObAllVirtualMdsNodeStat::convert_node_info_to_row_(const storage::mds::MdsNo
         break;
       }
       case OB_APP_MIN_COLUMN_ID + 10: {// seq_no
-        cur_row_.cells_[i].set_int(node_info.seq_no_);
+        cur_row_.cells_[i].set_int(node_info.seq_no_.cast_to_int());
         break;
       }
       case OB_APP_MIN_COLUMN_ID + 11: {// redo_scn
@@ -302,6 +302,7 @@ int ObAllVirtualMdsNodeStat::get_tablet_info_(ObLS &ls, const ObFunction<int(ObT
         if (OB_FAIL(ls.get_tablet(tablet_points_[idx], tablet_handle, 0, storage::ObMDSGetTabletMode::READ_WITHOUT_CHECK))) {
           MDS_LOG(WARN, "fail to get tablet", KR(ret), K(key_ranges_), K(*this));
         } else if (OB_ISNULL(tablet_handle.get_obj())) {
+          ret = OB_ERR_UNEXPECTED;
           MDS_LOG(ERROR, "get null tablet ptr", KR(ret), K(key_ranges_), K(*this));
         } else if (OB_FAIL(apply_on_tablet_op(*tablet_handle.get_obj()))) {
           MDS_LOG(WARN, "fail to apply op on tablet", KR(ret), K(key_ranges_), K(*this));

@@ -55,22 +55,24 @@ public:
       direct_load_type_(),
       trans_id_(),
       seq_no_(0),
-      src_tenant_id_(0)
+      src_tenant_id_(0),
+      tx_desc_(nullptr)
   { }
   ObBatchSliceWriteInfo(const common::ObTabletID &tablet_id, const share::ObLSID &ls_id, const int64_t &trans_version,
       const ObDirectLoadType &direct_load_type, const transaction::ObTransID &trans_id, const int64_t &seq_no,
-      const uint64_t src_tenant_id)
+      const uint64_t src_tenant_id, transaction::ObTxDesc* tx_desc)
     : data_tablet_id_(tablet_id),
       ls_id_(ls_id),
       trans_version_(trans_version),
       direct_load_type_(direct_load_type),
       trans_id_(trans_id),
       seq_no_(seq_no),
-      src_tenant_id_(src_tenant_id)
+      src_tenant_id_(src_tenant_id),
+      tx_desc_(tx_desc)
 
   { }
   ~ObBatchSliceWriteInfo() = default;
-  TO_STRING_KV(K(ls_id_), K(data_tablet_id_), K(trans_version_), K(direct_load_type_), K(src_tenant_id_));
+  TO_STRING_KV(K(ls_id_), K(data_tablet_id_), K(trans_version_), K(direct_load_type_), K(src_tenant_id_), KPC(tx_desc_));
 public:
   common::ObTabletID data_tablet_id_;
   share::ObLSID ls_id_;
@@ -79,6 +81,7 @@ public:
   transaction::ObTransID trans_id_;
   int64_t seq_no_; //
   uint64_t src_tenant_id_;
+  transaction::ObTxDesc* tx_desc_;
 };
 
 struct ObTabletDirectLoadMgrKey final
@@ -317,11 +320,15 @@ public:
   int init(ObLobMetaWriteIter *iter,
             const transaction::ObTransID &trans_id,
             const int64_t trans_version,
-            const int64_t sql_no);
+            const int64_t sql_no,
+            const ObDirectLoadType direct_load_type);
   void reset();
   void reuse();
   virtual int get_next_row(const blocksstable::ObDatumRow *&row) override;
-// private:
+
+private:
+  int64_t get_seq_no() const;
+
 public:
   bool is_inited_;
   ObLobMetaWriteIter *iter_;
@@ -330,6 +337,7 @@ public:
   int64_t sql_no_;
   blocksstable::ObDatumRow tmp_row_;
   ObLobMetaWriteResult lob_meta_write_result_;
+  ObDirectLoadType direct_load_type_;
 };
 
 struct ObTabletDDLParam final
@@ -419,7 +427,7 @@ public:
     datum_stores_.set_attr(ObMemAttr(MTL_ID(), "ChunkSlicStoreD"));
   }
   virtual ~ObChunkSliceStore() { reset(); }
-  int init(const int64_t rowkey_column_count, ObTabletHandle &tablet_handle, ObArenaAllocator &allocator,
+  int init(const int64_t rowkey_column_count, const ObStorageSchema *storage_schema, ObArenaAllocator &allocator,
            const ObIArray<ObColumnSchemaItem> &col_schema, const int64_t dir_id, const int64_t parallelism);
   virtual int append_row(const blocksstable::ObDatumRow &datum_row) override;
   virtual int close() override;
@@ -427,7 +435,7 @@ public:
   virtual int64_t get_row_count() const { return row_cnt_; }
   TO_STRING_KV(K(is_inited_), K(target_store_idx_), K(row_cnt_), KP(arena_allocator_), K(datum_stores_), K(endkey_), K(rowkey_column_count_), K(cg_schemas_));
 private:
-  int prepare_datum_stores(const uint64_t tenant_id, ObTabletHandle &tablet_handle, ObIAllocator &allocator,
+  int prepare_datum_stores(const uint64_t tenant_id, const ObStorageSchema *storage_schema, ObIAllocator &allocator,
                            const ObIArray<ObColumnSchemaItem> &col_array, const int64_t dir_id, const int64_t parallelism);
   int64_t calc_chunk_limit(const ObStorageColumnGroupSchema &cg_schema);
 public:
@@ -492,7 +500,7 @@ public:
       const share::SCN &start_scn,
       const uint64_t table_id,
       const ObTabletID &curr_tablet_id,
-      ObTabletHandle &tablet_handle,
+      const ObStorageSchema *storage_schema,
       ObIStoreRowIterator *row_iter,
       const ObTableSchemaItem &schema_item,
       const ObDirectLoadType &direct_load_type,
@@ -512,6 +520,13 @@ public:
       const ObArray<common::ObObjMeta> &col_types,
       const int64_t lob_inrow_threshold,
       blocksstable::ObDatumRow &datum_row);
+  // fill lob meta row into macro block
+  int fill_lob_meta_sstable_slice(
+      const share::SCN &start_scn,
+      const uint64_t table_id,
+      const ObTabletID &curr_tablet_id,
+      ObIStoreRowIterator *row_iter,
+      int64_t &affected_rows);
   int close();
   int fill_column_group(
       const ObStorageSchema *storage_schema,
@@ -529,7 +544,7 @@ public:
   bool need_column_store() const { return need_column_store_; }
   ObTabletSliceStore *get_slice_store() const { return slice_store_; }
   void cancel() { ATOMIC_SET(&is_canceled_, true); }
-  int64_t get_next_block_start_seq() const { return nullptr == slice_store_ ? 0 /*slice empty*/ : slice_store_->get_next_block_start_seq(); }
+  int64_t get_next_block_start_seq() const { return nullptr == slice_store_ ? start_seq_.get_data_seq() /*slice empty*/ : slice_store_->get_next_block_start_seq(); }
   TO_STRING_KV(K(is_inited_), K(need_column_store_), K(is_canceled_), K(start_seq_), KPC(slice_store_), K(row_offset_));
 private:
   int fill_lob_into_memtable( // for version < 4.3.0.0
@@ -559,7 +574,7 @@ private:
       const bool is_slice_store,
       const int64_t dir_id,
       const int64_t parallelism,
-      ObTabletHandle &tablet_handle,
+      const ObStorageSchema *storage_schema,
       const share::SCN &start_scn);
   int report_unique_key_dumplicated(
       const int ret_code,
@@ -582,6 +597,8 @@ private:
       const int64_t timeout_ts,
       const int64_t lob_inrow_threshold,
       const uint64_t src_tenant_id,
+      const ObDirectLoadType direct_load_type,
+      transaction::ObTxDesc* tx_desc,
       ObLobMetaRowIterator *&row_iter);
   int mock_chunk_store(const int64_t row_cnt);
 private:

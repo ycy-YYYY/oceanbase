@@ -104,22 +104,67 @@ int ObCreateTableExecutor::ObInsSQLPrinter::inner_print(char *buf, int64_t buf_l
   const char sep_char = lib::is_oracle_mode()? '"': '`';
   const ObSelectStmt *select_stmt = NULL;
   int64_t pos1 = 0;
+  uint64_t insert_mode = 0;
   if (OB_ISNULL(stmt_) || OB_ISNULL(select_stmt= stmt_->get_sub_select())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("null stmt", K(ret));
-  } else if (OB_FAIL(databuff_printf(buf, buf_len, pos1,
-                              do_osg_
-                              ? "insert /*+GATHER_OPTIMIZER_STATISTICS*/ into %c%.*s%c.%c%.*s%c"
-                              : "insert /*+NO_GATHER_OPTIMIZER_STATISTICS*/ into %c%.*s%c.%c%.*s%c",
-                              sep_char,
-                              stmt_->get_database_name().length(),
-                              stmt_->get_database_name().ptr(),
-                              sep_char,
-                              sep_char,
-                              stmt_->get_table_name().length(),
-                              stmt_->get_table_name().ptr(),
-                              sep_char))) {
-    LOG_WARN("fail to print insert into string", K(ret));
+  } else {
+    insert_mode = stmt_->get_insert_mode();
+    if (insert_mode != 0 &&
+        insert_mode != 1 &&
+        insert_mode != 2 ) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected insert_mode", K(insert_mode), K(ret));
+    } else if (insert_mode == 1 /*ignore*/) {
+      if (OB_FAIL(databuff_printf(buf, buf_len, pos1,
+                                  do_osg_
+                                  ? "insert ignore /*+ ENABLE_PARALLEL_DML PARALLEL(%lu) GATHER_OPTIMIZER_STATISTICS*/ into %c%.*s%c.%c%.*s%c"
+                                  : "insert ignore /*+ ENABLE_PARALLEL_DML PARALLEL(%lu) NO_GATHER_OPTIMIZER_STATISTICS*/ into %c%.*s%c.%c%.*s%c",
+                                  stmt_->get_parallelism(),
+                                  sep_char,
+                                  stmt_->get_database_name().length(),
+                                  stmt_->get_database_name().ptr(),
+                                  sep_char,
+                                  sep_char,
+                                  stmt_->get_table_name().length(),
+                                  stmt_->get_table_name().ptr(),
+                                  sep_char))) {
+        LOG_WARN("fail to print insert into string", K(ret));
+      }
+    } else if (insert_mode == 2 /*replace*/) {
+      if (OB_FAIL(databuff_printf(buf, buf_len, pos1,
+                                  do_osg_
+                                  ? "replace /*+ ENABLE_PARALLEL_DML PARALLEL(%lu) GATHER_OPTIMIZER_STATISTICS*/ into %c%.*s%c.%c%.*s%c"
+                                  : "replace /*+ ENABLE_PARALLEL_DML PARALLEL(%lu) NO_GATHER_OPTIMIZER_STATISTICS*/ into %c%.*s%c.%c%.*s%c",
+                                  stmt_->get_parallelism(),
+                                  sep_char,
+                                  stmt_->get_database_name().length(),
+                                  stmt_->get_database_name().ptr(),
+                                  sep_char,
+                                  sep_char,
+                                  stmt_->get_table_name().length(),
+                                  stmt_->get_table_name().ptr(),
+                                  sep_char))) {
+        LOG_WARN("fail to print insert into string", K(ret));
+      }
+    } else if (OB_FAIL(databuff_printf(buf, buf_len, pos1,
+                                       do_osg_
+                                       ? "insert /*+ ENABLE_PARALLEL_DML PARALLEL(%lu) GATHER_OPTIMIZER_STATISTICS*/ into %c%.*s%c.%c%.*s%c"
+                                       : "insert /*+ ENABLE_PARALLEL_DML PARALLEL(%lu) NO_GATHER_OPTIMIZER_STATISTICS*/ into %c%.*s%c.%c%.*s%c",
+                                       stmt_->get_parallelism(),
+                                       sep_char,
+                                       stmt_->get_database_name().length(),
+                                       stmt_->get_database_name().ptr(),
+                                       sep_char,
+                                       sep_char,
+                                       stmt_->get_table_name().length(),
+                                       stmt_->get_table_name().ptr(),
+                                       sep_char))) {
+      LOG_WARN("fail to print insert into string", K(ret));
+    }
+  }
+  if (OB_FAIL(ret)) {
+    //do nothing
   } else if (lib::is_oracle_mode()) {
     const ObTableSchema &table_schema = stmt_->get_create_table_arg().schema_;
     int64_t used_column_count = 0;
@@ -207,7 +252,7 @@ int ObCreateTableExecutor::prepare_ins_arg(ObCreateTableStmt &stmt,
 
     //get system variable
     ObObj online_sys_var_obj;
-    if (OB_FAIL(OB_FAIL(my_session->get_sys_variable(SYS_VAR__OPTIMIZER_GATHER_STATS_ON_LOAD, online_sys_var_obj)))) {
+    if (OB_FAIL(my_session->get_sys_variable(SYS_VAR__OPTIMIZER_GATHER_STATS_ON_LOAD, online_sys_var_obj))) {
       LOG_WARN("fail to get sys var", K(ret));
     } else {
       online_sys_var = online_sys_var_obj.get_bool();
@@ -370,7 +415,15 @@ int ObCreateTableExecutor::execute_ctas(ObExecContext &ctx,
         LOG_WARN("schema_guard reset failed", K(ret));
       } else if (OB_FAIL(common_rpc_proxy->create_table(create_table_arg, create_table_res))) { //2, 建表;
         LOG_WARN("rpc proxy create table failed", K(ret), "dst", common_rpc_proxy->get_server());
-      } else if (OB_INVALID_ID != create_table_res.table_id_) { //如果表已存在则后续的查询插入不进行
+      } else if (!(OB_INVALID_ID == create_table_res.table_id_
+                  || (OB_INVALID_ID != create_table_res.table_id_
+                      && true == create_table_res.do_nothing_)) ) { //如果表已存在则后续的查询插入不进行
+        // 1. for old rs
+        // when table_exist, table_id == invalid_id, and do_nothing will alway be false
+        // 2. for new rs
+        // do_nothing is true when table_exist
+        // --> when table_id == invalid, both old and new rs no table create
+        // --> when table_id != invalid, both old and new rs do_nothing_ correct
         if (OB_INVALID_VERSION == create_table_res.schema_version_) {
           ret = OB_ERR_UNEXPECTED;
           LOG_WARN("get unexpected schema version", K(ret), K(create_table_res));
@@ -452,10 +505,23 @@ int ObCreateTableExecutor::execute_ctas(ObExecContext &ctx,
           obrpc::ObAlterTableRes res;
           alter_table_arg.compat_mode_ = ORACLE_MODE == my_session->get_compatibility_mode() ?
             lib::Worker::CompatMode::ORACLE : lib::Worker::CompatMode::MYSQL;
-          if (OB_FAIL(common_rpc_proxy->alter_table(alter_table_arg, res))) {
-            LOG_WARN("failed to update table session", K(ret), K(alter_table_arg));
-            if (alter_table_arg.compat_mode_ == lib::Worker::CompatMode::ORACLE && OB_ERR_TABLE_EXIST == ret) {
-              ret = OB_ERR_EXIST_OBJECT;
+          bool finish = false;
+          while (OB_SUCC(ret) && !finish) {
+            if (OB_FAIL(common_rpc_proxy->alter_table(alter_table_arg, res))) {
+              LOG_WARN("failed to update table session", K(ret), K(alter_table_arg));
+              if (alter_table_arg.compat_mode_ == lib::Worker::CompatMode::ORACLE && OB_ERR_TABLE_EXIST == ret) {
+                ret = OB_ERR_EXIST_OBJECT;
+              } else if (OB_EAGAIN == ret) {
+                ret = OB_SUCCESS; // maybe table lock conflict, retry
+                if (OB_UNLIKELY(THIS_WORKER.get_timeout_remain() <= 0)) {
+                  ret = OB_TIMEOUT;
+                  LOG_WARN("timeout", K(ret));
+                } else if (OB_FAIL(THIS_WORKER.check_status())) {
+                  LOG_WARN("failed to check status", K(ret));
+                }
+              }
+            } else {
+              finish = true;
             }
           }
         }
@@ -757,7 +823,7 @@ int ObAlterTableExecutor::alter_table_rpc_v2(
   ObSArray<obrpc::ObIndexArg *> add_index_arg_list;
   ObSArray<obrpc::ObIndexArg *> drop_index_args;
   alter_table_arg.index_arg_list_.reset();
-
+  DEBUG_SYNC(BEFORE_SEND_ALTER_TABLE);
   if (OB_ISNULL(my_session)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", K(ret));
@@ -801,7 +867,9 @@ int ObAlterTableExecutor::alter_table_rpc_v2(
         || obrpc::ObAlterTableArg::INTERVAL_TO_RANGE == alter_table_arg.alter_part_type_) {
       alter_table_arg.is_alter_partitions_ = true;
     }
-    if (OB_FAIL(common_rpc_proxy->alter_table(alter_table_arg, res))) {
+    if (OB_FAIL(populate_based_schema_obj_info_(alter_table_arg))) {
+      LOG_WARN("fail to populate based schema obj info", KR(ret));
+    } else if (OB_FAIL(common_rpc_proxy->alter_table(alter_table_arg, res))) {
       LOG_WARN("rpc proxy alter table failed", KR(ret), "dst", common_rpc_proxy->get_server(), K(alter_table_arg));
     } else {
       // 在回滚时不会重试，也不检查 schema version
@@ -813,7 +881,7 @@ int ObAlterTableExecutor::alter_table_rpc_v2(
     ObIArray<obrpc::ObDDLRes> &ddl_ress = res.ddl_res_array_;
     for (int64_t i = 0; OB_SUCC(ret) && i < ddl_ress.count(); ++i) {
       ObDDLRes &ddl_res = ddl_ress.at(i);
-      if (OB_FAIL(ObDDLExecutorUtil::wait_ddl_finish(ddl_res.tenant_id_, ddl_res.task_id_, false/*do not retry at executor*/, my_session, common_rpc_proxy, is_support_cancel))) {
+      if (!alter_table_arg.is_update_global_indexes_ && OB_FAIL(ObDDLExecutorUtil::wait_ddl_finish(ddl_res.tenant_id_, ddl_res.task_id_, false/*do not retry at executor*/, my_session, common_rpc_proxy, is_support_cancel))) {
         LOG_WARN("wait drop index finish", K(ret));
       }
     }
@@ -838,7 +906,7 @@ int ObAlterTableExecutor::alter_table_rpc_v2(
           }
         }
       }
-    } else if (DDL_CREATE_INDEX == res.ddl_type_ || DDL_NORMAL_TYPE == res.ddl_type_) {
+    } else if (is_create_index(res.ddl_type_) || DDL_NORMAL_TYPE == res.ddl_type_) {
       // TODO(shuangcan): alter table create index returns DDL_NORMAL_TYPE now, check if we can fix this later
       // 同步等索引建成功
       for (int64_t i = 0; OB_SUCC(ret) && i < add_index_arg_list.size(); ++i) {
@@ -1133,8 +1201,8 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
                 LOG_WARN("unexpected error", K(ret));
               }
             } else {
-              ret = OB_ERR_UNEXPECTED;
-              LOG_WARN("unknown alter external table type", K(ret), K(alter_table_arg.alter_part_type_), K(stmt.get_alter_external_table_type()));
+              // ret = OB_ERR_UNEXPECTED;
+              // LOG_WARN("unknown alter external table type", K(ret), K(alter_table_arg.alter_part_type_), K(stmt.get_alter_external_table_type()));
             }
           }
         }
@@ -1212,36 +1280,7 @@ int ObAlterTableExecutor::need_check_constraint_validity(obrpc::ObAlterTableArg 
       } else if (CONSTRAINT_TYPE_NOT_NULL == (*iter)->get_constraint_type()) {
         if (1 != (*iter)->get_column_cnt()) {
           ret = OB_ERR_UNEXPECTED;
-        } else if (OB_INVALID_ID == *(*iter)->cst_col_begin()) {
-          // alter table add column not null.
-          ObTableSchema::const_column_iterator target_col_iter = NULL;
-          ObTableSchema::const_column_iterator cst_col_iter =
-                          alter_table_arg.alter_table_schema_.column_begin();
-          ObString cst_col_name;
-          if (OB_FAIL((*iter)->get_not_null_column_name(cst_col_name))) {
-            LOG_WARN("get not null column name failed", K(ret));
-          } else {
-            for(; NULL == target_col_iter
-                  && cst_col_iter != alter_table_arg.alter_table_schema_.column_end();
-                cst_col_iter++) {
-              if ((*cst_col_iter)->get_column_name_str().length() == cst_col_name.length()
-                  && 0 == (*cst_col_iter)->get_column_name_str().compare(cst_col_name)) {
-                target_col_iter = cst_col_iter;
-              }
-            }
-            if (OB_ISNULL(target_col_iter)) {
-              ret = OB_ERR_UNEXPECTED;
-              LOG_WARN("column schema not found", K(ret),K(alter_table_arg.alter_table_schema_),
-                        K(cst_col_name));
-            } else {
-              const ObObj &cur_default_value = (*target_col_iter)->get_cur_default_value();
-              need_check = cur_default_value.is_null() ||
-                (cur_default_value.is_string_type()
-                  && (0 == cur_default_value.get_string().case_compare(N_NULL)
-                      || 0 == cur_default_value.get_string().case_compare("''")));
-            }
-          }
-        } else {
+        } else if (OB_INVALID_ID != *(*iter)->cst_col_begin()) {
           // alter table modify column not null.
           need_check = (*iter)->is_validated();
         }
@@ -2043,6 +2082,14 @@ int ObTruncateTableExecutor::check_use_parallel_truncate(const obrpc::ObTruncate
     use_parallel_truncate = (table_schema->get_autoinc_column_id() == 0 && compat_version >= DATA_VERSION_4_1_0_0)
                             || compat_version >= DATA_VERSION_4_1_0_2;
   }
+  if (OB_FAIL(ret)) {
+    // do nothing
+  } else if (use_parallel_truncate
+             && OB_FAIL(ObParallelDDLControlMode::is_parallel_ddl_enable(
+                        ObParallelDDLControlMode::TRUNCATE_TABLE,
+                        tenant_id, use_parallel_truncate))) {
+    LOG_WARN("fail to check whether is parallel truncate table", KR(ret), K(tenant_id));
+  }
   return ret;
 }
 
@@ -2497,6 +2544,51 @@ int ObOptimizeAllExecutor::execute(ObExecContext &ctx, ObOptimizeAllStmt &stmt)
         }
       }
     }
+  }
+  return ret;
+}
+
+int ObAlterTableExecutor::populate_based_schema_obj_info_(obrpc::ObAlterTableArg &alter_table_arg) {
+  int ret = OB_SUCCESS;
+  const uint64_t table_id = alter_table_arg.alter_table_schema_.get_table_id();
+  if (OB_INVALID_ID != table_id) {
+    const uint64_t tenant_id = alter_table_arg.alter_table_schema_.get_tenant_id();
+    SMART_VAR(ObSchemaGetterGuard, guard) {
+    const ObTableSchema *orig_table = nullptr;
+    if (OB_FAIL(ObMultiVersionSchemaService::get_instance().get_tenant_schema_guard(
+                tenant_id, guard))) {
+      LOG_WARN("fail to get tenant schema guard", KR(ret), K(tenant_id));
+    } else if (OB_FAIL(guard.get_table_schema(tenant_id, table_id, orig_table))) {
+      LOG_WARN("fail to get table schema", KR(ret), K(tenant_id), K(table_id));
+    } else if (OB_ISNULL(orig_table)) {
+      ret = OB_TABLE_NOT_EXIST;
+      LOG_WARN("table not exits", KR(ret), K(table_id));
+    } else {
+      bool find = false;
+      for (int i = 0; i < OB_SUCC(ret) && alter_table_arg.based_schema_object_infos_.count(); ++i) {
+        ObBasedSchemaObjectInfo &based_schema_object_info =
+                                alter_table_arg.based_schema_object_infos_.at(i);
+        if (based_schema_object_info.schema_id_ == alter_table_arg.table_id_) {
+          find = true;
+          if (based_schema_object_info.schema_version_ == orig_table->get_schema_version()) {
+            break;
+          } else {
+            ret = OB_ERR_PARALLEL_DDL_CONFLICT;
+            LOG_WARN("schema version not consistent", KR(ret), K(based_schema_object_info.schema_version_),
+                                                      K(orig_table->get_schema_version()));
+          }
+        }
+      }
+      if (false == find) {
+        if (OB_FAIL(alter_table_arg.based_schema_object_infos_.push_back(
+                    ObBasedSchemaObjectInfo(table_id, TABLE_SCHEMA,
+                                            orig_table->get_schema_version())))) {
+          LOG_WARN("fail to push back based schema object info", KR(ret), K(alter_table_arg.table_id_),
+                   K(orig_table->get_schema_version()));
+        }
+      }
+    }
+    } // end smart var
   }
   return ret;
 }

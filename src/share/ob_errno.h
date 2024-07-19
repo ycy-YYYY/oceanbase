@@ -1405,6 +1405,7 @@ constexpr int OB_TABLE_LOCK_SPLIT_FAIL = -6328;
 constexpr int OB_SEQ_NO_REORDER_UNDER_PDML = -6329;
 constexpr int OB_USER_OUTOF_DATA_DISK_SPACE = -6330;
 constexpr int OB_ARB_DEGRADE = -6331;
+constexpr int OB_OBJ_LOCK_WRONG_WORKER = -6332;
 constexpr int OB_ELECTION_WARN_LOGBUF_FULL = -7000;
 constexpr int OB_ELECTION_WARN_LOGBUF_EMPTY = -7001;
 constexpr int OB_ELECTION_WARN_NOT_RUNNING = -7002;
@@ -1465,6 +1466,11 @@ constexpr int OB_TRANSFER_CANNOT_START = -7123;
 constexpr int OB_ERR_DIMENSION_NUMBER_IS_OUT_OF_RANGE = -7290;
 constexpr int OB_ERR_INVALID_SRID_IN_SDO_GEOMETRY = -7292;
 constexpr int OB_ERR_INVALID_GTYPE_FOR_POINT_OBJECT = -7293;
+constexpr int OB_ERR_OPERATOR_NOT_EXIST = -7298;
+constexpr int OB_INVALID_MASK = -7299;
+constexpr int OB_GEO_IN_DIFFERENT_COORDINATE = -7300;
+constexpr int OB_ERR_DOMAIN_COLUMN_DUPLICATE = -7301;
+constexpr int OB_ERR_PARSING_SPATIAL_PARAM = -7302;
 constexpr int OB_ERR_INVALID_XML_DATATYPE = -7402;
 constexpr int OB_ERR_XML_MISSING_COMMA = -7403;
 constexpr int OB_ERR_INVALID_XPATH_EXPRESSION = -7404;
@@ -1492,6 +1498,9 @@ constexpr int OB_ERR_INVALID_XML_CHILD_NAME = -7429;
 constexpr int OB_ERR_XML_NOT_SUPPORT_OPERATION = -7430;
 constexpr int OB_ERR_COMPARE_VARRAY_LOB_ATTR = -7432;
 constexpr int OB_ERR_XML_PARENT_ALREADY_CONTAINS_CHILD = -7433;
+constexpr int OB_ERR_CONVERSION_OF_UNIT = -7434;
+constexpr int OB_ERR_PARAM_OUT_OF_RANGE = -7435;
+constexpr int OB_ERR_BAD_VEC_INDEX_COLUMN = -7601;
 constexpr int OB_SERVER_IS_INIT = -8001;
 constexpr int OB_SERVER_IS_STOPPING = -8002;
 constexpr int OB_PACKET_CHECKSUM_ERROR = -8003;
@@ -1572,6 +1581,7 @@ constexpr int OB_FILE_OR_DIRECTORY_PERMISSION_DENIED = -9102;
 constexpr int OB_TOO_MANY_OPEN_FILES = -9103;
 constexpr int OB_DIRECT_LOAD_COMMIT_ERROR = -9104;
 constexpr int OB_STORAGE_DEST_NOT_CONNECT = -9115;
+constexpr int OB_TABLET_IS_SPLIT_SRC = -9123;
 constexpr int OB_ERR_RESIZE_FILE_TO_SMALLER = -9200;
 constexpr int OB_MARK_BLOCK_INFO_TIMEOUT = -9201;
 constexpr int OB_NOT_READY_TO_EXTEND_FILE = -9202;
@@ -1838,6 +1848,20 @@ constexpr int OB_ERR_OUT_PARAM_NOT_BIND_VAR = -9763;
 constexpr int OB_ERR_TIME_EARLIER_THAN_SYSDATE = -9764;
 constexpr int OB_ERR_NOT_FUNC_NAME = -9765;
 constexpr int OB_ERR_INVALID_CURSOR_EXPR = -9766;
+constexpr int OB_APPLICATION_ERROR_FROM_REMOTE = -9767;
+constexpr int OB_ERR_EVENT_EXIST = -9768;
+constexpr int OB_ERR_EVENT_NOT_EXIST = -9769;
+constexpr int OB_ERR_EVENT_CANT_ALTER = -9770;
+constexpr int OB_ERR_EVENT_DROP_FAILED = -9771;
+constexpr int OB_ERR_EVENT_INTERVAL_NOT_POSITIVE_OR_TOO_BIG = -9772;
+constexpr int OB_ERR_EVENT_ENDS_BEFORE_STARTS = -9773;
+constexpr int OB_ERR_EVENT_EXEC_TIME_IN_THE_PAST = -9774;
+constexpr int OB_ERR_EVENT_CANNOT_DELETE = -9775;
+constexpr int OB_ERR_EVENT_SAME_NAME = -9776;
+constexpr int OB_ERR_EVENT_DATA_TOO_LONG = -9777;
+constexpr int OB_ERR_EVENT_CANNOT_CREATE_IN_THE_PAST = -9778;
+constexpr int OB_ERR_EVENT_CANNOT_ALTER_IN_THE_PAST = -9779;
+constexpr int OB_ERR_EVENT_RECURSION_FORBIDDEN = -9780;
 constexpr int OB_ERR_KV_GLOBAL_INDEX_ROUTE = -10500;
 constexpr int OB_TTL_NOT_ENABLE = -10501;
 constexpr int OB_TTL_COLUMN_NOT_EXIST = -10502;
@@ -1854,6 +1878,7 @@ constexpr int OB_KV_COLLATION_MISMATCH = -10512;
 constexpr int OB_KV_SCAN_RANGE_MISSING = -10513;
 constexpr int OB_KV_FILTER_PARSE_ERROR = -10514;
 constexpr int OB_KV_REDIS_PARSE_ERROR = -10515;
+constexpr int OB_KV_HBASE_INCR_FIELD_IS_NOT_LONG = -10516;
 constexpr int OB_KV_ODP_TIMEOUT = -10650;
 constexpr int OB_ERR_VALUES_CLAUSE_NEED_HAVE_COLUMN = -11000;
 constexpr int OB_ERR_VALUES_CLAUSE_CANNOT_USE_DEFAULT_VALUES = -11001;
@@ -1871,7 +1896,13 @@ constexpr int OB_CANNOT_USER_IF_EXISTS = -11012;
 constexpr int OB_ERR_ILLEGAL_USER_VAR = -11013;
 constexpr int OB_ERR_FT_COLUMN_NOT_INDEXED = -11014;
 constexpr int OB_ERR_CANT_UPDATE_TABLE_IN_CREATE_TABLE_SELECT = -11015;
+constexpr int OB_ERR_PS_NO_RECURSION = -11016;
 constexpr int OB_ERR_PARTITION_EXCHANGE_PART_TABLE = -11017;
+constexpr int OB_INVALID_EXTERNAL_FILE = -11018;
+constexpr int OB_INVALID_EXTERNAL_FILE_COLUMN_PATH = -11046;
+constexpr int OB_EXTERNAL_FILE_COLUMN_TYPE_MISMATCH = -11047;
+constexpr int OB_ERR_DDL_RESOURCE_NOT_ENOUGH = -11048;
+constexpr int OB_EXCEED_QUERY_MEM_LIMIT = -11049;
 constexpr int OB_SP_RAISE_APPLICATION_ERROR = -20000;
 constexpr int OB_SP_RAISE_APPLICATION_ERROR_NUM = -21000;
 constexpr int OB_CLOB_ONLY_SUPPORT_WITH_MULTIBYTE_FUN = -22998;
@@ -3520,6 +3551,7 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_SEQ_NO_REORDER_UNDER_PDML__USER_ERROR_MSG "pdml sql need retry under sequence number reorder"
 #define OB_USER_OUTOF_DATA_DISK_SPACE__USER_ERROR_MSG "user data disk is almost full"
 #define OB_ARB_DEGRADE__USER_ERROR_MSG "logstream has been degraded due to error"
+#define OB_OBJ_LOCK_WRONG_WORKER__USER_ERROR_MSG "object lock worker thread wrong"
 #define OB_ELECTION_WARN_LOGBUF_FULL__USER_ERROR_MSG "The log buffer is full"
 #define OB_ELECTION_WARN_LOGBUF_EMPTY__USER_ERROR_MSG "The log buffer is empty"
 #define OB_ELECTION_WARN_NOT_RUNNING__USER_ERROR_MSG "The object is not running"
@@ -3577,6 +3609,7 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_SEQUENCE_NOT_MATCH__USER_ERROR_MSG "compare sequence not match"
 #define OB_SEQUENCE_TOO_SMALL__USER_ERROR_MSG "compare sequence too small"
 #define OB_TRANSFER_CANNOT_START__USER_ERROR_MSG "transfer cannot start"
+#define OB_PARTITION_ALREADY_BALANCED__USER_ERROR_MSG "partitions are already balanced, %s"
 #define OB_ERR_GIS_DIFFERENT_SRIDS__USER_ERROR_MSG "Binary geometry function %s given two geometries of different srids: %u and %u, which should have been identical."
 #define OB_ERR_GIS_UNSUPPORTED_ARGUMENT__USER_ERROR_MSG "Calling geometry function %s with unsupported types of arguments."
 #define OB_ERR_GIS_UNKNOWN_ERROR__USER_ERROR_MSG "Unknown GIS error occurred in function %s."
@@ -3673,6 +3706,11 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_ERR_INVALID_DATA_IN_SDO_ELEM_INFO_ARRAY__USER_ERROR_MSG "Invalid data in the SDO_ELEM_INFO_ARRAY in SDO_GEOMETRY object"
 #define OB_ERR_INVALID_DATA_IN_SDO_ORDINATE_ARRAY__USER_ERROR_MSG "Invalid data in the SDO_ORDINATE_ARRAY in SDO_GEOMETRY object"
 #define OB_ERR_VALUE_NOT_ALLOWED__USER_ERROR_MSG "value not allowed"
+#define OB_ERR_OPERATOR_NOT_EXIST__USER_ERROR_MSG "operator binding does not exist"
+#define OB_INVALID_MASK__USER_ERROR_MSG "operator binding does not exist"
+#define OB_GEO_IN_DIFFERENT_COORDINATE__USER_ERROR_MSG "geometry objects are in different coordinate systems"
+#define OB_ERR_DOMAIN_COLUMN_DUPLICATE__USER_ERROR_MSG "cannot create multiple domain indexes on a column list using same"
+#define OB_ERR_PARSING_SPATIAL_PARAM__USER_ERROR_MSG "internal error while parsing spatial parameters"
 #define OB_ERR_INVALID_XML_DATATYPE__USER_ERROR_MSG "inconsistent datatypes: expected %s got %s"
 #define OB_ERR_XML_MISSING_COMMA__USER_ERROR_MSG "missing comma"
 #define OB_ERR_INVALID_XPATH_EXPRESSION__USER_ERROR_MSG "XPATH syntax error: ''"
@@ -3705,6 +3743,11 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_ERR_DUP_DEF_NAMESPACE__USER_ERROR_MSG "XQST0066 - duplicate default namespace definition - %s."
 #define OB_ERR_COMPARE_VARRAY_LOB_ATTR__USER_ERROR_MSG "cannot compare VARRAY or LOB attributes of an object type"
 #define OB_ERR_XML_PARENT_ALREADY_CONTAINS_CHILD__USER_ERROR_MSG "Parent %.*s already contains child entry %s%.*s"
+#define OB_ERR_CONVERSION_OF_UNIT__USER_ERROR_MSG "conversion error between the specified unit and standard unit"
+#define OB_ERR_PARAM_OUT_OF_RANGE__USER_ERROR_MSG "value is out of range"
+#define OB_ERR_INVALID_VECTOR_DIM__USER_ERROR_MSG "inconsistent dimension: expected %u got %u"
+#define OB_ERR_BAD_VEC_INDEX_COLUMN__USER_ERROR_MSG "Column '%.*s' cannot be part of VECTOR index"
+#define OB_ERR_ARRAY_TYPE_MISMATCH__USER_ERROR_MSG "array type mismatch found between definition(%.*s) and data(%.*s)"
 #define OB_SERVER_IS_INIT__USER_ERROR_MSG "Server is initializing"
 #define OB_SERVER_IS_STOPPING__USER_ERROR_MSG "Server is stopping"
 #define OB_PACKET_CHECKSUM_ERROR__USER_ERROR_MSG "Packet checksum error"
@@ -3824,6 +3867,10 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_S3_REGION_MISMATCH__USER_ERROR_MSG "the specified s3_region does not match the endpoint"
 #define OB_INVALID_OBJECT_STORAGE_ENDPOINT__USER_ERROR_MSG "object storage endpoint is invalid"
 #define OB_RESTORE_SOURCE_NOT_ENOUGH__USER_ERROR_MSG "%s"
+#define OB_OBJECT_NOT_EXIST__USER_ERROR_MSG "cannot find object on object storage"
+#define OB_S2_REUSE_VERSION_MISMATCH__USER_ERROR_MSG "reuse_version of mem_block or phy_block is not mismatched with micro_meta in s2 micro_cache"
+#define OB_S2_ENTRY_NOT_EXIST__USER_ERROR_MSG "entry not exist in s2 micro_cache"
+#define OB_TABLET_IS_SPLIT_SRC__USER_ERROR_MSG "cannot access split src tablet"
 #define OB_ERR_RESIZE_FILE_TO_SMALLER__USER_ERROR_MSG "Extend ssblock file to smaller is not allowed"
 #define OB_MARK_BLOCK_INFO_TIMEOUT__USER_ERROR_MSG "Mark blocks timeout(5s) in auto extend process when alloc block fail"
 #define OB_NOT_READY_TO_EXTEND_FILE__USER_ERROR_MSG "Auto extend param is not ready to start extending file"
@@ -4092,6 +4139,20 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_ERR_TIME_EARLIER_THAN_SYSDATE__USER_ERROR_MSG "the parameter %s must evaluate to a time in the future"
 #define OB_ERR_NOT_FUNC_NAME__USER_ERROR_MSG "object '%.*s' must be of type function or array to be used this way"
 #define OB_ERR_INVALID_CURSOR_EXPR__USER_ERROR_MSG "CURSOR expression not allowed"
+#define OB_APPLICATION_ERROR_FROM_REMOTE__USER_ERROR_MSG "%.*s"
+#define OB_ERR_EVENT_EXIST__USER_ERROR_MSG "Event '%.*s' already exists"
+#define OB_ERR_EVENT_NOT_EXIST__USER_ERROR_MSG "Unknown '%.*s' event"
+#define OB_ERR_EVENT_CANT_ALTER__USER_ERROR_MSG "Failed to alter event '%.*s'"
+#define OB_ERR_EVENT_DROP_FAILED__USER_ERROR_MSG "Failed to drop %.*s"
+#define OB_ERR_EVENT_INTERVAL_NOT_POSITIVE_OR_TOO_BIG__USER_ERROR_MSG "INTERVAL is either not positive or too big"
+#define OB_ERR_EVENT_ENDS_BEFORE_STARTS__USER_ERROR_MSG "ENDS is either invalid or before STARTS"
+#define OB_ERR_EVENT_EXEC_TIME_IN_THE_PAST__USER_ERROR_MSG "Event execution time is in the past. Event has been disabled"
+#define OB_ERR_EVENT_CANNOT_DELETE__USER_ERROR_MSG "Failed to delete the event from mysql.event"
+#define OB_ERR_EVENT_SAME_NAME__USER_ERROR_MSG "Same old and new event name"
+#define OB_ERR_EVENT_DATA_TOO_LONG__USER_ERROR_MSG "Data for column '%.*s' too long"
+#define OB_ERR_EVENT_CANNOT_CREATE_IN_THE_PAST__USER_ERROR_MSG "Event execution time is in the past and ON COMPLETION NOT PRESERVE is set. The event was dropped immediately after creation."
+#define OB_ERR_EVENT_CANNOT_ALTER_IN_THE_PAST__USER_ERROR_MSG "Event execution time is in the past and ON COMPLETION NOT PRESERVE is set. The event was not changed. Specify a time in the future."
+#define OB_ERR_EVENT_RECURSION_FORBIDDEN__USER_ERROR_MSG "Recursion of EVENT DDL statements is forbidden when body is present"
 #define OB_ERR_KV_GLOBAL_INDEX_ROUTE__USER_ERROR_MSG "incorrect route for obkv global index, client router should refresh."
 #define OB_TTL_NOT_ENABLE__USER_ERROR_MSG "TTL feature is not enabled"
 #define OB_TTL_COLUMN_NOT_EXIST__USER_ERROR_MSG "TTL column '%.*s' not exists"
@@ -4108,6 +4169,7 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_KV_SCAN_RANGE_MISSING__USER_ERROR_MSG "Scan range missing, input scan range cell count is '%ld', which should equal to rowkey count '%ld'"
 #define OB_KV_FILTER_PARSE_ERROR__USER_ERROR_MSG "Filter parse errror, the input filter string is: '%.*s'"
 #define OB_KV_REDIS_PARSE_ERROR__USER_ERROR_MSG "Redis protocol parse errror, the input redis string is: '%.*s'"
+#define OB_KV_HBASE_INCR_FIELD_IS_NOT_LONG__USER_ERROR_MSG "When invoking the Increment interface, only HBase cells with a length of 8 can be converted to int64_t. the current length of the HBase cell is '%d'."
 #define OB_KV_ODP_TIMEOUT__USER_ERROR_MSG "ODP process timeout"
 #define OB_ERR_VALUES_CLAUSE_NEED_HAVE_COLUMN__USER_ERROR_MSG "Each row of a VALUES clause must have at least one column, unless when used as source in an INSERT statement."
 #define OB_ERR_VALUES_CLAUSE_CANNOT_USE_DEFAULT_VALUES__USER_ERROR_MSG "A VALUES clause cannot use DEFAULT values, unless used as a source in an INSERT statement."
@@ -4125,7 +4187,40 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_ERR_ILLEGAL_USER_VAR__USER_ERROR_MSG "User variable name %.*s is illegal"
 #define OB_ERR_FT_COLUMN_NOT_INDEXED__USER_ERROR_MSG "Can't find FULLTEXT index matching the column list"
 #define OB_ERR_CANT_UPDATE_TABLE_IN_CREATE_TABLE_SELECT__USER_ERROR_MSG "Can't update table '%s' while '%s' is being created."
+#define OB_ERR_PS_NO_RECURSION__USER_ERROR_MSG "The prepared statement contains a stored routine call that refers to that same statement. It\'s not allowed to execute a prepared statement in such a recursive manner"
 #define OB_ERR_PARTITION_EXCHANGE_PART_TABLE__USER_ERROR_MSG "Table to exchange with partition is partitioned: \'%.*s\'"
+#define OB_INVALID_EXTERNAL_FILE__USER_ERROR_MSG "Invalid external file: %s"
+#define OB_HDFS_CONNECT_FS_ERROR__USER_ERROR_MSG "HDFS: could not connect the hdfs file system"
+#define OB_HDFS_OPEN_FILE_ERROR__USER_ERROR_MSG "HDFS: could not open file on hdfs"
+#define OB_HDFS_READ_FILE_ERROR__USER_ERROR_MSG "HDFS: error reading the file on hdfs"
+#define OB_HDFS_CREATE_IO_SERVICE_ERROR__USER_ERROR_MSG "HDFS: unable to create IoService for hdfs"
+#define OB_HDFS_CREATE_FILE_SYSTEM_ERROR__USER_ERROR_MSG "HDFS: unable to create hdfs file system"
+#define OB_HDFS_CONNECT_DEFAULTFS_ERROR__USER_ERROR_MSG "HDFS: error connecting to the cluster: defaultFS is empty"
+#define OB_HDFS_LOAD_DEFAULT_RESOURCES_ERROR__USER_ERROR_MSG "HDFS: could not load hdfs default resources"
+#define OB_HDFS_VALIDATE_RESOURCES_ERROR__USER_ERROR_MSG "HDFS: resources is invalid"
+#define OB_HDFS_LOAD_OBJECT_ERROR__USER_ERROR_MSG "HDFS: Could not load Options object"
+#define OB_HDFS_RESOURCE_UNAVAILABLE__USER_ERROR_MSG "HDFS: resource is unavailable"
+#define OB_HDFS_FUNC_UNIMPLEMENTED__USER_ERROR_MSG "HDFS: function is unimplemented"
+#define OB_HDFS_OPERATION_CANCELED__USER_ERROR_MSG "HDFS: operation is already canceled"
+#define OB_HDFS_PERMISSION_DENIED__USER_ERROR_MSG "HDFS: permission denied"
+#define OB_HDFS_PATH_NOT_FOUND__USER_ERROR_MSG "HDFS: path not found"
+#define OB_HDFS_FILE_ALREADY_EXISTS__USER_ERROR_MSG "HDFS: file already exists"
+#define OB_HDFS_PATH_IS_NOT_EMPTY_DIRECTORY__USER_ERROR_MSG "HDFS: path is not empty directory"
+#define OB_HDFS_BUSY__USER_ERROR_MSG "HDFS: io or resource is busy"
+#define OB_HDFS_AUTHENTICATION_FAILED__USER_ERROR_MSG "HDFS: authentication failed"
+#define OB_HDFS_ACCESSCONTROL_ERROR__USER_ERROR_MSG "HDFS: access control error"
+#define OB_HDFS_STANDNDBY_ERROR__USER_ERROR_MSG "HDFS: standby error"
+#define OB_HDFS_SNAPSHOT_PROTOCOL_ERROR__USER_ERROR_MSG "HDFS: snapshot protocol error"
+#define OB_HDFS_INVALID_OFFSET__USER_ERROR_MSG "HDFS: use invalid offset"
+#define OB_HDFS_NOT_A_DIRECTORY__USER_ERROR_MSG "HDFS: not a directory"
+#define OB_HDFS_MALFORMED_URI__USER_ERROR_MSG "HDFS: malformed uri"
+#define OB_HDFS_INVALID_ARGUMENT__USER_ERROR_MSG "HDFS: invalid argument"
+#define OB_HDFS_NOT_IMPLEMENT__USER_ERROR_MSG "HDFS: not implementation"
+#define OB_HDFS_ERROR__USER_ERROR_MSG "HDFS error"
+#define OB_INVALID_EXTERNAL_FILE_COLUMN_PATH__USER_ERROR_MSG "Invalid path: %.*s"
+#define OB_EXTERNAL_FILE_COLUMN_TYPE_MISMATCH__USER_ERROR_MSG "Column type mismatch between the file and the table: FileColumnType=%s TableColumnType=%s"
+#define OB_ERR_DDL_RESOURCE_NOT_ENOUGH__USER_ERROR_MSG "The tenant ddl resource is not enough, please retry"
+#define OB_EXCEED_QUERY_MEM_LIMIT__USER_ERROR_MSG "Exceed query memory limit (mem_limit=%ld, mem_hold=%ld),  please check whether the query_memory_limit_percentage configuration item is reasonable."
 #define OB_SP_RAISE_APPLICATION_ERROR__USER_ERROR_MSG "%.*s"
 #define OB_SP_RAISE_APPLICATION_ERROR_NUM__USER_ERROR_MSG "error number argument to raise_application_error of '%d' is out of range"
 #define OB_CLOB_ONLY_SUPPORT_WITH_MULTIBYTE_FUN__USER_ERROR_MSG "CLOB or NCLOB in multibyte character set not supported"
@@ -5774,6 +5869,7 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_SEQ_NO_REORDER_UNDER_PDML__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -6329, pdml sql need retry under sequence number reorder"
 #define OB_USER_OUTOF_DATA_DISK_SPACE__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -6330, user data disk is almost full"
 #define OB_ARB_DEGRADE__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -6331, logstream has been degraded due to error"
+#define OB_OBJ_LOCK_WRONG_WORKER__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -6332, object lock worker thread wrong"
 #define OB_ELECTION_WARN_LOGBUF_FULL__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -7000, The log buffer is full"
 #define OB_ELECTION_WARN_LOGBUF_EMPTY__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -7001, The log buffer is empty"
 #define OB_ELECTION_WARN_NOT_RUNNING__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -7002, The object is not running"
@@ -5831,6 +5927,7 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_SEQUENCE_NOT_MATCH__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -7121, compare sequence not match"
 #define OB_SEQUENCE_TOO_SMALL__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -7122, compare sequence too small"
 #define OB_TRANSFER_CANNOT_START__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -7123, transfer cannot start"
+#define OB_PARTITION_ALREADY_BALANCED__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -7124, partitions are already balanced, %s"
 #define OB_ERR_GIS_DIFFERENT_SRIDS__ORA_USER_ERROR_MSG "ORA-00600: Binary geometry function %s given two geometries of different srids: %u and %u, which should have been identical."
 #define OB_ERR_GIS_UNSUPPORTED_ARGUMENT__ORA_USER_ERROR_MSG "ORA-00600: Calling geometry function %s with unsupported types of arguments."
 #define OB_ERR_GIS_UNKNOWN_ERROR__ORA_USER_ERROR_MSG "ORA-00600: Unknown GIS error occurred in function %s."
@@ -5908,7 +6005,7 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_ERR_CANT_CREATE_GEOMETRY_OBJECT__ORA_USER_ERROR_MSG "ORA-00600: Cannot get geometry object from data you send to the GEOMETRY field."
 #define OB_ERR_SRID_WRONG_USAGE__ORA_USER_ERROR_MSG "ORA-00600: Incorrect usage of srid."
 #define OB_ERR_INDEX_ORDER_WRONG_USAGE__ORA_USER_ERROR_MSG "ORA-00600: Incorrect usage of spatial/fulltext/hash index and explicit index order."
-#define OB_ERR_SPATIAL_MUST_HAVE_GEOM_COL__ORA_USER_ERROR_MSG "ORA-00600: A SPATIAL index may only contain a geometrical type column."
+#define OB_ERR_SPATIAL_MUST_HAVE_GEOM_COL__ORA_USER_ERROR_MSG "ORA-13249: A SPATIAL index may only contain a geometrical type column."
 #define OB_ERR_SPATIAL_CANT_HAVE_NULL__ORA_USER_ERROR_MSG "ORA-00600: All parts of a SPATIAL index must be NOT NULL."
 #define OB_ERR_INDEX_TYPE_NOT_SUPPORTED_FOR_SPATIAL_INDEX__ORA_USER_ERROR_MSG "ORA-00600: The index type %s is not supported for spatial indexes."
 #define OB_ERR_UNIT_NOT_FOUND__ORA_USER_ERROR_MSG "ORA-00600: There\'s no unit of measure named \'%s\'."
@@ -5927,6 +6024,11 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_ERR_INVALID_DATA_IN_SDO_ELEM_INFO_ARRAY__ORA_USER_ERROR_MSG "ORA-13033: Invalid data in the SDO_ELEM_INFO_ARRAY in SDO_GEOMETRY object"
 #define OB_ERR_INVALID_DATA_IN_SDO_ORDINATE_ARRAY__ORA_USER_ERROR_MSG "ORA-13034: Invalid data in the SDO_ORDINATE_ARRAY in SDO_GEOMETRY object"
 #define OB_ERR_VALUE_NOT_ALLOWED__ORA_USER_ERROR_MSG "ORA-24323: value not allowed"
+#define OB_ERR_OPERATOR_NOT_EXIST__ORA_USER_ERROR_MSG "ORA-29900: operator binding does not exist"
+#define OB_INVALID_MASK__ORA_USER_ERROR_MSG "ORA-20000: operator binding does not exist"
+#define OB_GEO_IN_DIFFERENT_COORDINATE__ORA_USER_ERROR_MSG "ORA-13295: geometry objects are in different coordinate systems"
+#define OB_ERR_DOMAIN_COLUMN_DUPLICATE__ORA_USER_ERROR_MSG "ORA-29879: cannot create multiple domain indexes on a column list using same"
+#define OB_ERR_PARSING_SPATIAL_PARAM__ORA_USER_ERROR_MSG "ORA-13205: internal error while parsing spatial parameters"
 #define OB_ERR_INVALID_XML_DATATYPE__ORA_USER_ERROR_MSG "ORA-00932: inconsistent datatypes: expected %s got %s"
 #define OB_ERR_XML_MISSING_COMMA__ORA_USER_ERROR_MSG "ORA-00917: missing comma"
 #define OB_ERR_INVALID_XPATH_EXPRESSION__ORA_USER_ERROR_MSG "ORA-31013: invalid xpath expression"
@@ -5959,6 +6061,11 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_ERR_DUP_DEF_NAMESPACE__ORA_USER_ERROR_MSG "ORA-19118: XQST0066 - duplicate default namespace definition - %s."
 #define OB_ERR_COMPARE_VARRAY_LOB_ATTR__ORA_USER_ERROR_MSG "ORA-22901: cannot compare VARRAY or LOB attributes of an object type"
 #define OB_ERR_XML_PARENT_ALREADY_CONTAINS_CHILD__ORA_USER_ERROR_MSG "ORA-31003: Parent %.*s already contains child entry %s%.*s"
+#define OB_ERR_CONVERSION_OF_UNIT__ORA_USER_ERROR_MSG "ORA-13291: conversion error between the specified unit and standard unit"
+#define OB_ERR_PARAM_OUT_OF_RANGE__ORA_USER_ERROR_MSG "ORA-13011: value is out of range"
+#define OB_ERR_INVALID_VECTOR_DIM__ORA_USER_ERROR_MSG "ORA-00932: inconsistent dimension: expected %u got %u"
+#define OB_ERR_BAD_VEC_INDEX_COLUMN__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -7601, Column '%.*s' cannot be part of VECTOR index"
+#define OB_ERR_ARRAY_TYPE_MISMATCH__ORA_USER_ERROR_MSG "ORA-00932: array type mismatch found between definition(%.*s) and data(%.*s)"
 #define OB_SERVER_IS_INIT__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -8001, Server is initializing"
 #define OB_SERVER_IS_STOPPING__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -8002, Server is stopping"
 #define OB_PACKET_CHECKSUM_ERROR__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -8003, Packet checksum error"
@@ -6078,6 +6185,10 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_S3_REGION_MISMATCH__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9117, the specified s3_region does not match the endpoint"
 #define OB_INVALID_OBJECT_STORAGE_ENDPOINT__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9118, object storage endpoint is invalid"
 #define OB_RESTORE_SOURCE_NOT_ENOUGH__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9119, %s"
+#define OB_OBJECT_NOT_EXIST__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9120, cannot find object on object storage"
+#define OB_S2_REUSE_VERSION_MISMATCH__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9121, reuse_version of mem_block or phy_block is not mismatched with micro_meta in s2 micro_cache"
+#define OB_S2_ENTRY_NOT_EXIST__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9122, entry not exist in s2 micro_cache"
+#define OB_TABLET_IS_SPLIT_SRC__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9123, cannot access split src tablet"
 #define OB_ERR_RESIZE_FILE_TO_SMALLER__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9200, Extend ssblock file to smaller is not allowed"
 #define OB_MARK_BLOCK_INFO_TIMEOUT__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9201, Mark blocks timeout(5s) in auto extend process when alloc block fail"
 #define OB_NOT_READY_TO_EXTEND_FILE__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9202, Auto extend param is not ready to start extending file"
@@ -6346,6 +6457,20 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_ERR_TIME_EARLIER_THAN_SYSDATE__ORA_USER_ERROR_MSG "ORA-23420: the parameter %s must evaluate to a time in the future"
 #define OB_ERR_NOT_FUNC_NAME__ORA_USER_ERROR_MSG "PLS-00224: object '%.*s' must be of type function or array to be used this way"
 #define OB_ERR_INVALID_CURSOR_EXPR__ORA_USER_ERROR_MSG "ORA-22902: CURSOR expression not allowed"
+#define OB_APPLICATION_ERROR_FROM_REMOTE__ORA_USER_ERROR_MSG "%.*s"
+#define OB_ERR_EVENT_EXIST__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9768, Event '%.*s' already exists"
+#define OB_ERR_EVENT_NOT_EXIST__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9769, Unknown '%.*s' event"
+#define OB_ERR_EVENT_CANT_ALTER__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9770, Failed to alter event '%.*s'"
+#define OB_ERR_EVENT_DROP_FAILED__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9771, Failed to drop %.*s"
+#define OB_ERR_EVENT_INTERVAL_NOT_POSITIVE_OR_TOO_BIG__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9772, INTERVAL is either not positive or too big"
+#define OB_ERR_EVENT_ENDS_BEFORE_STARTS__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9773, ENDS is either invalid or before STARTS"
+#define OB_ERR_EVENT_EXEC_TIME_IN_THE_PAST__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9774, Event execution time is in the past. Event has been disabled"
+#define OB_ERR_EVENT_CANNOT_DELETE__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9775, Failed to delete the event from mysql.event"
+#define OB_ERR_EVENT_SAME_NAME__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9776, Same old and new event name"
+#define OB_ERR_EVENT_DATA_TOO_LONG__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9777, Data for column '%.*s' too long"
+#define OB_ERR_EVENT_CANNOT_CREATE_IN_THE_PAST__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9778, Event execution time is in the past and ON COMPLETION NOT PRESERVE is set. The event was dropped immediately after creation."
+#define OB_ERR_EVENT_CANNOT_ALTER_IN_THE_PAST__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9779, Event execution time is in the past and ON COMPLETION NOT PRESERVE is set. The event was not changed. Specify a time in the future."
+#define OB_ERR_EVENT_RECURSION_FORBIDDEN__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -9780, Recursion of EVENT DDL statements is forbidden when body is present"
 #define OB_ERR_KV_GLOBAL_INDEX_ROUTE__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -10500, incorrect route for obkv global index, client router should refresh."
 #define OB_TTL_NOT_ENABLE__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -10501, TTL feature is not enabled"
 #define OB_TTL_COLUMN_NOT_EXIST__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -10502, TTL column '%.*s' not exists"
@@ -6362,6 +6487,7 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_KV_SCAN_RANGE_MISSING__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -10513, Scan range missing, input scan range cell count is '%ld', which should equal to rowkey count '%ld'"
 #define OB_KV_FILTER_PARSE_ERROR__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -10514, Filter parse errror, the input filter string is: '%.*s'"
 #define OB_KV_REDIS_PARSE_ERROR__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -10515, Redis protocol parse errror, the input redis string is: '%.*s'"
+#define OB_KV_HBASE_INCR_FIELD_IS_NOT_LONG__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -10516, When invoking the Increment interface, only HBase cells with a length of 8 can be converted to int64_t. the current length of the HBase cell is '%d'."
 #define OB_KV_ODP_TIMEOUT__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -10650, ODP process timeout"
 #define OB_ERR_VALUES_CLAUSE_NEED_HAVE_COLUMN__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11000, Each row of a VALUES clause must have at least one column, unless when used as source in an INSERT statement."
 #define OB_ERR_VALUES_CLAUSE_CANNOT_USE_DEFAULT_VALUES__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11001, A VALUES clause cannot use DEFAULT values, unless used as a source in an INSERT statement."
@@ -6379,7 +6505,40 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_ERR_ILLEGAL_USER_VAR__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11013, User variable name %.*s is illegal"
 #define OB_ERR_FT_COLUMN_NOT_INDEXED__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11014, Can't find FULLTEXT index matching the column list"
 #define OB_ERR_CANT_UPDATE_TABLE_IN_CREATE_TABLE_SELECT__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11015, Can't update table '%s' while '%s' is being created."
+#define OB_ERR_PS_NO_RECURSION__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11016, The prepared statement contains a stored routine call that refers to that same statement. It\'s not allowed to execute a prepared statement in such a recursive manner"
 #define OB_ERR_PARTITION_EXCHANGE_PART_TABLE__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11017, Table to exchange with partition is partitioned: \'%.*s\'"
+#define OB_INVALID_EXTERNAL_FILE__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11018, Invalid external file: %s"
+#define OB_HDFS_CONNECT_FS_ERROR__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11019, HDFS: could not connect the hdfs file system"
+#define OB_HDFS_OPEN_FILE_ERROR__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11020, HDFS: could not open file on hdfs"
+#define OB_HDFS_READ_FILE_ERROR__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11021, HDFS: error reading the file on hdfs"
+#define OB_HDFS_CREATE_IO_SERVICE_ERROR__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11022, HDFS: unable to create IoService for hdfs"
+#define OB_HDFS_CREATE_FILE_SYSTEM_ERROR__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11023, HDFS: unable to create hdfs file system"
+#define OB_HDFS_CONNECT_DEFAULTFS_ERROR__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11024, HDFS: error connecting to the cluster: defaultFS is empty"
+#define OB_HDFS_LOAD_DEFAULT_RESOURCES_ERROR__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11025, HDFS: could not load hdfs default resources"
+#define OB_HDFS_VALIDATE_RESOURCES_ERROR__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11026, HDFS: resources is invalid"
+#define OB_HDFS_LOAD_OBJECT_ERROR__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11027, HDFS: Could not load Options object"
+#define OB_HDFS_RESOURCE_UNAVAILABLE__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11028, HDFS: resource is unavailable"
+#define OB_HDFS_FUNC_UNIMPLEMENTED__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11029, HDFS: function is unimplemented"
+#define OB_HDFS_OPERATION_CANCELED__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11030, HDFS: operation is already canceled"
+#define OB_HDFS_PERMISSION_DENIED__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11031, HDFS: permission denied"
+#define OB_HDFS_PATH_NOT_FOUND__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11032, HDFS: path not found"
+#define OB_HDFS_FILE_ALREADY_EXISTS__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11033, HDFS: file already exists"
+#define OB_HDFS_PATH_IS_NOT_EMPTY_DIRECTORY__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11034, HDFS: path is not empty directory"
+#define OB_HDFS_BUSY__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11035, HDFS: io or resource is busy"
+#define OB_HDFS_AUTHENTICATION_FAILED__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11036, HDFS: authentication failed"
+#define OB_HDFS_ACCESSCONTROL_ERROR__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11037, HDFS: access control error"
+#define OB_HDFS_STANDNDBY_ERROR__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11038, HDFS: standby error"
+#define OB_HDFS_SNAPSHOT_PROTOCOL_ERROR__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11039, HDFS: snapshot protocol error"
+#define OB_HDFS_INVALID_OFFSET__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11040, HDFS: use invalid offset"
+#define OB_HDFS_NOT_A_DIRECTORY__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11041, HDFS: not a directory"
+#define OB_HDFS_MALFORMED_URI__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11042, HDFS: malformed uri"
+#define OB_HDFS_INVALID_ARGUMENT__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11043, HDFS: invalid argument"
+#define OB_HDFS_NOT_IMPLEMENT__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11044, HDFS: not implementation"
+#define OB_HDFS_ERROR__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11045, HDFS error"
+#define OB_INVALID_EXTERNAL_FILE_COLUMN_PATH__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11046, Invalid path: %.*s"
+#define OB_EXTERNAL_FILE_COLUMN_TYPE_MISMATCH__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11047, Column type mismatch between the file and the table: FileColumnType=%s TableColumnType=%s"
+#define OB_ERR_DDL_RESOURCE_NOT_ENOUGH__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11048, The tenant ddl resource is not enough, please retry"
+#define OB_EXCEED_QUERY_MEM_LIMIT__ORA_USER_ERROR_MSG "ORA-00600: internal error code, arguments: -11049, Exceed query memory limit (mem_limit=%ld, mem_hold=%ld),  please check whether the query_memory_limit_percentage configuration item is reasonable."
 #define OB_SP_RAISE_APPLICATION_ERROR__ORA_USER_ERROR_MSG "ORA%06ld: %.*s"
 #define OB_SP_RAISE_APPLICATION_ERROR_NUM__ORA_USER_ERROR_MSG "ORA-21000: error number argument to raise_application_error of '%d' is out of range"
 #define OB_CLOB_ONLY_SUPPORT_WITH_MULTIBYTE_FUN__ORA_USER_ERROR_MSG "ORA-22998: CLOB or NCLOB in multibyte character set not supported"
@@ -6390,7 +6549,7 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_ERR_DATA_TOO_LONG_MSG_FMT_V2__ORA_USER_ERROR_MSG "ORA-12899: value too large for column %.*s (actual: %ld, maximum: %ld)"
 #define OB_ERR_INVALID_DATE_MSG_FMT_V2__ORA_USER_ERROR_MSG "ORA-01861: Incorrect datetime value for column '%.*s' at row %ld"
 
-extern int g_all_ob_errnos[2250];
+extern int g_all_ob_errnos[2314];
 
   const char *ob_error_name(const int oberr);
   const char* ob_error_cause(const int oberr);

@@ -20,8 +20,9 @@
 #include "lib/string/ob_string.h"
 #include "share/ob_ls_id.h"
 #include "share/scn.h"
-#include "storage/multi_data_source/mds_ctx.h"
-#include "storage/multi_data_source/buffer_ctx.h"
+#include "storage/tx/ob_multi_data_source_printer.h"
+#include "storage/tx/ob_multi_data_source_tx_buffer_node.h"
+#include "storage/tx/ob_tx_seq.h"
 
 namespace oceanbase
 {
@@ -36,10 +37,17 @@ namespace memtable
 class ObMemtableCtx;
 }
 
+namespace storage
+{
+namespace mds
+{
+class BufferCtxNode;
+}
+}
+
 namespace transaction
 {
 class ObPartTransCtx;
-
 struct ObMulSourceDataNotifyArg;
 
 enum class ObTxDataSourceType : int64_t
@@ -66,7 +74,6 @@ enum class ObTxDataSourceType : int64_t
   MAX_TYPE = 100
 };
 
-
 enum class NotifyType : int64_t
 {
   UNKNOWN = -1,
@@ -77,84 +84,6 @@ enum class NotifyType : int64_t
   ON_COMMIT = 4,
   ON_ABORT = 5
 };
-
-class ObTxBufferNode
-{
-  friend class ObPartTransCtx;
-  friend class ObTxExecInfo;
-  friend class ObMulSourceTxDataNotifier;
-  friend class ObTxMDSCache;
-  OB_UNIS_VERSION(1);
-
-public:
-  ObTxBufferNode() : type_(ObTxDataSourceType::UNKNOWN), data_() { reset(); }
-  ~ObTxBufferNode() {}
-  int init(const ObTxDataSourceType type,
-           const common::ObString &data,
-           const share::SCN &base_scn,
-           storage::mds::BufferCtx *ctx);
-  bool is_valid() const
-  {
-    bool valid_member = false;
-    valid_member = type_ > ObTxDataSourceType::UNKNOWN && type_ < ObTxDataSourceType::MAX_TYPE
-                   && data_.length() > 0;
-    return valid_member;
-  }
-  void reset()
-  {
-    register_no_ = 0;
-    type_ = ObTxDataSourceType::UNKNOWN;
-    data_.reset();
-    has_submitted_ = false;
-    has_synced_ = false;
-    mds_base_scn_.reset();
-  }
-
-  static bool is_valid_register_no(const int64_t register_no) { return register_no > 0; }
-  int set_mds_register_no(const uint64_t register_no);
-  uint64_t get_register_no() const { return register_no_; }
-
-  // only for some mds types of CDC
-  // can not be used by observer functions
-  bool allow_to_use_mds_big_segment() { return type_ == ObTxDataSourceType::DDL_TRANS; }
-
-  void replace_data(const common::ObString &data);
-
-  int64_t get_data_size() const { return data_.length(); }
-  ObTxDataSourceType get_data_source_type() const { return type_; }
-  const ObString &get_data_buf() const { return data_; }
-  void *get_ptr() { return data_.ptr(); }
-
-  void set_submitted() { has_submitted_ = true; };
-  bool is_submitted() const { return has_submitted_; };
-
-  void set_synced() { has_synced_ = true; }
-  bool is_synced() const { return has_synced_; }
-
-  const share::SCN &get_base_scn() { return mds_base_scn_; }
-
-  bool operator==(const ObTxBufferNode &buffer_node) const;
-
-  void log_sync_fail()
-  {
-    has_submitted_ = false;
-    has_synced_ = false;
-  }
-  storage::mds::BufferCtxNode &get_buffer_ctx_node() const { return buffer_ctx_node_; }
-  TO_STRING_KV(K(register_no_), K(has_submitted_), K(has_synced_), K_(type), K(data_.length()));
-
-private:
-  uint64_t register_no_;
-  bool has_submitted_;
-  bool has_synced_;
-  share::SCN mds_base_scn_;
-  ObTxDataSourceType type_;
-  common::ObString data_;
-  mutable storage::mds::BufferCtxNode buffer_ctx_node_;
-};
-
-typedef common::ObSEArray<ObTxBufferNode, 1> ObTxBufferNodeArray;
-typedef common::ObSEArray<storage::mds::BufferCtxNode , 1> ObTxBufferCtxArray;
 
 class ObMulSourceTxDataNotifier
 {
@@ -190,7 +119,7 @@ private:
 
 class ObMulSourceTxDataDump
 {
-public: 
+public:
    static const char* dump_buf(ObTxDataSourceType source_type, const char * buf,const int64_t len);
 private:
 
@@ -235,7 +164,7 @@ public:
   const share::ObLSID &get_ls_id() { return ls_id_; }
   const ObRegisterMdsFlag &get_register_flag() { return register_flag_; }
 
-  TO_STRING_KV(K(mds_str_), K(type_), K(ls_id_), K(register_flag_));
+  TO_STRING_KV(K(mds_str_), "type_", ObMultiDataSourcePrinter::to_str_mds_type(type_), K(ls_id_), K(register_flag_));
 
 private:
   // const char *msd_buf_;

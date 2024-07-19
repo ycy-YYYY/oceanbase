@@ -86,7 +86,8 @@ public:
                                 ObTableStatParam &param,
                                 share::schema::ObSchemaGetterGuard *schema_guard,
                                 const TabStatIndMap &online_table_stats,
-                                const ColStatIndMap &online_column_stats);
+                                const ColStatIndMap &online_column_stats,
+                                const ObIArray<ObOptDmlStat *> *dml_stats = nullptr /*for_direct_load*/);
 
   static int cancel_gather_stats(ObExecContext &ctx, ObString &task_id);
 
@@ -142,7 +143,9 @@ private:
   static int do_set_table_stats(const ObSetTableStatParam &param,
                                 ObOptTableStat *table_stat);
 
-  static int do_set_column_stats(const ObSetColumnStatParam &param,
+  static int do_set_column_stats(ObIAllocator &allocator,
+                                 const ObDataTypeCastParams &dtc_params,
+                                 const ObSetColumnStatParam &param,
                                  ObOptColumnStat *&column_stat);
 
   static int reset_table_locked_state(ObExecContext &ctx,

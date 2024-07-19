@@ -59,14 +59,13 @@ class ObMigrationSSTableParam;
 struct ObDatumRowkey;
 }
 
-namespace transaction
+namespace compaction
 {
-struct ObMulSourceDataNotifyArg;
+class ObTabletMergeCtx;
 }
 
 namespace storage
 {
-enum class ObDiskReportFileType : uint8_t;
 class ObLS;
 struct ObMetaDiskAddr;
 class ObRowReshape;
@@ -110,41 +109,13 @@ public:
   class AllowToReadMgr final
   {
   public:
-    struct AllowToReadInfo final
-    {
-      AllowToReadInfo() { info_.seq_ = 0; info_.allow_to_read_ = 0; info_.reserved_ = 0; }
-      ~AllowToReadInfo() = default;
-      bool allow_to_read() const { return info_.allow_to_read_ == 1; }
-      bool operator==(const AllowToReadInfo &other) const {
-        return info_.seq_ == other.info_.seq_
-            && info_.allow_to_read_ == other.info_.allow_to_read_
-            && info_.reserved_ == other.info_.reserved_;
-      }
-
-      TO_STRING_KV(K_(info));
-      static const int32_t RESERVED = 63;
-      union InfoUnion
-      {
-        struct types::uint128_t v128_;
-        struct
-        {
-          uint64_t seq_ : 64;
-          uint8_t allow_to_read_ : 1;
-          uint64_t reserved_ : RESERVED;
-        };
-        TO_STRING_KV(K_(seq), K_(allow_to_read), K_(reserved));
-      };
-      InfoUnion info_;
-    } __attribute__((__aligned__(16)));
-  public:
-    AllowToReadMgr(): read_info_() {}
+    AllowToReadMgr() : allow_to_read_(false) {}
     ~AllowToReadMgr() = default;
     void disable_to_read();
     void enable_to_read();
-    void load_allow_to_read_info(AllowToReadInfo &read_info);
-    void check_read_info_same(const AllowToReadInfo &read_info, bool &is_same);
+    void load_allow_to_read_info(bool &allow_to_read);
   private:
-    AllowToReadInfo read_info_;
+    bool allow_to_read_;
   };
 private:
   // for replay
@@ -246,9 +217,11 @@ public:
       const common::ObTabletID &tablet_id,
       const int64_t snapshot_version);
   int build_new_tablet_from_mds_table(
+      compaction::ObTabletMergeCtx &ctx,
       const common::ObTabletID &tablet_id,
-      const int64_t mds_construct_sequence,
-      const share::SCN &flush_scn);
+      const ObTableHandleV2 &mds_mini_sstable_handle,
+      const share::SCN &flush_scn,
+      ObTabletHandle &handle);
   int update_tablet_release_memtable_for_offline(
       const common::ObTabletID &tablet_id,
       const SCN scn);
@@ -269,11 +242,16 @@ public:
   int ha_get_tablet(
       const common::ObTabletID &tablet_id,
       ObTabletHandle &handle);
-  int update_tablet_mstx(
+  int get_tablet_without_memtables(
+      const WashTabletPriority &priority,
       const ObTabletMapKey &key,
-      const ObMetaDiskAddr &old_addr,
-      const ObTabletHandle &old_tablet_handle,
-      ObTabletHandle &new_tablet_handle);
+      common::ObArenaAllocator &allocator,
+      ObTabletHandle &handle);
+  int ha_get_tablet_without_memtables(
+      const WashTabletPriority &priority,
+      const ObTabletMapKey &key,
+      common::ObArenaAllocator &allocator,
+      ObTabletHandle &handle);
   int update_tablet_to_empty_shell(const common::ObTabletID &tablet_id);
   int replay_create_tablet(
       const ObMetaDiskAddr &disk_addr,
@@ -294,8 +272,7 @@ public:
       const int64_t snapshot_version,
       ObTabletTableIterator &iter,
       const bool allow_no_ready_read = false);
-  int check_allow_to_read(AllowToReadMgr::AllowToReadInfo &read_info);
-  int check_read_info_same(const AllowToReadMgr::AllowToReadInfo &read_info);
+  int check_allow_to_read();
   int set_tablet_status(
       const common::ObTabletID &tablet_id,
       const ObTabletCreateDeleteMdsUserData &tablet_status,
@@ -609,8 +586,6 @@ private:
       ObObj &obj,
       ObLobAccessParam *del_param,
       ObLobCommon *lob_common);
-  static int check_lob_tablet_valid(
-      ObTabletHandle &data_tablet);
   static int insert_lob_tablet_row(
       ObTabletHandle &data_tablet,
       ObDMLRunningCtx &run_ctx,
@@ -795,9 +770,10 @@ private:
       bool &is_same);
 private:
   int direct_insert_rows(const uint64_t table_id,
-                         const int64_t task_id,
+                         const int64_t px_task_id,
+                         const int64_t ddl_task_id,
                          const common::ObTabletID &tablet_id,
-                         const bool is_heap_table,
+                         const common::ObIArray<uint64_t> &column_ids,
                          common::ObNewRowIterator *row_iter,
                          int64_t &affected_rows);
   static int check_is_gencol_check_failed(const ObRelativeTable &data_table,

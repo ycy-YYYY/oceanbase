@@ -132,18 +132,16 @@ int ObMemoryDump::init()
       array_ = pre_mem->array_buf_;
       tenant_ids_ = (uint64_t*)pre_mem->tenant_ids_buf_;
       log_buf_ = pre_mem->log_buf_;
-      if (OB_FAIL(lmap_.create(1000, "MemDumpMap"))) {
+      if (OB_FAIL(lmap_.create(1000, ObMemAttr(OB_SERVER_TENANT_ID, "MemDumpMap", ObCtxIds::DEFAULT_CTX_ID, OB_HIGH_ALLOC)))) {
         LOG_WARN("create map failed", K(ret));
       } else {
         r_stat_ = new (pre_mem->stats_buf_) Stat();
         w_stat_ = new (r_stat_ + 1) Stat();
         dump_context_ = context;
         is_inited_ = true;
-        if (OB_FAIL(r_stat_->malloc_sample_map_.create(1000, "MallocInfoMap",
-                                                       "MallocInfoMap"))) {
+        if (OB_FAIL(r_stat_->malloc_sample_map_.create(1000, ObMemAttr(OB_SERVER_TENANT_ID, "MallocInfoMap", ObCtxIds::DEFAULT_CTX_ID, OB_HIGH_ALLOC)))) {
           LOG_WARN("create memory info map for reading failed", K(ret));
-        } else if (OB_FAIL(w_stat_->malloc_sample_map_.create(1000, "MallocInfoMap",
-                                                              "MallocInfoMap"))) {
+        } else if (OB_FAIL(w_stat_->malloc_sample_map_.create(1000, ObMemAttr(OB_SERVER_TENANT_ID, "MallocInfoMap", ObCtxIds::DEFAULT_CTX_ID, OB_HIGH_ALLOC)))) {
           LOG_WARN("create memory info map for writing failed", K(ret));
         }
       }
@@ -557,7 +555,7 @@ void ObMemoryDump::handle(void *task)
   } else if (STAT_LABEL == m_task->type_) {
     int tenant_cnt = 0;
     get_tenant_ids(tenant_ids_, MAX_TENANT_CNT, tenant_cnt);
-    std::sort(tenant_ids_, tenant_ids_ + tenant_cnt);
+    lib::ob_sort(tenant_ids_, tenant_ids_ + tenant_cnt);
     w_stat_->tcr_cnt_ = 0;
     w_stat_->malloc_sample_map_.clear();
     int64_t item_used = 0;
@@ -742,7 +740,7 @@ void ObMemoryDump::handle(void *task)
         if (m_task->dump_all_) {
           int tenant_cnt = 0;
           get_tenant_ids(tenant_ids_, MAX_TENANT_CNT, tenant_cnt);
-          std::sort(tenant_ids_, tenant_ids_ + tenant_cnt);
+          lib::ob_sort(tenant_ids_, tenant_ids_ + tenant_cnt);
           for (int tenant_idx = 0; tenant_idx < tenant_cnt; tenant_idx++) {
             uint64_t tenant_id = tenant_ids_[tenant_idx];
             for (int ctx_id = 0; ctx_id < ObCtxIds::MAX_CTX_ID; ctx_id++) {
@@ -775,7 +773,7 @@ void ObMemoryDump::handle(void *task)
         }
         LOG_INFO("chunk cnt", K(cnt));
         // sort chunk
-        std::sort(chunks_, chunks_ + cnt);
+        lib::ob_sort(chunks_, chunks_ + cnt);
         // iter chunk
         for (int i = 0; OB_SUCC(ret) && i < cnt; i++) {
           AChunk *chunk = chunks_[i];

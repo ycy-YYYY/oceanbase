@@ -118,6 +118,9 @@ int ObTransformPredicateMoveAround::inner_do_transfrom(ObDMLStmt *stmt, bool &tr
     LOG_WARN("failed to create equal exprs for insert", K(ret));
   } else if (OB_FAIL(pushdown_predicates(stmt, dummy_pushdown))) {
     LOG_WARN("failed to push down predicates", K(ret));
+  } else if (real_happened_ &&
+         OB_FAIL(stmt->formalize_stmt_expr_reference(ctx_->expr_factory_, ctx_->session_info_))) {
+    LOG_WARN("formalize stmt expr reference failed", K(ret));
   } else {
     trans_happened = real_happened_;
   }
@@ -135,7 +138,7 @@ const static auto cmp_func = [](ObDMLStmt* l_stmt, ObDMLStmt* r_stmt) {
 int ObTransformPredicateMoveAround::adjust_transed_stmts()
 {
   int ret = OB_SUCCESS;
-  std::sort(transed_stmts_.begin(), transed_stmts_.end(), cmp_func);
+  lib::ob_sort(transed_stmts_.begin(), transed_stmts_.end(), cmp_func);
   ObDMLStmt *stmt = NULL;
   for (int64_t i = transed_stmts_.count() - 1; OB_SUCC(ret) && i >= 0; --i) {
     if (OB_ISNULL(stmt = transed_stmts_.at(i))) {
@@ -224,7 +227,7 @@ int ObTransformPredicateMoveAround::check_outline_valid_to_transform(const ObDML
         LOG_WARN("get stmt to trans failed", K(ret));
       }
     }
-    std::sort(views.begin(), views.end(), cmp_func);
+    lib::ob_sort(views.begin(), views.end(), cmp_func);
     int tmp_trans_list_loc = ctx_->trans_list_loc_;
     while (OB_SUCC(ret) && i <views.count()) {
       ObDMLStmt *view = views.at(i);

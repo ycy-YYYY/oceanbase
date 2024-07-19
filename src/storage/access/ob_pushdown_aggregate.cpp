@@ -395,7 +395,8 @@ ObAggCell::ObAggCell(const ObAggCellBasicInfo &basic_info, common::ObIAllocator 
       group_by_result_datum_buf_(nullptr),
       bitmap_(nullptr),
       group_by_result_cnt_(0),
-      is_assigned_to_group_by_processor_(false)
+      is_assigned_to_group_by_processor_(false),
+      padding_allocator_("ObStorageAgg", OB_MALLOC_NORMAL_BLOCK_SIZE, MTL_ID())
 {
   if (basic_info_.col_param_ != nullptr) {
     is_lob_col_ = basic_info_.col_param_->get_meta_type().is_lob_storage();
@@ -428,6 +429,7 @@ void ObAggCell::reset()
   free_group_by_buf(allocator_, group_by_result_datum_buf_);
   group_by_result_cnt_ = 0;
   is_assigned_to_group_by_processor_ = false;
+  padding_allocator_.reset();
 }
 
 void ObAggCell::reuse()
@@ -446,6 +448,7 @@ void ObAggCell::reuse()
       col_datums_[i].set_null();
     }
   }
+  padding_allocator_.reuse();
 }
 
 void ObAggCell::clear_group_by_info()
@@ -493,7 +496,7 @@ int ObAggCell::eval_micro_block(
     const ObTableAccessContext &context,
     const int32_t col_offset,
     blocksstable::ObIMicroBlockReader *reader,
-    const int64_t *row_ids,
+    const int32_t *row_ids,
     const int64_t row_count)
 {
   int ret = OB_SUCCESS;
@@ -635,6 +638,11 @@ int ObAggCell::output_extra_group_by_result(const int64_t start, const int64_t c
   return ret;
 }
 
+int ObAggCell::pad_column_in_group_by(const int64_t row_cap, common::ObIAllocator &allocator)
+{
+  return OB_SUCCESS;
+}
+
 int ObAggCell::reserve_bitmap(const int64_t count)
 {
   int ret = OB_SUCCESS;
@@ -666,7 +674,7 @@ int ObAggCell::prepare_def_datum()
     if (!def_cell.is_nop_value()) {
       if (OB_FAIL(def_datum_.from_obj_enhance(def_cell))) {
         STORAGE_LOG(WARN, "Failed to transfer obj to datum", K(ret));
-      } else if (OB_FAIL(pad_column_if_need(def_datum_))) {
+      } else if (OB_FAIL(pad_column_if_need(def_datum_, allocator_, false))) {
         LOG_WARN("Failed to pad default datum", K(ret), K_(basic_info), K_(def_datum));
       } else if (def_cell.is_lob_storage() && !def_cell.is_null()) {
         // lob def value must have no lob header when not null, should add lob header for default value
@@ -706,14 +714,17 @@ int ObAggCell::fill_default_if_need(blocksstable::ObStorageDatum &datum)
   return ret;
 }
 
-int ObAggCell::pad_column_if_need(blocksstable::ObStorageDatum &datum)
+int ObAggCell::pad_column_if_need(blocksstable::ObStorageDatum &datum, common::ObIAllocator &padding_allocator, bool alloc_need_reuse)
 {
   int ret = OB_SUCCESS;
+  if (alloc_need_reuse){
+    padding_allocator.reuse();
+  }
   if (OB_ISNULL(basic_info_.col_param_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("Unexpected, col param is null", K(ret), K(basic_info_.col_offset_));
   } else if (!basic_info_.need_padding()) {
-  } else if (OB_FAIL(pad_column(basic_info_.col_param_->get_meta_type(), basic_info_.col_param_->get_accuracy(), allocator_, datum))) {
+  } else if (OB_FAIL(pad_column(basic_info_.col_param_->get_meta_type(), basic_info_.col_param_->get_accuracy(), padding_allocator, datum))) {
     LOG_WARN("Fail to pad column", K(ret), K(basic_info_.col_offset_), KPC(this));
   }
   return ret;
@@ -799,10 +810,6 @@ int ObAggCell::read_agg_datum(
       LOG_WARN("Fail to init aggregate row reader", K(ret));
     } else if (OB_FAIL(agg_row_reader_->read(meta, skip_index_datum_))) {
       LOG_WARN("Failed read aggregate row", K(ret), K(meta));
-    } else if ((ObPDAggType::PD_COUNT == agg_type_ || ObPDAggType::PD_SUM_OP_SIZE == agg_type_) &&
-               skip_index_datum_.is_null()) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("unexpected, skip index datum is null", K(ret), K(meta), K(index_info));
     }
   }
   return ret;
@@ -927,7 +934,7 @@ int ObCountAggCell::eval_micro_block(
     const ObTableAccessContext &context,
     const int32_t col_offset,
     blocksstable::ObIMicroBlockReader *reader,
-    const int64_t *row_ids,
+    const int32_t *row_ids,
     const int64_t row_count)
 {
   int ret = OB_SUCCESS;
@@ -938,7 +945,7 @@ int ObCountAggCell::eval_micro_block(
     if (OB_ISNULL(row_ids)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("Unexpected, row_ids is null", K(ret), KPC(this), K(row_count));
-    } else if (OB_FAIL(reader->get_row_count(col_offset, row_ids, row_count, false, valid_row_count))) {
+    } else if (OB_FAIL(reader->get_row_count(col_offset, row_ids, row_count, false, basic_info_.col_param_, valid_row_count))) {
       LOG_WARN("Failed to get row count from micro block decoder", K(ret), KPC(this), K(row_count));
     } else {
       row_count_ += valid_row_count;
@@ -1236,7 +1243,7 @@ int ObMinAggCell::eval(blocksstable::ObStorageDatum &storage_datum, const int64_
   } else if (OB_FAIL(fill_default_if_need(storage_datum))) {
     LOG_WARN("Failed to fill default", K(ret), K(storage_datum), K(*this));
   } else if (storage_datum.is_null()) {
-  } else if (OB_FAIL(pad_column_if_need(storage_datum))) {
+  } else if (OB_FAIL(pad_column_if_need(storage_datum, padding_allocator_))) {
     LOG_WARN("Failed to pad column", K(ret), K_(basic_info), K(storage_datum));
   } else if (result_datum_.is_null()) {
     if (OB_FAIL(result_datum_.deep_copy(storage_datum, datum_allocator_))) {
@@ -1347,7 +1354,7 @@ int ObMinAggCell::eval_batch_in_group_by(
     // as there is no guarantee of the validness of the previous memory in next round
     if (OB_FAIL(ret)) {
     } else if (updated_cnt > 0) {
-      std::sort(group_by_ref_array_, group_by_ref_array_ + updated_cnt);
+      lib::ob_sort(group_by_ref_array_, group_by_ref_array_ + updated_cnt);
       int64_t last_ref_cnt = -1;
       for (int64_t i = 0; OB_SUCC(ret) && i < updated_cnt; ++i) {
         if (-1 == group_by_ref_array_[i]) {
@@ -1364,6 +1371,22 @@ int ObMinAggCell::eval_batch_in_group_by(
         }
       }
     }
+  }
+  return ret;
+}
+
+int ObMinAggCell::pad_column_in_group_by(const int64_t row_cap, common::ObIAllocator &allocator)
+{
+  int ret = OB_SUCCESS;
+  common::ObDatum *sql_result_datums = group_by_result_datum_buf_->get_basic_buf();
+  if (basic_info_.need_padding() &&
+      OB_FAIL(storage::pad_on_datums(
+              basic_info_.col_param_->get_accuracy(),
+              basic_info_.col_param_->get_meta_type().get_collation_type(),
+              allocator,
+              row_cap,
+              sql_result_datums))) {
+    LOG_WARN("Failed to pad aggregate column in group by", K(ret), KPC(this));
   }
   return ret;
 }
@@ -1419,7 +1442,7 @@ int ObMaxAggCell::eval(blocksstable::ObStorageDatum &storage_datum, const int64_
   } else if (OB_FAIL(fill_default_if_need(storage_datum))) {
     LOG_WARN("Failed to fill default", K(ret), K(storage_datum), K(*this));
   } else if (storage_datum.is_null()) {
-  } else if (OB_FAIL(pad_column_if_need(storage_datum))) {
+  } else if (OB_FAIL(pad_column_if_need(storage_datum, padding_allocator_))) {
     LOG_WARN("Failed to pad column", K(ret), K_(basic_info), K(storage_datum));
   } else if (result_datum_.is_null()) {
     if (OB_FAIL(result_datum_.deep_copy(storage_datum, datum_allocator_))) {
@@ -1526,7 +1549,7 @@ int ObMaxAggCell::eval_batch_in_group_by(
     }
     if (OB_FAIL(ret)) {
     } else if (updated_cnt > 0) {
-      std::sort(group_by_ref_array_, group_by_ref_array_ + updated_cnt);
+      lib::ob_sort(group_by_ref_array_, group_by_ref_array_ + updated_cnt);
       int64_t last_ref_cnt = -1;
       for (int64_t i = 0; OB_SUCC(ret) && i < updated_cnt; ++i) {
         if (-1 == group_by_ref_array_[i]) {
@@ -1543,6 +1566,22 @@ int ObMaxAggCell::eval_batch_in_group_by(
         }
       }
     }
+  }
+  return ret;
+}
+
+int ObMaxAggCell::pad_column_in_group_by(const int64_t row_cap, common::ObIAllocator &allocator)
+{
+  int ret = OB_SUCCESS;
+  common::ObDatum *sql_result_datums = group_by_result_datum_buf_->get_basic_buf();
+  if (basic_info_.need_padding() &&
+      OB_FAIL(storage::pad_on_datums(
+              basic_info_.col_param_->get_accuracy(),
+              basic_info_.col_param_->get_meta_type().get_collation_type(),
+              allocator,
+              row_cap,
+              sql_result_datums))) {
+    LOG_WARN("Failed to pad aggregate column in group by", K(ret), KPC(this));
   }
   return ret;
 }
@@ -1630,7 +1669,7 @@ int ObHyperLogLogAggCell::eval(blocksstable::ObStorageDatum &storage_datum, cons
     }
   } else if (storage_datum.is_null()) {
     // ndv does not consider null
-  } else if (OB_FAIL(pad_column_if_need(storage_datum))) {
+  } else if (OB_FAIL(pad_column_if_need(storage_datum, padding_allocator_))) {
     LOG_WARN("Failed to pad column", K(ret), K_(basic_info), K(storage_datum));
   } else if (OB_FAIL(hash_func_(storage_datum, hash_value, hash_value))) {
     LOG_WARN("Failed to do hash", K(ret));
@@ -1802,7 +1841,7 @@ int ObSumOpSizeAggCell::eval(blocksstable::ObStorageDatum &storage_datum, const 
     LOG_WARN("Invalid row count", K(ret), K(row_count));
   } else if (storage_datum.is_nop()) {
     total_size_ += def_op_size_ * row_count;
-  } else if (OB_FAIL(pad_column_if_need(storage_datum))) {
+  } else if (OB_FAIL(pad_column_if_need(storage_datum, padding_allocator_))) {
     LOG_WARN("Failed to pad column", K(ret), K_(basic_info), K(storage_datum));
   } else if (OB_FAIL(get_datum_op_size(storage_datum, length))) {
     LOG_WARN("Failed to get datum length", K(ret), K(storage_datum));
@@ -1848,7 +1887,7 @@ int ObSumOpSizeAggCell::eval_micro_block(
     const ObTableAccessContext &context,
     const int32_t col_offset,
     blocksstable::ObIMicroBlockReader *reader,
-    const int64_t *row_ids,
+    const int32_t *row_ids,
     const int64_t row_count)
 {
   int ret = OB_SUCCESS;
@@ -1859,7 +1898,7 @@ int ObSumOpSizeAggCell::eval_micro_block(
       if (OB_ISNULL(row_ids)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("Unexpected, row_ids is null", K(ret), KPC(this), K(row_count));
-      } else if (OB_FAIL(reader->get_row_count(col_offset, row_ids, row_count, false, valid_row_count))) {
+      } else if (OB_FAIL(reader->get_row_count(col_offset, row_ids, row_count, false, basic_info_.col_param_, valid_row_count))) {
         LOG_WARN("Failed to get row count from micro block decoder", K(ret), KPC(this), K(row_count));
       } else {
         total_size_ += (row_count - valid_row_count) * sizeof(ObDatum) + valid_row_count * op_size_;
@@ -3118,7 +3157,7 @@ int ObFirstRowAggCell::eval(blocksstable::ObStorageDatum &datum, const int64_t r
   } else if (!aggregated_) {
     if (OB_FAIL(fill_default_if_need(datum))) {
       LOG_WARN("Failed to fill default", K(ret), KPC(this));
-    } else if (OB_FAIL(pad_column_if_need(datum))) {
+    } else if (OB_FAIL(pad_column_if_need(datum, padding_allocator_))) {
       LOG_WARN("Failed to pad column", K(ret), K_(basic_info), K(datum));
     } else if (OB_FAIL(result_datum_.deep_copy(datum, datum_allocator_))) {
       LOG_WARN("Failed to deep copy datum", K(ret), K(datum));
@@ -3134,7 +3173,7 @@ int ObFirstRowAggCell::eval_micro_block(
     const ObTableAccessContext &context,
     const int32_t col_offset,
     blocksstable::ObIMicroBlockReader *reader,
-    const int64_t *row_ids,
+    const int32_t *row_ids,
     const int64_t row_count)
 {
   int ret = OB_SUCCESS;
@@ -3146,6 +3185,10 @@ int ObFirstRowAggCell::eval_micro_block(
       blocksstable::ObStorageDatum datum;
       if (OB_FAIL(reader->get_column_datum(iter_param, context, *basic_info_.col_param_, col_offset, row_ids[0], datum))) {
         LOG_WARN("Failed to get first datum", K(ret), K(col_offset), K(row_ids[0]), K(row_count));
+      } else if (OB_FAIL(fill_default_if_need(datum))) {
+        LOG_WARN("Failed to fill default", K(ret), KPC(this));
+      } else if (OB_FAIL(pad_column_if_need(datum, padding_allocator_))) {
+        LOG_WARN("Failed to pad column", K(ret), K_(basic_info), K(datum));
       } else if (OB_FAIL(result_datum_.deep_copy(datum, datum_allocator_))) {
         LOG_WARN("Failed to deep copy datum", K(ret), K(datum));
       } else {
@@ -3388,6 +3431,7 @@ ObGroupByCell::ObGroupByCell(const int64_t batch_size, common::ObIAllocator &all
   : batch_size_(batch_size),
     row_capacity_(batch_size),
     group_by_col_offset_(-1),
+    group_by_col_param_(nullptr),
     group_by_col_expr_(nullptr),
     group_by_col_datum_buf_(nullptr),
     tmp_group_by_datum_buf_(nullptr),
@@ -3401,6 +3445,7 @@ ObGroupByCell::ObGroupByCell(const int64_t batch_size, common::ObIAllocator &all
     is_processing_(false),
     projected_cnt_(0),
     agg_cell_factory_(allocator),
+    padding_allocator_("PDGroupByPad", OB_MALLOC_NORMAL_BLOCK_SIZE, MTL_ID()),
     allocator_(allocator)
 {
 }
@@ -3410,6 +3455,7 @@ void ObGroupByCell::reset()
   batch_size_ = 0;
   row_capacity_ = 0;
   group_by_col_offset_ = -1;
+  group_by_col_param_ = nullptr;
   group_by_col_expr_ = nullptr;
   agg_cell_factory_.release(agg_cells_);
   distinct_cnt_ = 0;
@@ -3427,6 +3473,7 @@ void ObGroupByCell::reset()
     allocator_.free(agg_datum_buf_);
     agg_datum_buf_ = nullptr;
   }
+  padding_allocator_.reset();
   is_processing_ = false;
   projected_cnt_ = 0;
 }
@@ -3442,6 +3489,7 @@ void ObGroupByCell::reuse()
   if (nullptr != distinct_projector_buf_) {
     distinct_projector_buf_->fill_items(-1);
   }
+  padding_allocator_.reuse();
   is_processing_ = false;
   projected_cnt_ = 0;
 }
@@ -3460,8 +3508,8 @@ int ObGroupByCell::init(const ObTableAccessParam &param, const ObTableAccessCont
     group_by_col_offset_ = param.iter_param_.group_by_cols_project_->at(0);
     for (int64_t i = 0; OB_SUCC(ret) && i < param.output_exprs_->count(); ++i) {
       if (T_PSEUDO_GROUP_ID == param.output_exprs_->at(i)->type_) {
-        ret = OB_INVALID_ARGUMENT;
-        LOG_WARN("Unexpected group idx expr", K(ret));
+        LOG_TRACE("Group by pushdown in batch nlj", K(ret));
+        continue;
       } else if (nullptr == param.output_sel_mask_ || param.output_sel_mask_->at(i)) {
         int32_t col_offset = param.iter_param_.out_cols_project_->at(i);
         int32_t col_index = param.iter_param_.read_info_->get_columns_index().at(col_offset);
@@ -3478,6 +3526,10 @@ int ObGroupByCell::init(const ObTableAccessParam &param, const ObTableAccessCont
               common::OBJ_DATUM_NUMBER_RES_SIZE, allocator_, group_by_col_datum_buf_))) {
             LOG_WARN("Failed to new buf", K(ret));
           } else {
+            const common::ObObjMeta &obj_meta = col_param->get_meta_type();
+            if (is_pad_char_to_full_length(context.sql_mode_) && obj_meta.is_fixed_len_char_type()) {
+              group_by_col_param_ = col_param;
+            }
             group_by_col_expr_ = expr;
           }
         } else if (OB_FAIL(agg_cell_factory_.alloc_cell(basic_info, agg_cells_, false, true, &eval_ctx))) {
@@ -3493,7 +3545,7 @@ int ObGroupByCell::init(const ObTableAccessParam &param, const ObTableAccessCont
       LOG_WARN("Failed to init agg_cells", K(ret));
     } else {
       if (agg_cells_.count() > 2) {
-        std::sort(agg_cells_.begin(), agg_cells_.end(),
+        lib::ob_sort(agg_cells_.begin(), agg_cells_.end(),
                   [](ObAggCell *a, ObAggCell *b) { return a->get_col_offset() < b->get_col_offset(); });
       }
       void *buf = nullptr;
@@ -3700,6 +3752,28 @@ int ObGroupByCell::output_extra_group_by_result(int64_t &count)
     }
   }
   LOG_DEBUG("[GROUP BY PUSHDOWN]", K(ret), K(count), K(projected_cnt_), K(distinct_cnt_), K(row_capacity_));
+  return ret;
+}
+
+int ObGroupByCell::pad_column_in_group_by(const int64_t row_cap)
+{
+  int ret = OB_SUCCESS;
+  common::ObDatum *sql_result_datums = group_by_col_datum_buf_->get_sql_result_datums();
+  if (nullptr != group_by_col_param_ &&
+      group_by_col_param_->get_meta_type().is_fixed_len_char_type() &&
+      OB_FAIL(storage::pad_on_datums(
+              group_by_col_param_->get_accuracy(),
+              group_by_col_param_->get_meta_type().get_collation_type(),
+              padding_allocator_,
+              row_cap,
+              sql_result_datums))) {
+    LOG_WARN("Failed to pad group by column", K(ret), K(row_cap), KPC_(group_by_col_param));
+  }
+  for (int i = 0; OB_SUCC(ret) && i < agg_cells_.count(); ++i) {
+    if (OB_FAIL(agg_cells_.at(i)->pad_column_in_group_by(row_cap, padding_allocator_))) {
+      LOG_WARN("Failed to pad column for aggregate datums", K(ret), K(row_cap));
+    }
+  }
   return ret;
 }
 

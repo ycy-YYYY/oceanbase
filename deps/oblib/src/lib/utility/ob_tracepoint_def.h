@@ -376,7 +376,9 @@ GLOBAL_ERRSIM_POINT_DEF(613, EN_PX_DTL_TRACE_LOG_ENABLE, "Deprecated variable");
 GLOBAL_ERRSIM_POINT_DEF(614, EN_PX_DISABLE_RUNTIME_FILTER_EXTRACT_QUERY_RANGE, "Switch: use to disable the feature runtime filter extracting query range");
 GLOBAL_ERRSIM_POINT_DEF(615, EN_PX_MAX_IN_FILTER_QR_COUNT, "Switch: control the max number of query range extract by runtime in filter");
 GLOBAL_ERRSIM_POINT_DEF(616, EN_PX_DISABLE_WHITE_RUNTIME_FILTER, "Switch: used to disable runtime filter pushdown as white filter.");
-GLOBAL_ERRSIM_POINT_DEF(617, EN_PX_DISABLE_PD_TOPN_FILTER, "");
+GLOBAL_ERRSIM_POINT_DEF(617, EN_PX_DISABLE_PD_TOPN_FILTER, "Switch: used to disable runtime topn filter pushdown.");
+GLOBAL_ERRSIM_POINT_DEF(618, EN_PX_PD_TOPN_FILTER_IGNORE_TABLE_CARD, "Switch: allocate topn filter expr even if less table card");
+GLOBAL_ERRSIM_POINT_DEF(619, EN_PX_SQC_HANDLER_INIT_FAILED, "Inject error: let sqc handler init failed");
 // please add new trace point after 700 or before 600
 
 // Compaction Related 700-750
@@ -533,9 +535,29 @@ GLOBAL_ERRSIM_POINT_DEF(2208, EN_DISABLE_SORTKEY_SEPARATELY, "Used to control wh
 GLOBAL_ERRSIM_POINT_DEF(2209, EN_ENABLE_VECTOR_IN, "Used to control whether the capability for in-expr vectorization 2.0 is enabled.");
 GLOBAL_ERRSIM_POINT_DEF(2210, EN_SQL_MEMORY_MRG_OPTION, "Control automatic memory management global bound size");
 GLOBAL_ERRSIM_POINT_DEF(2211, EN_ENABLE_RANDOM_TSC, "wether to randomize batch_size & skips of table scan's output ");
+GLOBAL_ERRSIM_POINT_DEF(2212, EN_LOCK_CONFLICT_RETRY_THEN_REROUTE, "force reroute sql when lock conflict and retry a few times");
+
 // WR && ASH
 GLOBAL_ERRSIM_POINT_DEF(2301, EN_CLOSE_ASH, "");
 GLOBAL_ERRSIM_POINT_DEF(2302, EN_DISABLE_HASH_BASE_DISTINCT, "");
-GLOBAL_ERRSIM_POINT_DEF(2304, EN_TRACEPOINT_TEST, "For testing new versions of tracepoint");
+GLOBAL_ERRSIM_POINT_DEF(2303, EN_DISABLE_VEC_WINDOW_FUNCTION, "Disable window function operator of vectorization 2.0");
+GLOBAL_ERRSIM_POINT_DEF(2304, EN_FORCE_WINFUNC_STORE_DUMP, "Force to dump row store of window function operator");
+GLOBAL_ERRSIM_POINT_DEF(2305, EN_TRACEPOINT_TEST, "For testing new versions of tracepoint");
+
+GLOBAL_ERRSIM_POINT_DEF(2306, EN_DISABLE_VEC_MERGE_DISTINCT, "Used to control whether to turn off the vectorization 2.0 merge distinct operator. It is turned on by default.");
+// force dump
+GLOBAL_ERRSIM_POINT_DEF(2400, EN_SQL_FORCE_DUMP, "For testing force dump once");
+GLOBAL_ERRSIM_POINT_DEF(2401, EN_TEST_FOR_HASH_UNION, "Used to control whether to turn off the vectorization 2.0 hash set operator. It is turned on by default.");
+
+// Protocol begin 2450 - 2500
+// pr-exec protocol
+GLOBAL_ERRSIM_POINT_DEF(2450, COM_STMT_PREXECUTE_PREPARE_ERROR, "inject error at prepare stage for pr-exec protocol");
+GLOBAL_ERRSIM_POINT_DEF(2451, COM_STMT_PREXECUTE_PS_CURSOR_OPEN_ERROR, "inject error at cursor open stage for pr-exec protocol");
+GLOBAL_ERRSIM_POINT_DEF(2452, COM_STMT_PREXECUTE_EXECUTE_ERROR, "inject error at execute stage for pr-exec protocol");
+GLOBAL_ERRSIM_POINT_DEF(2453, EN_ENABLE_NEW_RESULT_META_DATA, "For testing enable new result meta data, off by default");
+
+// Protocol end
+
+GLOBAL_ERRSIM_POINT_DEF(2501, EN_CHECK_SORT_CMP, "Used to check the legality of the compare method for std::sort");
 
 #endif /*GLOBAL_ERRSIM_POINT_DEF*/

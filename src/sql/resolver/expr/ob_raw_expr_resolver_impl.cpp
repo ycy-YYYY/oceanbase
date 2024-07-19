@@ -35,6 +35,7 @@
 #include "sql/resolver/dml/ob_del_upd_stmt.h"
 #include "deps/oblib/src/lib/json_type/ob_json_path.h"
 #include "share/resource_manager/ob_resource_manager.h"
+#include "sql/resolver/dml/ob_inlist_resolver.h"
 
 namespace oceanbase
 {
@@ -57,6 +58,7 @@ int ObRawExprResolverImpl::resolve(const ParseNode *node,
                                    ObIArray<ObUDFInfo> &udf_info,
                                    ObIArray<ObOpRawExpr*> &op_exprs,
                                    ObIArray<ObUserVarIdentRawExpr*> &user_var_exprs,
+                                   ObIArray<ObInListInfo> &inlist_infos,
                                    ObIArray<ObMatchFunRawExpr*> &match_exprs)
 {
   ctx_.columns_ = &columns;
@@ -67,8 +69,9 @@ int ObRawExprResolverImpl::resolve(const ParseNode *node,
   ctx_.win_exprs_ = &win_exprs;
   ctx_.udf_info_ = &udf_info;
   ctx_.user_var_exprs_ = &user_var_exprs;
+  ctx_.inlist_infos_ = &inlist_infos;
   ctx_.match_exprs_ = &match_exprs;
-  int ret = recursive_resolve(node, expr);
+  int ret = recursive_resolve(node, expr, true);
   if (OB_SUCC(ret)) {
     if (OB_FAIL(expr->extract_info())) {
       LOG_WARN("failed to extract info", K(ret), K(*expr));
@@ -252,12 +255,14 @@ int ObRawExprResolverImpl::try_negate_const(ObRawExpr *&expr,
   return ret;
 }
 
-int ObRawExprResolverImpl::recursive_resolve(const ParseNode *node, ObRawExpr *&expr)
+int ObRawExprResolverImpl::recursive_resolve(const ParseNode *node, ObRawExpr *&expr, bool is_root_expr)
 {
-  return SMART_CALL(do_recursive_resolve(node, expr));
+  return SMART_CALL(do_recursive_resolve(node, expr, is_root_expr));
 }
 
-int ObRawExprResolverImpl::do_recursive_resolve(const ParseNode *node, ObRawExpr *&expr)
+int ObRawExprResolverImpl::do_recursive_resolve(const ParseNode *node,
+                                                ObRawExpr *&expr,
+                                                bool is_root_expr)
 {
   int ret = OB_SUCCESS;
   bool is_stack_overflow = false;
@@ -426,6 +431,15 @@ int ObRawExprResolverImpl::do_recursive_resolve(const ParseNode *node, ObRawExpr
                 }
               }
             }
+          } else if (ob_is_rowid_tc(data_type)) {
+            int32_t len = static_cast<int32_t>(node->int32_values_[OB_NODE_CAST_C_LEN_IDX]);
+            if (OB_UNLIKELY(0 == len)) {
+              ret = OB_ERR_ZERO_LEN_COL;
+              LOG_WARN("Oracle not allowed zero length", K(ret));
+            } else if (OB_UNLIKELY(len > OB_MAX_USER_ROW_KEY_LENGTH)) {
+              ret = OB_ERR_TOO_LONG_COLUMN_LENGTH;
+              LOG_WARN("column data length is invalid", K(ret), K(len));
+            }
           }
 
           if (OB_SUCC(ret)) {
@@ -544,7 +558,8 @@ int ObRawExprResolverImpl::do_recursive_resolve(const ParseNode *node, ObRawExpr
       case T_OP_XOR: {
         ObOpRawExpr *m_expr = NULL;
         int64_t num_child = 2;
-        if (OB_FAIL(process_node_with_children(node, num_child, m_expr))) {
+        if (OB_FAIL(process_node_with_children(node, num_child, m_expr,
+                                               node->type_ == T_OP_XOR ? false : is_root_expr))) {
           LOG_WARN("fail to process node with children", K(ret), K(node));
         } else if (OB_ISNULL(ctx_.session_info_)) {
           ret = OB_ERR_UNEXPECTED;
@@ -651,7 +666,7 @@ int ObRawExprResolverImpl::do_recursive_resolve(const ParseNode *node, ObRawExpr
       case T_OP_IN:
         // get through
       case T_OP_NOT_IN: {
-        if (OB_FAIL(process_in_or_not_in_node(node, expr))) {
+        if (OB_FAIL(process_in_or_not_in_node(node, is_root_expr, expr))) {
           LOG_WARN("fail to process any or all node", K(ret), K(node));
         }
         break;
@@ -769,7 +784,10 @@ int ObRawExprResolverImpl::do_recursive_resolve(const ParseNode *node, ObRawExpr
       case T_FUN_ORA_JSON_OBJECTAGG:
       case T_FUN_ORA_XMLAGG:
       case T_FUN_SUM_OPNSIZE:
-      case T_FUN_SYS_ST_ASMVT: {
+      case T_FUN_SYS_ST_ASMVT:
+      case T_FUN_SYS_RB_BUILD_AGG:
+      case T_FUN_SYS_RB_OR_AGG:
+      case T_FUN_SYS_RB_AND_AGG: {
         if (OB_FAIL(process_agg_node(node, expr))) {
           LOG_WARN("fail to process agg node", K(ret), K(node));
         }
@@ -2186,11 +2204,34 @@ int ObRawExprResolverImpl::check_pl_variable(ObQualifiedName &q_name, bool &is_p
   if (NULL == ctx_.secondary_namespace_) {
     // do nothing ...
   } else {
+
+class ObPLDependencyGuard
+{
+public:
+  ObPLDependencyGuard(pl::ObPLDependencyTable *dependency_table)
+    : dependency_table_(dependency_table), count_(0) {
+    if (OB_NOT_NULL(dependency_table_)) {
+      count_ = dependency_table_->count();
+    }
+  }
+  ~ObPLDependencyGuard() {
+    if (OB_NOT_NULL(dependency_table_)) {
+      while (dependency_table_->count() > count_) {
+        dependency_table_->pop_back();
+      }
+    }
+  }
+private:
+  pl::ObPLDependencyTable *dependency_table_;
+  int64_t count_;
+};
+
     SET_LOG_CHECK_MODE();
     CK(OB_NOT_NULL(ctx_.secondary_namespace_->get_external_ns()));
     if (OB_SUCC(ret)) {
       ObArray<ObQualifiedName> fake_columns;
       ObArray<ObRawExpr*> fake_exprs;
+      ObPLDependencyGuard dep_guard(ctx_.secondary_namespace_->get_external_ns()->get_dependency_table());
       if (OB_FAIL(ObResolverUtils::resolve_external_symbol(allocator,
                                                            expr_factory,
                                                            ctx_.secondary_namespace_->get_external_ns()->get_resolve_ctx().session_info_,
@@ -2543,22 +2584,6 @@ int ObRawExprResolverImpl::resolve_left_node_of_obj_access_idents(const ParseNod
       LOG_WARN("Identifier cannot be an empty string", K(ret), K(ident_name));
     }
     OZ (q_name.access_idents_.push_back(ObObjAccessIdent(ident_name, OB_INVALID_INDEX)), K(q_name));
-    // TODO: may move this check to pl resovler ?
-    if (OB_SUCC(ret)
-        && T_PL_SCOPE == ctx_.current_scope_
-        && q_name.access_idents_.count() > 1
-        && (0 == ident_name.case_compare("NEXT")
-            || 0 == ident_name.case_compare("PRIOR")
-            || 0 == ident_name.case_compare("EXISTS"))
-        && lib::is_oracle_mode()) {
-      AccessNameType name_type = UNKNOWN;
-      OZ (check_name_type(q_name, ctx_.current_scope_, name_type));
-      if (OB_SUCC(ret) && name_type == TYPE_METHOD) {
-        ret = OB_ERR_CALL_WRONG_ARG;
-        LOG_WARN("wrong number or types of arguments in call to procedure", K(ret), K(q_name));
-        LOG_USER_ERROR(OB_ERR_CALL_WRONG_ARG, ident_name.length(), ident_name.ptr());
-      }
-    }
   } else if (T_FUN_SYS == left_node.type_
              || T_FUN_SYS_XML_ELEMENT == left_node.type_
              || T_FUN_SYS_XMLPARSE == left_node.type_
@@ -2866,12 +2891,15 @@ int ObRawExprResolverImpl::process_datatype_or_questionmark(const ParseNode &nod
   ObCollationType nation_collation = OB_NOT_NULL(ctx_.session_info_) ? ctx_.session_info_->get_nls_collation_nation() : CS_TYPE_INVALID;
   uint64_t tenant_data_ver = 0;
   bool enable_decimal_int = false;
-  if (nullptr == session_info) {
+  ObCompatType compat_type = COMPAT_MYSQL57;
+  if (OB_ISNULL(session_info)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("session info is null", K(ret));
   } else if (lib::is_oracle_mode() && OB_FAIL(
     session_info->get_sys_variable(share::SYS_VAR_COLLATION_SERVER, server_collation))) {
     LOG_WARN("get sys variables failed", K(ret));
+  } else if (OB_FAIL(session_info->get_compatibility_control(compat_type))) {
+    LOG_WARN("failed to get compat type", K(ret));
   } else if (OB_FAIL(ObSQLUtils::check_enable_decimalint(session_info, enable_decimal_int))) {
     LOG_WARN("fail to check enable decimal int", K(ret));
   } else if (lib::is_oracle_mode() && ctx_.is_expanding_view_) {
@@ -2892,6 +2920,7 @@ int ObRawExprResolverImpl::process_datatype_or_questionmark(const ParseNode &nod
                                              &(ctx_.parents_expr_info_),
                                              session_info->get_sql_mode(),
                                              enable_decimal_int, // FIXME: enable decimal int
+                                             compat_type,
                                              nullptr != ctx_.secondary_namespace_))) {
     LOG_WARN("failed to resolve const", K(ret));
   } else if (OB_FAIL(ctx_.expr_factory_.create_raw_expr(lib::is_mysql_mode() && node.type_ == T_NCHAR ?
@@ -2978,6 +3007,7 @@ int ObRawExprResolverImpl::process_datatype_or_questionmark(const ParseNode &nod
             }
             ObRawExpr *original_expr = c_expr;
             OZ (ObResolverUtils::resolve_external_param_info(*ctx_.external_param_info_,
+                                                             *session_info,
                                                              ctx_.expr_factory_,
                                                              ctx_.prepare_param_count_,
                                                              original_expr));
@@ -3115,8 +3145,12 @@ int ObRawExprResolverImpl::process_datatype_or_questionmark(const ParseNode &nod
           T_QUESTIONMARK == c_expr->get_expr_type() &&
           c_expr->get_result_type().is_ext() &&
           (pl::PL_RECORD_TYPE == c_expr->get_result_type().get_extend_type() ||
-          pl::PL_NESTED_TABLE_TYPE == c_expr->get_result_type().get_extend_type() ||
-          pl::PL_VARRAY_TYPE == c_expr->get_result_type().get_extend_type())) {
+           pl::PL_NESTED_TABLE_TYPE == c_expr->get_result_type().get_extend_type() ||
+           pl::PL_ASSOCIATIVE_ARRAY_TYPE == c_expr->get_result_type().get_extend_type() ||
+           pl::PL_VARRAY_TYPE == c_expr->get_result_type().get_extend_type() ||
+           pl::PL_CURSOR_TYPE == c_expr->get_result_type().get_extend_type() ||
+           pl::PL_REF_CURSOR_TYPE == c_expr->get_result_type().get_extend_type() ||
+           pl::PL_OPAQUE_TYPE == c_expr->get_result_type().get_extend_type())) {
         ctx_.stmt_->get_query_ctx()->disable_udf_parallel_ |= true;
       }
     }
@@ -3613,6 +3647,46 @@ int ObRawExprResolverImpl::process_operator_node(const ParseNode *node, ObRawExp
     } else {
       ctx_.op_exprs_->push_back(b_expr);
       LOG_DEBUG("ctx_.op_exprs_ push", K(b_expr->get_param_count()), K(*b_expr));
+    }
+  } else if (lib::is_oracle_mode()
+            && ((T_FUN_SYS_SDO_RELATE == sub_expr1->get_expr_type() && sub_expr2->is_const_expr())
+            || (T_FUN_SYS_SDO_RELATE == sub_expr2->get_expr_type() && sub_expr1->is_const_expr()))) {
+    ParseNode* const_node = sub_expr1->is_const_expr() ? node->children_[0] : node->children_[1];
+    if (OB_ISNULL(const_node)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("get unexpected null", K(ret), KP(const_node));
+    } else if (T_QUESTIONMARK == const_node->type_) {
+      if (OB_ISNULL(ctx_.param_list_)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("param_list_ is null", K(ret), K(ctx_.param_list_));
+      } else if (ctx_.param_list_->count() == 0) {
+        //prepare phase of ps protocol, do nothing
+      } else if (OB_UNLIKELY(const_node->value_ < 0 || const_node->value_ >= ctx_.param_list_->count())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("index is out of range", K(const_node->value_), K(ctx_.param_list_->count()));
+      } else {
+        const int64_t idx = const_node->value_;
+        ObPCConstParamInfo const_param_info;
+        ObObj val;
+        ObString str_value;
+        char *str_buf = nullptr;
+        if (OB_ISNULL(str_buf = static_cast<char*>(ctx_.expr_factory_.get_allocator().alloc(strlen("TRUE"))))) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+          LOG_WARN("alloc failed", K(ret));
+        } else if (OB_FALSE_IT(str_value.assign_buffer(str_buf, strlen("TRUE")))) {
+        } else if (OB_UNLIKELY(strlen("TRUE") != str_value.write("TRUE", strlen("TRUE")))) {
+          ret = OB_SIZE_OVERFLOW;
+          LOG_WARN("write amp char failed", K(ret));
+        } else {
+          val.set_string(ObVarcharType, str_value);
+          if (OB_FAIL(const_param_info.const_idx_.push_back(idx))
+                    || OB_FAIL(const_param_info.const_params_.push_back(val))) {
+            LOG_WARN("failed to push back param idx and value", K(ret));
+          } else if (OB_FAIL(ctx_.query_ctx_->all_plan_const_param_constraints_.push_back(const_param_info))) {
+            LOG_WARN("failed to push back const param info", K(ret));
+          }
+        }
+      }
     }
   }
   return ret;
@@ -4175,7 +4249,9 @@ int ObRawExprResolverImpl::process_like_node(const ParseNode *node, ObRawExpr *&
   return ret;
 }
 
-int ObRawExprResolverImpl::process_in_or_not_in_node(const ParseNode *node, ObRawExpr *&expr)
+int ObRawExprResolverImpl::process_in_or_not_in_node(const ParseNode *node,
+                                                     const bool is_root_expr,
+                                                     ObRawExpr *&expr)
 {
   int ret = OB_SUCCESS;
   ObOpRawExpr *in_expr = NULL;
@@ -4193,8 +4269,9 @@ int ObRawExprResolverImpl::process_in_or_not_in_node(const ParseNode *node, ObRa
     LOG_WARN("create ObOpRawExpr failed", K(ret));
   } else if (OB_FAIL(SMART_CALL(recursive_resolve(node->children_[0], sub_expr1)))) {
     LOG_WARN("resolve left raw expr failed", K(ret));
-  } else if (OB_FAIL(SMART_CALL(recursive_resolve(node->children_[1], sub_expr2)))) {
-    LOG_WARN("resolve right child failed", K(ret));
+  } else if (OB_FAIL(resolve_right_branch_of_in_op(node->children_[1], node->type_, sub_expr1,
+                                                   is_root_expr, sub_expr2))) {
+    LOG_WARN("failed to convert", K(ret));
   } else if (OB_ISNULL(sub_expr1) || OB_ISNULL(sub_expr2)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("resolve get invalid expr", K(ret), K(sub_expr1), K(sub_expr2));
@@ -4258,6 +4335,60 @@ int ObRawExprResolverImpl::process_in_or_not_in_node(const ParseNode *node, ObRa
       }
     }
   }
+  return ret;
+}
+
+int ObRawExprResolverImpl::resolve_right_branch_of_in_op(const ParseNode *node,
+                                                         const ObItemType op_type,
+                                                         const ObRawExpr *left_expr,
+                                                         const bool is_root_condition,
+                                                         ObRawExpr *&right_expr)
+{
+  int ret = OB_SUCCESS;
+  bool is_enable_rewrite = false;
+  bool is_question_mark = true;
+  if (OB_ISNULL(node)|| OB_ISNULL(left_expr)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", K(ret));
+  } else if (OB_FAIL(ObInListResolver::check_inlist_rewrite_enable(*node,
+            op_type,
+            *left_expr,
+            ctx_.current_scope_,
+            is_root_condition,
+            ctx_.is_need_print_,
+            !ctx_.is_extract_param_type_,  /* equal to is_prepare_protocol*/
+            NULL != ctx_.secondary_namespace_ || ctx_.is_for_dynamic_sql_ || ctx_.is_for_dbms_sql_,
+            ctx_.session_info_,
+            ctx_.param_list_,
+            ctx_.stmt_,
+            ctx_.expr_factory_.get_allocator(),
+            is_question_mark,
+            is_enable_rewrite))) {
+    LOG_WARN("failed to check inlist rewrite enable", K(ret));
+  } else if (is_enable_rewrite) {
+    ObQueryRefRawExpr *sub_query_expr = NULL;
+    if (OB_FAIL(ctx_.expr_factory_.create_raw_expr(T_REF_QUERY, sub_query_expr))) {
+      LOG_WARN("create ObOpRawExpr failed", K(ret));
+    } else if (OB_ISNULL(sub_query_expr) || OB_ISNULL(ctx_.inlist_infos_) ) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("invalid argument", K(ret), KP(sub_query_expr), KP(ctx_.session_info_), K(ret));
+    } else {
+      ObInListInfo inlist_info;
+      inlist_info.in_list_expr_ = sub_query_expr;
+      inlist_info.in_list_ = node;
+      inlist_info.column_cnt_ = left_expr->get_expr_type() == T_OP_ROW ? left_expr->get_param_count() : 1;
+      inlist_info.row_cnt_ = node->num_child_;
+      inlist_info.is_question_mark_ = is_question_mark;
+      if (OB_FAIL(ctx_.inlist_infos_->push_back(inlist_info))) {
+        LOG_WARN("failed to push back", K(ret));
+      } else {
+        right_expr = sub_query_expr;
+      }
+    }
+  /* do as normal process */
+  } else if (OB_FAIL(SMART_CALL(recursive_resolve(node, right_expr)))) {
+    LOG_WARN("resolve left raw expr failed", K(ret));
+  } else {/* do nothing */}
   return ret;
 }
 
@@ -4674,6 +4805,19 @@ int ObRawExprResolverImpl::process_agg_node(const ParseNode *node, ObRawExpr *&e
         }
       } // end for
     } else if (T_FUN_SYS_ST_ASMVT == node->type_) {
+      for (int64_t i = 0; OB_SUCC(ret) && i < node->num_child_; ++i) {
+        sub_expr = NULL;
+        if (OB_ISNULL(node->children_[i])) {
+          // do nothing
+        } else if (OB_FAIL(SMART_CALL(recursive_resolve(node->children_[i], sub_expr)))) {
+          LOG_WARN("fail to recursive resolve expr list item", K(ret));
+        } else if (OB_FAIL(agg_expr->add_real_param_expr(sub_expr))) {
+          LOG_WARN("fail to add param expr to agg expr", K(ret));
+        }
+      } // end for
+    } else if (T_FUN_SYS_RB_BUILD_AGG == node->type_
+                || T_FUN_SYS_RB_OR_AGG == node->type_
+                || T_FUN_SYS_RB_AND_AGG == node->type_) {
       for (int64_t i = 0; OB_SUCC(ret) && i < node->num_child_; ++i) {
         sub_expr = NULL;
         if (OB_ISNULL(node->children_[i])) {
@@ -6959,7 +7103,7 @@ int ObRawExprResolverImpl::process_match_against(const ParseNode *node, ObRawExp
       LOG_WARN("failed to extract info", K(ret));
     } else if (!search_keywords->is_static_const_expr()) {
       ret = OB_NOT_SUPPORTED;
-      LOG_USER_ERROR(OB_NOT_SUPPORTED, "non-const search query is not supported");
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "non-const search query");
       LOG_WARN("search query is not const expr", K(ret));
     } else if (ObMatchAgainstMode::NATURAL_LANGUAGE_MODE != static_cast<ObMatchAgainstMode>(node->value_)) {
       ret = OB_NOT_SUPPORTED;
@@ -8354,7 +8498,8 @@ int ObRawExprResolverImpl::check_internal_function(const ObString &name)
   bool is_internal = false;
   if (OB_FAIL(ret)) {
   } else if (ctx_.session_info_->is_inner()
-             || is_sys_view(ctx_.view_ref_id_)) {
+             || is_sys_view(ctx_.view_ref_id_)
+             || ctx_.is_from_show_resolver_) {
     // ignore
   } else if (FALSE_IT(ObExprOperatorFactory::get_internal_info_by_name(name, exist, is_internal))) {
   } else if (exist && is_internal) {

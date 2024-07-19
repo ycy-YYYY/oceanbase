@@ -64,6 +64,11 @@ namespace common
 class ObMySQLProxy;
 }
 
+namespace storage
+{
+class ObLobAccessCtx;
+}
+
 namespace pl
 {
 class ObPL;
@@ -383,8 +388,6 @@ public:
   int64_t get_row_id_list_total_count() const { return total_row_count_; }
   void set_plan_start_time(int64_t t) { phy_plan_ctx_->set_plan_start_time(t); }
   int64_t get_plan_start_time() const { return phy_plan_ctx_->get_plan_start_time(); }
-  void set_is_evolution(bool v) { is_evolution_ = v; }
-  bool get_is_evolution() const { return is_evolution_; }
   void set_is_ps_prepare_stage(bool v) { is_ps_prepare_stage_ = v; }
   bool is_ps_prepare_stage() const { return is_ps_prepare_stage_; }
 
@@ -516,6 +519,9 @@ public:
   int get_local_var_array(int64_t local_var_array_id, const ObSolidifiedVarsContext *&var_array);
   void set_is_online_stats_gathering(bool v) { is_online_stats_gathering_ = v; }
   bool is_online_stats_gathering() const { return is_online_stats_gathering_; }
+
+  int get_lob_access_ctx(ObLobAccessCtx *&lob_access_ctx);
+
 private:
   int build_temp_expr_ctx(const ObTempExpr &temp_expr, ObTempExprCtx *&temp_expr_ctx);
   int set_phy_op_ctx_ptr(uint64_t index, void *phy_op);
@@ -590,9 +596,6 @@ protected:
   ObRowIdListArray row_id_list_array_;
   //判断现在执行的计划是否为演进过程中的计划
   int64_t total_row_count_;
-  // -----------------------
-
-  bool is_evolution_;
   // Interminate result of index building is reusable, reused in build index retry with same snapshot.
   // Reusable intermediate result is not deleted in the close phase, deleted deliberately after
   // execution is completed.
@@ -698,6 +701,8 @@ protected:
   // for online stats gathering
   bool is_online_stats_gathering_;
   //---------------
+
+  ObLobAccessCtx *lob_access_ctx_;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObExecContext);
 };

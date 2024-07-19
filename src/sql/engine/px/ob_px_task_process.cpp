@@ -40,6 +40,7 @@
 #include "sql/engine/basic/ob_select_into_op.h"
 #include "observer/mysql/obmp_base.h"
 #include "lib/alloc/ob_malloc_callback.h"
+#include "sql/engine/window_function/ob_window_function_vec_op.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::share;
@@ -202,8 +203,19 @@ int ObPxTaskProcess::process()
     }
 
     if (enable_sql_audit) {
+      if (OB_ISNULL(arg_.sqc_task_ptr_)){
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("the sqc task ptr is null", K(ret));
+      } else {
+        arg_.sqc_task_ptr_->set_memstore_read_row_count(exec_record.get_memstore_read_row_count());
+        arg_.sqc_task_ptr_->set_ssstore_read_row_count(exec_record.get_ssstore_read_row_count());
+      }
+    }
+
+    if (enable_sql_audit) {
       ObPhysicalPlan *phy_plan = arg_.des_phy_plan_;
       if ( OB_ISNULL(phy_plan)) {
+        ret = OB_ERR_UNEXPECTED;
         LOG_WARN("invalid argument", K(ret), K(phy_plan));
       } else {
         audit_record.try_cnt_++;
@@ -231,6 +243,8 @@ int ObPxTaskProcess::process()
         audit_record.is_hit_plan_cache_ = true;
         audit_record.is_multi_stmt_ = false;
         audit_record.is_perf_event_closed_ = !lib::is_diagnose_info_enabled();
+        audit_record.total_memstore_read_row_count_ = exec_record.get_memstore_read_row_count();
+        audit_record.total_ssstore_read_row_count_ = exec_record.get_ssstore_read_row_count();
       }
     }
     ObSQLUtils::handle_audit_record(false, EXECUTE_DIST, *session);
@@ -326,6 +340,10 @@ int ObPxTaskProcess::execute(ObOpSpec &root_spec)
       if (OB_SUCCESS != (tmp_ret = visitor.visit(*arg_.exec_ctx_, *arg_.op_spec_root_, setter))) {
         ret = OB_SUCCESS == ret ? tmp_ret : ret;
         LOG_WARN("failed to apply error code", K(ret), K(tmp_ret));
+      }
+      if (OB_SUCCESS != (tmp_ret = ObInterruptUtil::interrupt_tasks(arg_.get_sqc_handler()->get_sqc_init_arg().sqc_,
+                                              OB_GOT_SIGNAL_ABORTING))) {
+        LOG_WARN("interrupt_tasks failed", K(tmp_ret));
       }
     }
     if (OB_SUCCESS != (close_ret = root->close())) {
@@ -494,13 +512,6 @@ int ObPxTaskProcess::do_process()
         if (OB_SUCCESS != (tmp_ret = ObInterruptUtil::interrupt_qc(arg_.task_, ret, arg_.exec_ctx_))) {
           LOG_WARN("interrupt_qc failed", K(tmp_ret));
         }
-      }
-      // Regardless of whether interrupt_qc succeeds or not,
-      // always execute interrupt_tasks to ensure other threads in the current sqc terminate more quickly,
-      // thereby improving overall efficiency.
-      if (OB_SUCCESS != (tmp_ret = ObInterruptUtil::interrupt_tasks(arg_.get_sqc_handler()->get_sqc_init_arg().sqc_,
-                                              OB_GOT_SIGNAL_ABORTING))) {
-        LOG_WARN("interrupt_tasks failed", K(tmp_ret));
       }
     }
   }
@@ -849,6 +860,23 @@ int ObPxTaskProcess::OpPostparation::apply(ObExecContext &ctx, ObOpSpec &op)
       if (OB_ISNULL(input)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("input not found for op", "op_id", op.id_, K(ret));
+      } else if (wf_spec.is_participator() && OB_SUCCESS != ret_) {
+        input->set_error_code(ret_);
+        LOG_TRACE("debug post apply info", K(ret_));
+      } else {
+        LOG_TRACE("debug post apply info", K(ret_));
+      }
+    }
+  } else if (PHY_VEC_WINDOW_FUNCTION == op.type_) {
+    if (OB_ISNULL(kit->input_)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("operator is null", K(ret), K(kit));
+    } else {
+      ObWindowFunctionVecSpec &wf_spec = static_cast<ObWindowFunctionVecSpec &>(op);
+      ObWindowFunctionOpInput *input = static_cast<ObWindowFunctionOpInput *>(kit->input_);
+      if (OB_ISNULL(input)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("input is null", K(ret));
       } else if (wf_spec.is_participator() && OB_SUCCESS != ret_) {
         input->set_error_code(ret_);
         LOG_TRACE("debug post apply info", K(ret_));

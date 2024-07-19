@@ -126,6 +126,15 @@ int ObSSTableMetaCache::init(
   return ret;
 }
 
+void ObSSTableMetaCache::set_upper_trans_version(const int64_t upper_trans_version)
+{
+  if (INT64_MAX == max_merged_trans_version_) {
+    upper_trans_version_ = upper_trans_version;
+  } else {
+    upper_trans_version_ = std::max(upper_trans_version, max_merged_trans_version_);
+  }
+}
+
 OB_DEF_SERIALIZE_SIMPLE(ObSSTableMetaCache)
 {
   int ret = OB_SUCCESS;
@@ -293,6 +302,65 @@ int ObSSTable::init(const ObTabletCreateSSTableParam &param, common::ObArenaAllo
     reset();
   } else {
     FLOG_INFO("succeeded to init sstable", K(ret), KPC(this));
+  }
+  return ret;
+}
+
+int ObSSTable::copy_from_old_sstable(const ObSSTable &src, common::ObArenaAllocator &allocator, ObSSTable *&dst)
+{
+  int ret = OB_SUCCESS;
+  ObSSTable *sstable = nullptr;
+  if (OB_UNLIKELY(!src.is_valid() || !src.is_loaded())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", K(ret), K(src));
+  } else if (OB_FAIL(src.inner_deep_copy_and_inc_macro_ref(allocator, sstable))) {
+    LOG_WARN("fail to inner copy and inc macro ref", K(ret), K(src));
+  } else if (!sstable->is_co_sstable() || sstable->meta_->cg_sstables_.count() == 0) {
+    // nothing to do and skip it.
+  } else {
+    ObSEArray<ObITable *, 64> cg_sstables;
+    for (int64_t i = 0; OB_SUCC(ret) && i < sstable->meta_->cg_sstables_.count(); ++i) {
+      ObSSTable *table = sstable->meta_->cg_sstables_.at(i);
+      ObSSTable *loaded_table = nullptr;
+      ObSSTable *copied_table = nullptr;
+      ObStorageMetaHandle handle;
+      if (OB_ISNULL(table) || OB_UNLIKELY(!table->is_cg_sstable())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected error, cg table is nullptr", K(ret), K(i), KPC(table), KPC(sstable));
+      } else if (table->is_loaded()) {
+        loaded_table = table;
+      } else if (OB_FAIL(ObTabletTableStore::load_sstable(table->get_addr(), false/*is_co_sstable*/, handle))) {
+        LOG_WARN("fail to load cg sstable", K(ret), KPC(table));
+      } else if (OB_FAIL(handle.get_sstable(loaded_table))) {
+        LOG_WARN("fail to get sstable", K(ret), K(handle));
+      }
+      if (FAILEDx(loaded_table->inner_deep_copy_and_inc_macro_ref(allocator, copied_table))) {
+        LOG_WARN("fail to inner copy and inc macro ref", K(ret), KPC(loaded_table));
+      } else if (OB_FAIL(cg_sstables.push_back(copied_table))) {
+        LOG_WARN("fail to push back", K(ret), KPC(copied_table));
+      }
+    }
+    if (OB_SUCC(ret)) {
+      sstable->meta_->cg_sstables_.reset();
+      if (OB_FAIL(sstable->meta_->cg_sstables_.init_empty_array_for_cg(allocator, cg_sstables.count()))) {
+        LOG_WARN("fail to init cg sstables", K(ret), K(cg_sstables));
+      } else if (OB_FAIL(sstable->meta_->cg_sstables_.add_tables_for_cg_without_deep_copy(cg_sstables))) {
+        LOG_WARN("fail to add tables for cg without deep copy", K(ret), K(cg_sstables));
+      }
+    }
+    if (OB_FAIL(ret)) {
+      for (int64_t i = 0; i < cg_sstables.count(); ++i) {// ingore error code
+        cg_sstables.at(i)->~ObITable();
+      }
+    }
+  }
+  if (OB_FAIL(ret)) {
+    if (OB_NOT_NULL(sstable)) {
+      sstable->reset();
+    }
+  } else {
+    dst = sstable;
+    FLOG_INFO("succeeded to init sstable", K(ret), KPC(dst));
   }
   return ret;
 }
@@ -611,7 +679,7 @@ int ObSSTable::exist(
       ObTabletStat &stat = context.store_ctx_->tablet_stat_;
       stat.ls_id_ = context.ls_id_.id();
       stat.tablet_id_ = context.tablet_id_.id();
-      stat.query_cnt_ = context.table_store_stat_.exist_row_.empty_read_cnt_ > 0;
+      stat.query_cnt_ = context.table_store_stat_.empty_read_cnt_ > 0;
 
       iter->~ObStoreRowIterator();
       context.stmt_allocator_->free(iter);
@@ -957,23 +1025,22 @@ int ObSSTable::check_row_locked(
 }
 
 int ObSSTable::set_upper_trans_version(
-    const int64_t upper_trans_version,
-    const bool force_update)
+    common::ObArenaAllocator &allocator,
+    const int64_t upper_trans_version)
 {
   int ret = OB_SUCCESS;
-
-  const int64_t old_val = ATOMIC_LOAD(&meta_cache_.upper_trans_version_);
-  // only set once
-  if (INT64_MAX == old_val && INT64_MAX != upper_trans_version) {
-    int64_t new_val = upper_trans_version;
-    if (OB_LIKELY(!force_update)) {
-      new_val = std::max(new_val, meta_cache_.max_merged_trans_version_);
-    }
-    ATOMIC_CAS(&meta_cache_.upper_trans_version_, old_val, new_val);
+  const int64_t old_val = meta_cache_.upper_trans_version_;
+  // make sure meta_ is loaded, otherwise make meta and shell inconsistency.
+  if (!is_loaded() && OB_FAIL(bypass_load_meta(allocator))) {
+    LOG_WARN("failed to load sstable meta", K(ret), K(key_));
+  }
+  if (OB_SUCC(ret) && is_loaded()) {
+    (void) meta_->basic_meta_.set_upper_trans_version(upper_trans_version);
+    (void) meta_cache_.set_upper_trans_version(upper_trans_version);
   }
 
-  LOG_INFO("succeed to set upper trans version", K(force_update), K(key_),
-      K(upper_trans_version), K(meta_cache_.upper_trans_version_));
+  LOG_INFO("finish set upper trans version", K(ret), K(key_), K_(meta),
+      K(old_val), K(upper_trans_version), K_(meta_cache));
   return ret;
 }
 
@@ -1836,8 +1903,9 @@ int ObSSTable::get_last_rowkey(const ObDatumRowkey *&sstable_endkey)
       } else if (OB_UNLIKELY(!idx_data_header->is_valid())) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("Invalid index data header", KP(idx_data_header));
-      } else {
-        sstable_endkey = &(idx_data_header->rowkey_array_[idx_data_header->row_cnt_ - 1]);
+      } else if (OB_ISNULL(sstable_endkey = idx_data_header->rowkey_vector_->get_last_rowkey())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("Invalid last rowkey", K(ret), KP(idx_data_header));
       }
     }
   }
@@ -1952,6 +2020,51 @@ int ObSSTable::get_meta(
   return ret;
 }
 
+
+int ObSSTable::bypass_load_meta(common::ObArenaAllocator &allocator)
+{
+  int ret = OB_SUCCESS;
+  if (is_loaded()) {
+    if (OB_UNLIKELY(!meta_->is_valid())) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("invalid sstable meta pointer for in-memory sstable", K(ret), KPC(this));
+    }
+  } else if (OB_UNLIKELY(!addr_.is_valid() || !addr_.is_block())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected invalid addr for get sstable from cache", K(ret), KPC(this));
+  } else {
+    common::ObSafeArenaAllocator safe_allocator(allocator);
+    ObSSTableMetaHandle meta_handle;
+    ObStorageMetaCache &meta_cache = OB_STORE_CACHE.get_storage_meta_cache();
+    const ObStorageMetaValue *value = nullptr;
+    ObSSTable *sstable_ptr = nullptr;
+    ObStorageMetaKey meta_key(MTL_ID(), addr_);
+    ObStorageMetaValue::MetaType meta_type = is_co_sstable()
+                                           ? ObStorageMetaValue::MetaType::CO_SSTABLE
+                                           : ObStorageMetaValue::MetaType::SSTABLE;
+    if (OB_FAIL(meta_cache.bypass_get_meta(meta_type, meta_key, safe_allocator, meta_handle.handle_))) {
+      LOG_WARN("fail to bypass cache get meta", K(ret), K(meta_type), K(meta_key));
+    } else if (OB_FAIL(meta_handle.handle_.get_value(value))) {
+      LOG_WARN("fail to get value from meta handle", K(ret), KPC(this));
+    } else if (OB_ISNULL(value)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected null sstable cache value", K(ret), K(value), KPC(this));
+    } else if (OB_FAIL(value->get_sstable(sstable_ptr))) {
+      LOG_WARN("fail to get sstable from meta cache value", K(ret), KPC(value), KPC(this));
+    } else if (OB_ISNULL(sstable_ptr)
+        || OB_UNLIKELY(!sstable_ptr->is_valid())
+        || OB_ISNULL(sstable_ptr->meta_)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected null sstable pointer", K(ret), KPC(sstable_ptr));
+    } else {
+      // move the owner of new created sstable meta in memory to this
+      meta_ = sstable_ptr->meta_;
+      sstable_ptr->meta_ = nullptr;
+    }
+  }
+  return ret;
+}
+
 int ObSSTable::init_sstable_meta(
     const ObTabletCreateSSTableParam &param,
     common::ObArenaAllocator *allocator)
@@ -1977,6 +2090,48 @@ int ObSSTable::init_sstable_meta(
   return ret;
 }
 
+
+int ObSSTable::inner_deep_copy_and_inc_macro_ref(
+    common::ObIAllocator &allocator,
+    ObSSTable *&sstable) const
+{
+  int ret = OB_SUCCESS;
+  bool inc_success = false;
+  const int64_t deep_copy_size = get_deep_copy_size();
+  char *buf = nullptr;
+  ObIStorageMetaObj *meta_obj = nullptr;
+  ObSSTable *table = nullptr;
+  if (OB_ISNULL(buf = static_cast<char *>(allocator.alloc(deep_copy_size)))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    LOG_WARN("fail to allocate memory for deep copy sstable", K(ret), K(deep_copy_size));
+  } else if (OB_FAIL(deep_copy(buf, deep_copy_size, meta_obj))) {
+    LOG_WARN("fail to inner deep copy sstable", K(ret));
+  } else {
+    table = static_cast<ObSSTable *>(meta_obj);
+    table->addr_.set_mem_addr(0, deep_copy_size);
+    if (OB_FAIL(table->inc_macro_ref(inc_success))) {
+      LOG_WARN("fail to add macro ref", K(ret), K(inc_success));
+    } else if (!inc_success) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected error, increase macro ref failed", K(ret), K(inc_success));
+    } else {
+      table->is_tmp_sstable_ = true;
+    }
+  }
+  if (OB_FAIL(ret)) {
+    if (OB_NOT_NULL(table)) {
+      table->reset();
+    }
+    if (OB_NOT_NULL(buf)) {
+      allocator.free(buf);
+    }
+  } else {
+    sstable = table;
+    LOG_INFO("succeeded to copy sstable and increase macro reference count", K(ret), KPC(sstable));
+  }
+
+  return ret;
+}
 
 } // namespace blocksstable
 } // namespace oceanbase

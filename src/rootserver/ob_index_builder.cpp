@@ -26,9 +26,11 @@
 #include "share/schema/ob_multi_version_schema_service.h"
 #include "share/schema/ob_schema_struct.h"
 #include "share/schema/ob_part_mgr_util.h"
+#include "share/schema/ob_table_schema.h"
 #include "share/ob_common_rpc_proxy.h"
 #include "share/config/ob_server_config.h"
 #include "share/ob_index_builder_util.h"
+#include "share/ob_fts_index_builder_util.h"
 #include "observer/ob_server_struct.h"
 #include "sql/resolver/ddl/ob_ddl_resolver.h"
 #include "ob_zone_manager.h"
@@ -232,7 +234,7 @@ int ObIndexBuilder::drop_index(const ObDropIndexArg &arg, obrpc::ObDropIndexRes 
               K(index_table_schema->get_index_type()), KPC(index_table_schema));
         } else if (OB_FAIL(trans.start(&ddl_service_.get_sql_proxy(), tenant_id, refreshed_schema_version))) {
           LOG_WARN("start transaction failed", KR(ret), K(tenant_id), K(refreshed_schema_version));
-        } else if (!arg.is_inner_ && !index_table_schema->can_read_index() && OB_FAIL(ObDDLTaskRecordOperator::check_has_index_task(
+        } else if (!arg.is_inner_ && !index_table_schema->can_read_index() && OB_FAIL(ObDDLTaskRecordOperator::check_has_index_or_mlog_task(
               trans, tenant_id, data_table_id, index_table_schema->get_table_id(), has_index_task))) {
           LOG_WARN("failed to check ddl conflict", K(ret));
         } else if (has_index_task) {
@@ -442,7 +444,7 @@ int ObIndexBuilder::submit_build_index_task(
   int ret = OB_SUCCESS;
   ObTableLockOwnerID owner_id;
   ObCreateDDLTaskParam param(index_schema->get_tenant_id(),
-                             ObDDLType::DDL_CREATE_INDEX,
+                             ((DATA_VERSION_4_2_2_0 <= tenant_data_version && tenant_data_version < DATA_VERSION_4_3_0_0) || tenant_data_version >= DATA_VERSION_4_3_2_0) && index_schema->is_storage_local_index_table() && index_schema->is_partitioned_table() ? ObDDLType::DDL_CREATE_PARTITIONED_LOCAL_INDEX : ObDDLType::DDL_CREATE_INDEX,
                              data_schema,
                              index_schema,
                              0/*object_id*/,
@@ -455,14 +457,20 @@ int ObIndexBuilder::submit_build_index_task(
   if (OB_UNLIKELY(nullptr == data_schema || nullptr == index_schema || tenant_data_version <= 0)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("schema is invalid", K(ret), KP(data_schema), KP(index_schema), K(tenant_data_version));
-  } else if (OB_FAIL(GCTX.root_service_->get_ddl_task_scheduler().create_ddl_task(param, trans, task_record))) {
-    LOG_WARN("submit create index ddl task failed", K(ret));
-  } else if (OB_FAIL(owner_id.convert_from_value(ObLockOwnerType::DEFAULT_OWNER_TYPE,
-                                                 task_record.task_id_))) {
-    LOG_WARN("failed to get owner id", K(ret), K(task_record.task_id_));
-  } else if (OB_FAIL(ObDDLLock::lock_for_add_drop_index(
-      *data_schema, inc_data_tablet_ids, del_data_tablet_ids, *index_schema, owner_id, trans))) {
-    LOG_WARN("failed to lock online ddl lock", K(ret));
+  } else {
+    bool is_create_fts_index = share::schema::is_fts_index(create_index_arg.index_type_);
+    if (is_create_fts_index) {
+      param.type_ = ObDDLType::DDL_CREATE_FTS_INDEX;
+    }
+    if (OB_FAIL(GCTX.root_service_->get_ddl_task_scheduler().create_ddl_task(param, trans, task_record))) {
+      LOG_WARN("submit create index ddl task failed", K(ret));
+    } else if (OB_FAIL(owner_id.convert_from_value(ObLockOwnerType::DEFAULT_OWNER_TYPE,
+                                                   task_record.task_id_))) {
+      LOG_WARN("failed to get owner id", K(ret), K(task_record.task_id_));
+    } else if (OB_FAIL(ObDDLLock::lock_for_add_drop_index(
+        *data_schema, inc_data_tablet_ids, del_data_tablet_ids, *index_schema, owner_id, trans))) {
+      LOG_WARN("failed to lock online ddl lock", K(ret));
+    }
   }
   return ret;
 }
@@ -637,11 +645,7 @@ int ObIndexBuilder::do_create_local_index(
     int64_t refreshed_schema_version = 0;
     const uint64_t tenant_id = table_schema.get_tenant_id();
     uint64_t tenant_data_version = 0;
-    // TODO hanxuan support fulltext index after table created
-    if (share::schema::is_fts_index(create_index_arg.index_type_)) {
-      ret = OB_NOT_SUPPORTED;
-      LOG_WARN("not supported", K(ret));
-    } else if (OB_FAIL(schema_guard.get_schema_version(tenant_id, refreshed_schema_version))) {
+    if (OB_FAIL(schema_guard.get_schema_version(tenant_id, refreshed_schema_version))) {
       LOG_WARN("failed to get tenant schema version", KR(ret), K(tenant_id));
     } else if (OB_FAIL(GET_MIN_DATA_VERSION(tenant_id, tenant_data_version))) {
       LOG_WARN("get tenant data version failed", K(ret));
@@ -676,7 +680,11 @@ int ObIndexBuilder::do_create_local_index(
           my_arg.index_schema_.set_index_type(INDEX_TYPE_SPATIAL_GLOBAL_LOCAL_STORAGE);
         }
       }
-      if (OB_FAIL(ObIndexBuilderUtil::adjust_expr_index_args(
+      if (OB_FAIL(ret)) {
+      } else if (share::schema::is_fts_index(my_arg.index_type_) &&
+          OB_FAIL(ObFtsIndexBuilderUtil::generate_fts_aux_index_name(my_arg, &allocator))) {
+        LOG_WARN("failed to adjust fts index name", K(ret));
+      } else if (OB_FAIL(ObIndexBuilderUtil::adjust_expr_index_args(
               my_arg, new_table_schema, allocator, gen_columns))) {
         LOG_WARN("fail to adjust expr index args", K(ret));
       } else if (OB_FAIL(generate_schema(
@@ -887,10 +895,10 @@ int ObIndexBuilder::generate_schema(
         if (OB_FAIL(GET_MIN_DATA_VERSION(data_schema.get_tenant_id(),
                                          tenant_data_version))) {
           LOG_WARN("failed to get tenant data version", K(ret));
-        } else if (tenant_data_version < DATA_VERSION_4_3_1_0) {
+        } else if (tenant_data_version < DATA_VERSION_4_3_2_0) {
           ret = OB_NOT_SUPPORTED;
-          LOG_WARN("tenant data version is less than 4.3.1, fulltext index is not supported", K(ret), K(tenant_data_version));
-          LOG_USER_ERROR(OB_NOT_SUPPORTED, "tenant data version is less than 4.3.1, fulltext index");
+          LOG_WARN("tenant data version is less than 4.3.2, create fulltext index on existing table is not supported", K(ret), K(tenant_data_version));
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "tenant data version is less than 4.3.2, fulltext index");
         }
       } else if (is_multivalue_index(arg.index_type_)) {
         uint64_t tenant_data_version = 0;
@@ -907,6 +915,7 @@ int ObIndexBuilder::generate_schema(
       if (OB_SUCC(ret)
           && (INDEX_TYPE_NORMAL_LOCAL == arg.index_type_
               || INDEX_TYPE_UNIQUE_LOCAL == arg.index_type_
+              || INDEX_TYPE_UNIQUE_MULTIVALUE_LOCAL == arg.index_type_
               || INDEX_TYPE_DOMAIN_CTXCAT_DEPRECATED == arg.index_type_)) {
         if (OB_FAIL(sql::ObResolverUtils::check_unique_index_cover_partition_column(
                 data_schema, arg))) {
@@ -949,6 +958,10 @@ int ObIndexBuilder::generate_schema(
           ret = OB_ERR_WRONG_KEY_COLUMN;
           LOG_USER_ERROR(OB_ERR_WRONG_KEY_COLUMN, sort_item.column_name_.length(), sort_item.column_name_.ptr());
           LOG_WARN("index created direct on large text column should only be fulltext", K(arg.index_type_), K(ret));
+        } else if (ob_is_roaringbitmap_tc(data_column->get_data_type())) {
+          ret = OB_ERR_WRONG_KEY_COLUMN;
+          LOG_USER_ERROR(OB_ERR_WRONG_KEY_COLUMN, sort_item.column_name_.length(), sort_item.column_name_.ptr());
+          LOG_WARN("index created on roaringbitmap column is not supported", K(arg.index_type_), K(ret));
         } else if (ObTimestampTZType == data_column->get_data_type()
                    && arg.is_unique_primary_index()) {
           ret = OB_ERR_WRONG_KEY_COLUMN;
@@ -1063,87 +1076,56 @@ int ObIndexBuilder::create_index_column_group(const obrpc::ObCreateIndexArg &arg
   } else if (compat_version >= DATA_VERSION_4_3_0_0) {
     ObArray<uint64_t> column_ids; // not include virtual column
     index_table_schema.set_column_store(true);
-    if (arg.index_cgs_.count() > 0) {
-      index_table_schema.set_max_used_column_group_id(index_table_schema.get_max_used_column_group_id());
-      for (int64_t i = 0; OB_SUCC(ret) && i < arg.index_cgs_.count(); ++i) {
+    bool is_all_cg_exist = arg.exist_all_column_group_; //for compat
+    bool is_each_cg_exist = false;
+    ObColumnGroupSchema tmp_cg;
+    /* check exist column group*/
+    for (int64_t i = 0; OB_SUCC(ret) && i < arg.index_cgs_.count(); ++i) {
         const obrpc::ObCreateIndexArg::ObIndexColumnGroupItem &cur_item = arg.index_cgs_.at(i);
-        if (!cur_item.is_valid()) {
-          ret = OB_INVALID_ARGUMENT;
-          LOG_WARN("invalid cg item", K(ret), K(cur_item));
-        } else if (cur_item.is_each_cg_) {
-          // handle all_type column_group & single_type column_group
-          ObColumnGroupSchema column_group_schema;
-          const int64_t column_cnt = index_table_schema.get_column_count();
-          if (OB_FAIL(column_ids.reserve(column_cnt))) {
-            LOG_WARN("fail to reserve", KR(ret), K(column_cnt));
-          } else {
-            ObTableSchema::const_column_iterator tmp_begin = index_table_schema.column_begin();
-            ObTableSchema::const_column_iterator tmp_end = index_table_schema.column_end();
-            for (; OB_SUCC(ret) && (tmp_begin != tmp_end); tmp_begin++) {
-              column_group_schema.reset();
-              ObColumnSchemaV2 *column = (*tmp_begin);
-              if (OB_FAIL(ObSchemaUtils::build_single_column_group(
-                                          index_table_schema, column, index_table_schema.get_tenant_id(),
-                                          index_table_schema.get_max_used_column_group_id() + 1, column_group_schema))) {
-                LOG_WARN("fail to build single column group");
-              } else if (column_group_schema.is_valid()) {
-                if (OB_FAIL(index_table_schema.add_column_group(column_group_schema))) {
-                  LOG_WARN("fail to add single type column group", KR(ret), K(column_group_schema));
-                } else if (column->is_rowkey_column() || arg.exist_all_column_group_) {//if not exist all cg, build rowkey cg
-                  if (OB_FAIL(column_ids.push_back(column->get_column_id()))) {
-                    LOG_WARN("fail to push back", KR(ret), "column_id", column->get_column_id());
-                  }
-                }
-              }
-            }
-          }
-
-          if (OB_SUCC(ret)) {
-            column_group_schema.reset();
-            const ObColumnGroupType cg_type = arg.exist_all_column_group_ ? ObColumnGroupType::ALL_COLUMN_GROUP
-                                              : ObColumnGroupType::ROWKEY_COLUMN_GROUP;
-            const ObString cg_name = arg.exist_all_column_group_ ? OB_ALL_COLUMN_GROUP_NAME : OB_ROWKEY_COLUMN_GROUP_NAME;
-
-            if (OB_FAIL(ObSchemaUtils::build_column_group(index_table_schema, index_table_schema.get_tenant_id(), cg_type, cg_name,
-                column_ids, index_table_schema.get_max_used_column_group_id() + 1, column_group_schema))) {
-              LOG_WARN("fail to build all type column_group", KR(ret), K(column_ids));
-            } else if (OB_FAIL(index_table_schema.add_column_group(column_group_schema))) {
-              LOG_WARN("fail to add all type column group", KR(ret), K(column_group_schema));
-            }
-          }
-        }
+      if (!cur_item.is_valid()) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_WARN("invalid cg item", K(ret), K(cur_item));
+      } else if (ObColumnGroupType::SINGLE_COLUMN_GROUP == cur_item.cg_type_) {
+        is_each_cg_exist = true;
+      } else if (ObColumnGroupType::ALL_COLUMN_GROUP == cur_item.cg_type_) {
+        is_all_cg_exist = true;
+      } else {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("invalid column group type", K(ret), K(cur_item.cg_type_));
       }
     }
+    /* build each column group */
+    if (OB_FAIL(ret)) {
+    } else if (!is_each_cg_exist) {
+    } else if (OB_FAIL(ObSchemaUtils::build_add_each_column_group(index_table_schema, index_table_schema))) {
+      LOG_WARN("failed to build all cg", K(ret));
+    }
+    /* build all column group*/
+    tmp_cg.reset();
+    if (OB_FAIL(ret)) {
+    } else if (!is_all_cg_exist) {
+    } else if (OB_FAIL(ObSchemaUtils::build_all_column_group(index_table_schema,
+                                                             index_table_schema.get_tenant_id(),
+                                                             index_table_schema.get_max_used_column_group_id() + 1,
+                                                             tmp_cg))) {
+      LOG_WARN("failed to build all column group", K(ret));
+    } else if (OB_FAIL(index_table_schema.add_column_group(tmp_cg))) {
+      LOG_WARN("failed to add column group", K(ret), K(index_table_schema), K(tmp_cg));
+    }
 
-    // add default column_group
-    if (OB_SUCC(ret)) {
-      ObColumnGroupSchema tmp_cg;
-      if (arg.index_cgs_.count() > 0) {
-        column_ids.reuse(); // if exists cg node, column_ids in default_type will be empty
-      } else {
-        ObTableSchema::const_column_iterator tmp_begin = index_table_schema.column_begin();
-        ObTableSchema::const_column_iterator tmp_end = index_table_schema.column_end();
-        for (; OB_SUCC(ret) && (tmp_begin != tmp_end); tmp_begin++) {
-          ObColumnSchemaV2 *column = (*tmp_begin);
-          if (OB_ISNULL(column)) {
-            ret = OB_ERR_UNEXPECTED;
-            LOG_WARN("column should not be null", KR(ret));
-          } else if (column->is_virtual_generated_column()) {
-            // skip virtual column
-          } else if (OB_FAIL(column_ids.push_back(column->get_column_id()))) {
-            LOG_WARN("fail to push back", KR(ret), "column_id", column->get_column_id());
-          }
-        }
-      }
-
-      if (FAILEDx(ObSchemaUtils::build_column_group(index_table_schema, index_table_schema.get_tenant_id(),
-          ObColumnGroupType::DEFAULT_COLUMN_GROUP, OB_DEFAULT_COLUMN_GROUP_NAME, column_ids,
-          DEFAULT_TYPE_COLUMN_GROUP_ID, tmp_cg))) {
-        LOG_WARN("fail to build default type column_group", KR(ret), "table_id", index_table_schema.get_table_id(), K(column_ids));
-      } else if (OB_FAIL(index_table_schema.add_column_group(tmp_cg))) {
-        LOG_WARN("fail to add default column group", KR(ret), "table_id", index_table_schema.get_table_id(),
-                 K(arg.index_cgs_.count()), K(column_ids));
-      }
+    if (OB_FAIL(ret)) { /* build empty default cg*/
+    } else if (FALSE_IT(tmp_cg.reset())) {
+    } else if (OB_FAIL(ObSchemaUtils::build_column_group(index_table_schema, index_table_schema.get_tenant_id(),
+                                                         ObColumnGroupType::DEFAULT_COLUMN_GROUP,
+                                                         OB_DEFAULT_COLUMN_GROUP_NAME, column_ids,
+                                                         DEFAULT_TYPE_COLUMN_GROUP_ID, tmp_cg))) {
+      LOG_WARN("fail to build default type column_group", KR(ret), "table_id", index_table_schema.get_table_id());
+    } else if (OB_FAIL(index_table_schema.add_column_group(tmp_cg))) {
+      LOG_WARN("failed to add column group", K(ret), K(index_table_schema), K(tmp_cg));
+    } else if (OB_FAIL(ObSchemaUtils::alter_rowkey_column_group(index_table_schema))) { /* build rowkey cg*/
+      LOG_WARN("fail to adjust for rowkey column group", K(ret), K(index_table_schema));
+    } else if (OB_FAIL(ObSchemaUtils::alter_default_column_group(index_table_schema))) { /* set val in default cg*/
+      LOG_WARN("fail to adjust for default column group", K(ret), K(index_table_schema));
     }
   } else if (arg.index_cgs_.count() > 0) {
     ret = OB_NOT_SUPPORTED;

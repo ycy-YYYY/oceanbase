@@ -39,6 +39,8 @@
 #include "common/ob_role.h"
 #include "share/rc/ob_tenant_base.h"
 #include "observer/omt/ob_tenant.h"
+#include "storage/tablet/ob_mds_schema_helper.h"
+#include "storage/access/ob_table_read_info.h"
 
 using namespace oceanbase::share;
 
@@ -48,6 +50,8 @@ namespace storage
 {
 
 ERRSIM_POINT_DEF(EN_TRANSFER_ALLOW_RETRY);
+ERRSIM_POINT_DEF(EN_CHECK_LOG_NEED_REBUILD);
+
 int ObStorageHAUtils::get_ls_leader(const uint64_t tenant_id, const share::ObLSID &ls_id, common::ObAddr &leader)
 {
   int ret = OB_SUCCESS;
@@ -409,9 +413,10 @@ int ObStorageHAUtils::check_ls_is_leader(
   } else if (OB_ISNULL(ls_srv = MTL_WITH_CHECK_TENANT(ObLSService *, tenant_id))) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("log stream service is NULL", K(ret), K(tenant_id));
-  } else if (OB_FAIL(ls_srv->get_ls(ls_id, ls_handle, ObLSGetMod::STORAGE_MOD))) {
+  } else if (OB_FAIL(ls_srv->get_ls(ls_id, ls_handle, ObLSGetMod::HA_MOD))) {
     LOG_WARN("failed to get log stream", K(ret), K(tenant_id), K(ls_id));
   } else if (OB_ISNULL(ls = ls_handle.get_ls())) {
+    ret = OB_ERR_UNEXPECTED;
     LOG_WARN("ls should not be null", K(ret), KP(ls));
   } else if (OB_FAIL(ls->get_log_handler()->get_role(role, proposal_id))) {
     LOG_WARN("failed to get role", K(ret), KP(ls));
@@ -440,6 +445,59 @@ int ObStorageHAUtils::check_tenant_will_be_deleted(
   } else if (ObUnitInfoGetter::is_unit_will_be_deleted_in_observer(unit_status)) {
     is_deleted = true;
     FLOG_INFO("unit wait gc in observer, allow gc", K(tenant->id()), K(unit_status));
+  }
+  return ret;
+}
+
+//TODO(yangyi.yyy) put this interface into tablet
+int ObStorageHAUtils::get_sstable_read_info(
+    const ObTablet &tablet,
+    const ObITable::TableType &table_type,
+    const bool is_normal_cg_sstable,
+    const storage::ObITableReadInfo *&index_read_info)
+{
+  int ret = OB_SUCCESS;
+  index_read_info = nullptr;
+  if (!ObITable::is_table_type_valid(table_type) || !ObITable::is_sstable(table_type)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("get sstable read info get invalid argument", K(ret), K(tablet), K(table_type));
+  } else {
+    index_read_info = &tablet.get_rowkey_read_info();
+    if (ObITable::is_mds_sstable(table_type)) {
+      index_read_info = ObMdsSchemaHelper::get_instance().get_rowkey_read_info();
+    } else if (!is_normal_cg_sstable) {
+      //do nothing
+    } else if (OB_FAIL(MTL(ObTenantCGReadInfoMgr *)->get_index_read_info(index_read_info))) {
+      LOG_WARN("failed to get index read info from ObTenantCGReadInfoMgr", K(ret), K(table_type), K(tablet));
+    }
+  }
+  return ret;
+}
+
+int ObStorageHAUtils::check_replica_validity(const obrpc::ObFetchLSMetaInfoResp &ls_info)
+{
+  int ret = OB_SUCCESS;
+  ObMigrationStatus migration_status;
+  share::ObLSRestoreStatus restore_status;
+  if (!ls_info.is_valid()) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument!", K(ls_info));
+  } else if (OB_FAIL(check_server_version(ls_info.version_))) {
+    if (OB_MIGRATE_NOT_COMPATIBLE == ret) {
+      LOG_WARN("this src is not compatible", K(ret), K(ls_info));
+    } else {
+      LOG_WARN("failed to check version", K(ret), K(ls_info));
+    }
+  } else if (OB_FAIL(ls_info.ls_meta_package_.ls_meta_.get_migration_status(migration_status))) {
+    LOG_WARN("failed to get migration status", K(ret), K(ls_info));
+  } else if (!ObMigrationStatusHelper::check_can_migrate_out(migration_status)) {
+    ret = OB_DATA_SOURCE_NOT_VALID;
+    LOG_WARN("this src is not suitable, migration status check failed", K(ret), K(ls_info));
+  } else if (OB_FAIL(ls_info.ls_meta_package_.ls_meta_.get_restore_status(restore_status))) {
+    LOG_WARN("failed to get restore status", K(ret), K(ls_info));
+  } else if (restore_status.is_failed()) {
+    ret = OB_DATA_SOURCE_NOT_EXIST;
+    LOG_WARN("some ls replica restore failed, can not migrate", K(ret), K(ls_info));
   }
   return ret;
 }
@@ -487,7 +545,7 @@ int ObTransferUtils::block_tx(const uint64_t tenant_id, const share::ObLSID &ls_
   } else if (OB_ISNULL(ls_svr = (MTL(ObLSService *)))) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("ls service should not be NULL", K(ret), KP(ls_svr));
-  } else if (OB_FAIL(ls_svr->get_ls(ls_id, ls_handle, ObLSGetMod::STORAGE_MOD))) {
+  } else if (OB_FAIL(ls_svr->get_ls(ls_id, ls_handle, ObLSGetMod::HA_MOD))) {
     LOG_WARN("ls_srv->get_ls() fail", K(ret), K(ls_id));
   } else if (OB_ISNULL(ls = ls_handle.get_ls())) {
     ret = OB_ERR_UNEXPECTED;
@@ -516,7 +574,7 @@ int ObTransferUtils::kill_tx(const uint64_t tenant_id, const share::ObLSID &ls_i
   } else if (OB_ISNULL(ls_svr = MTL(ObLSService*))) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("ls srv should not be NULL", K(ret), KP(ls_svr));
-  } else if (OB_FAIL(ls_svr->get_ls(ls_id, ls_handle, ObLSGetMod::STORAGE_MOD))) {
+  } else if (OB_FAIL(ls_svr->get_ls(ls_id, ls_handle, ObLSGetMod::HA_MOD))) {
     LOG_WARN("ls_srv->get_ls() fail", K(ret), K(ls_id));
   } else if (OB_ISNULL(ls = ls_handle.get_ls())) {
     ret = OB_ERR_UNEXPECTED;
@@ -542,7 +600,7 @@ int ObTransferUtils::unblock_tx(const uint64_t tenant_id, const share::ObLSID &l
   } else if (OB_ISNULL(ls_srv = MTL(ObLSService*))) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("ls srv should not be NULL", K(ret), KP(ls_srv));
-  } else if (OB_FAIL(ls_srv->get_ls(ls_id, ls_handle, ObLSGetMod::STORAGE_MOD))) {
+  } else if (OB_FAIL(ls_srv->get_ls(ls_id, ls_handle, ObLSGetMod::HA_MOD))) {
     LOG_WARN("ls_srv->get_ls() fail", K(ret), K(ls_id));
   } else if (OB_ISNULL(ls = ls_handle.get_ls())) {
     ret = OB_ERR_UNEXPECTED;
@@ -593,6 +651,70 @@ int64_t ObStorageHAUtils::get_rpc_timeout()
     rpc_timeout = std::max(rpc_timeout, tmp_rpc_timeout);
   }
   return rpc_timeout;
+}
+
+int ObStorageHAUtils::check_log_status(
+    const uint64_t tenant_id,
+    const share::ObLSID &ls_id,
+    int32_t &result)
+{
+  int ret = OB_SUCCESS;
+  ObLS *ls = nullptr;
+  ObLSHandle ls_handle;
+  bool is_log_sync = false;
+  bool need_rebuild = false;
+  bool has_fatal_error = false;
+  result = OB_SUCCESS;
+
+  if (OB_INVALID_TENANT_ID == tenant_id || !ls_id.is_valid()) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("argument is not valid", K(ret), K(tenant_id), K(ls_id));
+  } else if (OB_FAIL(ObStorageHADagUtils::get_ls(ls_id, ls_handle))) {
+    LOG_WARN("failed to get ls", K(ret), K(tenant_id), K(ls_id));
+  } else if (OB_ISNULL(ls = ls_handle.get_ls())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("ls should not be NULL", K(ret), KP(ls), K(tenant_id), K(ls_id));
+  } else if (OB_ISNULL(ls->get_log_handler())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("log handler should not be NULL", K(ret), K(tenant_id), K(ls_id));
+  } else {
+    if (OB_FAIL(ls->get_log_handler()->is_replay_fatal_error(has_fatal_error))) {
+      if (OB_EAGAIN == ret) {
+        has_fatal_error = false;
+        ret = OB_SUCCESS;
+      } else {
+        LOG_WARN("failed to check replay fatal error", K(ret));
+      }
+    } else if (has_fatal_error) {
+      result = OB_LOG_REPLAY_ERROR;
+      LOG_WARN("log replay error", K(tenant_id), K(ls_id), K(result));
+    }
+
+    if (OB_FAIL(ret)) {
+    } else if (OB_SUCCESS != result) {
+      //do nothing
+    } else if (OB_FAIL(ls->get_log_handler()->is_in_sync(is_log_sync, need_rebuild))) {
+      LOG_WARN("failed to get is_in_sync", K(ret), K(tenant_id), K(ls_id));
+    } else if (need_rebuild) {
+      result = OB_LS_NEED_REBUILD;
+      LOG_WARN("ls need rebuild", K(tenant_id), K(ls_id), K(result));
+    }
+  }
+#ifdef ERRSIM
+  if (OB_SUCC(ret)) {
+    int tmp_ret = OB_SUCCESS;
+    tmp_ret = EN_CHECK_LOG_NEED_REBUILD ? : OB_SUCCESS;
+    if (OB_TMP_FAIL(tmp_ret)) {
+      result = OB_LS_NEED_REBUILD;
+      SERVER_EVENT_ADD("storage_ha", "check_log_need_rebuild",
+                      "tenant_id", tenant_id,
+                      "ls_id", ls_id.id(),
+                      "result", result);
+      DEBUG_SYNC(AFTER_CHECK_LOG_NEED_REBUILD);
+    }
+  }
+#endif
+  return ret;
 }
 
 void ObTransferUtils::set_transfer_module()

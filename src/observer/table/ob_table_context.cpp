@@ -154,6 +154,8 @@ int ObTableCtx::construct_column_items()
           LOG_WARN("fail to get cascaded column ids", K(ret), K(item), K(*col_schema));
         } else if (OB_FAIL(column_items_.push_back(item))) {
           LOG_WARN("fail to push back column item", K(ret), K_(column_items), K(item));
+        } else if (!has_lob_column_ && is_lob_storage(item.column_type_)) {
+          has_lob_column_ = true;
         }
       }
     }
@@ -249,6 +251,32 @@ int ObTableCtx::get_expr_from_column_items(const ObString &col_name, ObRawExpr *
         } else {
           found = true;
           expr = item.raw_expr_;
+        }
+      }
+    }
+  }
+
+  return ret;
+}
+
+int ObTableCtx::get_expr_from_column_items(const ObString &col_name, ObColumnRefRawExpr *&expr) const
+{
+  int ret = OB_SUCCESS;
+
+  if (column_items_.empty()) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("column items is empty", K(ret));
+  } else {
+    bool found = false;
+    for (int64_t i = 0; OB_SUCC(ret) && i < column_items_.count() && !found; i++) {
+      const ObTableColumnItem &item = column_items_.at(i);
+      if (0 == item.column_name_.case_compare(col_name)) {
+        if (OB_ISNULL(item.expr_)) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("item expr is null", K(ret), K(item));
+        } else {
+          found = true;
+          expr = item.expr_;
         }
       }
     }
@@ -478,13 +506,13 @@ int ObTableCtx::cons_column_info(const ObColumnSchemaV2 &column_schema,
 int ObTableCtx::convert_lob(ObIAllocator &allocator, ObObj &obj)
 {
   int ret = OB_SUCCESS;
-
-  if (obj.is_persist_lob()) {
+  ObLobLocatorV2 locator(obj.get_string(), obj.has_lob_header());
+  if (obj.is_persist_lob() || locator.is_inrow_disk_lob_locator()) {
     // do nothing
   } else if (obj.has_lob_header()) { // we add lob header in write_datum
     ret = OB_ERR_UNEXPECTED;
     LOG_USER_ERROR(OB_ERR_UNEXPECTED, "lob object should not have lob header");
-    LOG_WARN("object should not have lob header", K(ret), K(obj));
+    LOG_WARN("object should not have lob header", K(ret), K(obj), K(locator));
   }
 
   return ret;
@@ -618,6 +646,7 @@ int ObTableCtx::adjust_column(const ObColumnSchemaV2 &col_schema, ObObj &obj)
 /*
   check user rowkey is valid or not.
   1. rowkey count should equal schema rowkey count, except for auto increment.
+    1.1. when rowkey has auto incrment column and it is not filled, do delete/update is not allow
   2. rowkey value should be valid.
 */
 int ObTableCtx::adjust_rowkey()
@@ -649,16 +678,26 @@ int ObTableCtx::adjust_rowkey()
         if (col_schema->is_part_key_column()) {
           ret = OB_NOT_SUPPORTED;
           LOG_USER_ERROR(OB_NOT_SUPPORTED, "auto increment column set to be partition column");
-          LOG_WARN("auto increment column could not be partition column", K(ret), K(*col_schema));
-        } else if (!is_full_filled) { // curr column is auto_increment and user not fill，no need to check
+          LOG_WARN("auto increment column could not be partition column", K(ret), KPC(col_schema));
+        } else if (!is_full_filled &&
+                  ! (ObTableOperationType::Type::DEL == operation_type_ ||
+                   ObTableOperationType::Type::UPDATE == operation_type_)) {
+          // curr column is auto_increment and user not fill，no need to check
           need_check = false;
         }
       }
 
       if (OB_SUCC(ret) && need_check) {
-        if (idx >= entity_rowkey_cnt) {
-          ret = OB_INDEX_OUT_OF_RANGE;
-          LOG_WARN("idx out of range", K(ret), K(idx), K(entity_rowkey_cnt));
+        if (!is_full_filled && (ObTableOperationType::Type::DEL == operation_type_ ||
+            ObTableOperationType::Type::UPDATE == operation_type_)) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "delete or update operation is not supported to partially fill rowkey columns");
+          LOG_WARN("rowkey columns is not fullfilled", K(ret), K(entity_rowkey_cnt), K(schema_rowkey_cnt), K(rowkey));
+        } else if (idx >= entity_rowkey_cnt) {
+          ret = OB_KV_ROWKEY_COUNT_NOT_MATCH;
+          LOG_USER_ERROR(OB_KV_ROWKEY_COUNT_NOT_MATCH, schema_rowkey_cnt, entity_rowkey_cnt);
+          LOG_WARN("entity rowkey count mismatch table schema rowkey count", K(ret),
+                    K(entity_rowkey_cnt), K(schema_rowkey_cnt), K(rowkey));
         } else if (OB_FAIL(adjust_column(*col_schema, obj_ptr[idx]))) { // [c1][c2][c3] [c1][c3]
           LOG_WARN("fail to adjust column", K(ret), K(obj_ptr[idx]));
         } else {
@@ -712,6 +751,10 @@ int ObTableCtx::adjust_properties()
         ret = OB_NOT_SUPPORTED;
         LOG_USER_ERROR(OB_NOT_SUPPORTED, "mutate rowkey column");
         LOG_WARN("property should not be rowkey column", K(ret), K(prop_names), K(i));
+      } else if (col_schema->is_generated_column()) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "The specified for generated column is not allowed");
+        LOG_WARN("The specified for generated column is not allowed", K(ret), K(col_name));
       } else if (OB_FAIL(adjust_column(*col_schema, prop_obj))) {
         LOG_WARN("fail to adjust column", K(ret), K(prop_obj));
       }
@@ -888,8 +931,7 @@ int ObTableCtx::init_scan(const ObTableQuery &query,
   const ObString &index_name = query.get_index_name();
   const ObIArray<ObString> &select_columns = query.get_select_columns();
   bool has_filter = (query.get_htable_filter().is_valid() || query.get_filter_string().length() > 0);
-  const bool select_all_columns = select_columns.empty() || query.is_aggregate_query() || is_ttl_table_
-                                  || (has_filter && !is_htable());
+  const bool select_all_columns = select_columns.empty() || query.is_aggregate_query() || (has_filter && !is_htable());
   const ObColumnSchemaV2 *column_schema = nullptr;
   operation_type_ = ObTableOperationType::Type::SCAN;
   // init is_weak_read_,scan_order_
@@ -929,6 +971,13 @@ int ObTableCtx::init_scan(const ObTableQuery &query,
     } else {
       // select_col_ids_ is same order with schema
       int64_t cell_idx = 0;
+      ObSEArray<ObString, 4> ttl_columns;
+      if (is_ttl_table_) {
+        const ObString &ttl_definition = table_schema_->get_ttl_definition();
+        if (OB_FAIL(ObTTLUtil::get_ttl_columns(ttl_definition, ttl_columns))) {
+          LOG_WARN("fail to get ttl columns", K(ret));
+        }
+      }
       for (ObTableSchema::const_column_iterator iter = table_schema_->column_begin();
           OB_SUCC(ret) && iter != table_schema_->column_end(); ++iter, cell_idx++) {
         const ObColumnSchemaV2 *column_schema = *iter;
@@ -950,7 +999,8 @@ int ObTableCtx::init_scan(const ObTableQuery &query,
               OB_ISNULL(column_schema = index_schema_->get_column_schema(column_name))) {
             is_index_back_ = true;
           }
-        } else if (has_exist_in_columns(select_columns, column_schema->get_column_name_str())) {
+        } else if (has_exist_in_columns(select_columns, column_schema->get_column_name_str())
+            || (is_ttl_table_ && has_exist_in_array(ttl_columns, column_schema->get_column_name_str()))) {
           if (OB_FAIL(select_col_ids_.push_back(column_schema->get_column_id()))) {
             LOG_WARN("fail to add column id", K(ret));
           } else if (is_index_scan_ && !is_index_back_ &&
@@ -960,11 +1010,7 @@ int ObTableCtx::init_scan(const ObTableQuery &query,
         }
       }
       if (OB_SUCC(ret)) {
-        if ((select_col_ids_.count() != select_columns.count()) && !select_all_columns) {
-          ret = OB_ERR_COLUMN_NOT_FOUND;
-          LOG_WARN("select_col_ids or select_metas count is not equal to select_columns",
-              K(select_columns), K(select_col_ids_));
-        } else if (!select_all_columns) {
+        if (!select_all_columns) {
           // query_col_ids_ is user query order
           for (int64_t i = 0; OB_SUCC(ret) && i < select_columns.count(); i++) {
             if (OB_ISNULL(column_schema = table_schema_->get_column_schema(select_columns.at(i)))) {
@@ -1004,13 +1050,13 @@ int ObTableCtx::init_insert()
     cascaded_column_ids_-(17)
   2. alloc ObTableColumnItem for new ObTableAssignment.
 */
-int ObTableCtx::add_stored_generated_column_assignment(const ObTableAssignment &assign)
+int ObTableCtx::add_generated_column_assignment(const ObTableAssignment &assign)
 {
   int ret = OB_SUCCESS;
 
   for (int64_t i = 0; OB_SUCC(ret) && i < column_items_.count(); i++) {
     ObTableColumnItem &item = column_items_.at(i);
-    if (item.is_stored_generated_column_) {
+    if (item.is_generated_column_) {
       bool match = false;
       for (int64_t j = 0; j < item.cascaded_column_ids_.count() && !match; j++) {
         const uint64_t column_id = item.cascaded_column_ids_.at(j);
@@ -1071,7 +1117,7 @@ int ObTableCtx::init_assignments(const ObTableEntity &entity)
         if (OB_FAIL(assigns_.push_back(assign))) {
           LOG_WARN("fail to push back assignment", K(ret), K_(assigns), K(assign));
         } else if (table_schema_->has_generated_column()
-            && OB_FAIL(add_stored_generated_column_assignment(assign))) {
+            && OB_FAIL(add_generated_column_assignment(assign))) {
           LOG_WARN("fail to add soterd generated column assignment", K(ret), K(assign));
         }
       }
@@ -1419,28 +1465,53 @@ int ObTableCtx::init_increment(bool return_affected_entity, bool return_rowkey)
 int ObTableCtx::classify_scan_exprs()
 {
   int ret = OB_SUCCESS;
-  const ObIArray<ObRawExpr *> &exprs = all_exprs_.get_expr_array();
-
-  if (0 == exprs.count()) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("exprs is empty", K(ret));
-  } else if (column_items_.count() > exprs.count()) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("unecpect column_items_ count", K(ret), K(column_items_), K(exprs.count()));
-  } else if (!select_exprs_.empty()) {
+  if (!select_exprs_.empty()) {
     // had classify, do nothing
   } else {
+    ObSEArray<uint64_t, 8> rowkey_column_ids;
     for (int64_t i = 0; OB_SUCC(ret) && i < column_items_.count(); i++) {
       const ObTableColumnItem &tmp_item = column_items_.at(i);
-      if (tmp_item.expr_->is_rowkey_column() && OB_FAIL(rowkey_exprs_.push_back(exprs.at(i)))) {
-        LOG_WARN("fail to push back rowkey expr", K(ret));
-      } else if (has_exist_in_array(select_col_ids_, tmp_item.column_id_)
-          && OB_FAIL(select_exprs_.push_back(exprs.at(i)))) {
-        LOG_WARN("fail to push back select expr", K(ret));
-      } else if (is_index_scan_
-          && has_exist_in_array(index_col_ids_, tmp_item.column_id_)
-          && OB_FAIL(index_exprs_.push_back(exprs.at(i)))) {
-        LOG_WARN("fail to push back index column expr", K(ret));
+      if (has_exist_in_array(select_col_ids_, tmp_item.column_id_)) {
+        if (OB_ISNULL(tmp_item.expr_)) {
+          // use column ref exprs, cause select exprs no need to calculate
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("column ref expr is NULL", K(ret), K(i));
+        } else if (OB_FAIL(select_exprs_.push_back(tmp_item.expr_))) {
+          LOG_WARN("fail to push back select expr", K(ret));
+        }
+      }
+    }
+
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(table_schema_->get_rowkey_column_ids(rowkey_column_ids))) {
+      LOG_WARN("fail to get rowkey column ids", K(ret));
+    }
+    // for rowkey exprs: its order is schema define, case like:
+    // create table (c1 int, c2 int, c3 int, primary key(c2, c1)), rowkey_exprs store order must be [c2, c1]
+    for (int64_t i = 0; OB_SUCC(ret) && i < rowkey_column_ids.count(); i++) {
+      const ObTableColumnItem *item = nullptr;
+      if (OB_FAIL(get_column_item_by_column_id(rowkey_column_ids.at(i), item))) {
+        LOG_WARN("fail to get column item", K(ret), K(rowkey_column_ids), K(i));
+      } else if (OB_ISNULL(item)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("column item is null", K(ret));
+      } else if (OB_FAIL(rowkey_exprs_.push_back(item->raw_expr_))) {
+        LOG_WARN("fail to push back rowkey expr", K(ret), K(i));
+      }
+    }
+
+    // for index exprs, its order is schema define
+    if (OB_SUCC(ret) && is_index_scan_) {
+      for (int64_t i = 0; OB_SUCC(ret) && i < index_col_ids_.count(); i++) {
+        const ObTableColumnItem *item = nullptr;
+        if (OB_FAIL(get_column_item_by_column_id(index_col_ids_.at(i), item))) {
+          LOG_WARN("fail to get column item", K(ret), K(index_col_ids_), K(i));
+        } else if (OB_ISNULL(item)) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("column item is null", K(ret));
+        } else if (OB_FAIL(index_exprs_.push_back(item->raw_expr_))) {
+          LOG_WARN("fail to push back index expr", K(ret), K(i));
+        }
       }
     }
   }
@@ -1688,7 +1759,8 @@ int ObTableCtx::add_auto_inc_param(const ObColumnSchemaV2 &column_schema)
     param.autoinc_first_part_num_ = table_schema_->get_first_part_num();
     param.autoinc_table_part_num_ = table_schema_->get_all_part_num();
     param.autoinc_col_id_ = column_schema.get_column_id();
-    param.auto_increment_cache_size_ = auto_increment_cache_size;
+    param.auto_increment_cache_size_ = get_auto_increment_cache_size(
+      table_schema_->get_auto_increment_cache_size(), auto_increment_cache_size);
     param.part_level_ = table_schema_->get_part_level();
     ObObjType column_type = column_schema.get_data_type();
     param.autoinc_col_type_ = column_type;
@@ -1785,6 +1857,9 @@ int ObTableCtx::check_insert_up_can_use_put(bool &use_put)
   } else if (ObTableOperationType::INSERT_OR_UPDATE != operation_type_) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid operation type", K(ret), K_(operation_type));
+  } else if (has_lob_column()) {
+    // has lob column cannot use put: may cause lob storeage leak when put row to lob meta table
+    can_use_put = false;
   } else if (is_htable()) { // htable has no index and alway full filled.
     can_use_put = true;
   } else if (is_client_set_put_ && !related_index_ids_.empty()) {

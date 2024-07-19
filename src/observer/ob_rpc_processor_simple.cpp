@@ -87,6 +87,7 @@
 #include "share/ob_rpc_struct.h"
 #include "rootserver/ob_recovery_ls_service.h"
 #include "logservice/ob_server_log_block_mgr.h"
+#include "storage/ddl/ob_tablet_ddl_kv.h"
 
 namespace oceanbase
 {
@@ -168,7 +169,7 @@ int ObRpcLSMigrateReplicaP::process()
       COMMON_LOG(WARN, "can not migrate ls which local ls is exist", K(ret), K(arg_), K(is_exist));
     } else {
       migration_op_arg.cluster_id_ = GCONF.cluster_id;
-      migration_op_arg.data_src_ = arg_.data_source_;
+      migration_op_arg.data_src_ = arg_.force_data_source_;
       migration_op_arg.dst_ = arg_.dst_;
       migration_op_arg.ls_id_ = arg_.ls_id_;
       //TODO(muwei.ym) need check priority in 4.2 RC3
@@ -899,6 +900,24 @@ int ObRpcCheckServerForAddingServerP::process()
   } else {}
   return ret;
 }
+ERRSIM_POINT_DEF(ERRSIM_CHECK_SERVER_MACHINE_ERROR);
+int ObRpcCheckServerMachineStatusP::process()
+{
+  int ret = OB_SUCCESS;
+  ObServerHealthStatus server_health_status;
+  if (OB_FAIL(ObHeartbeatHandler::check_disk_status(server_health_status))) {
+    LOG_WARN("fail to check disk status", KR(ret));
+  } else if (OB_FAIL(result_.init(server_health_status))) {
+    LOG_WARN("fail to init result", KR(ret), K(server_health_status));
+  }
+  if (OB_SUCC(ret) && ERRSIM_CHECK_SERVER_MACHINE_ERROR) {
+    (void) server_health_status.init(ObServerHealthStatus::DATA_DISK_STATUS_ERROR);
+    (void) result_.init(server_health_status);
+    LOG_WARN("ERRSIM_CHECK_SERVER_MACHINE_ERROR is opened", KR(ret), K(arg_), K(result_));
+  }
+  LOG_INFO("check server machine status", KR(ret), K(arg_), K(result_));
+  return ret;
+}
 
 int ObRpcCheckDeploymentModeP::process()
 {
@@ -974,14 +993,14 @@ int ObDumpMemtableP::process()
       } else if (OB_FAIL(tablet_handle.get_obj()->get_all_memtables(tables_handle))) {
         LOG_WARN("failed to get all memtable", K(ret), KPC(tablet_handle.get_obj()));
       } else {
-        memtable::ObMemtable *mt;
+        ObITabletMemtable *tablet_memtable = nullptr;
         mkdir("/tmp/dump_memtable/", S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH);
         for (int64_t i = 0; OB_SUCC(ret) && i < tables_handle.count(); i++) {
-          if (OB_FAIL(tables_handle.at(i).get_data_memtable(mt))) {
-            SERVER_LOG(WARN, "fail to get data memtables", K(ret));
+          if (OB_FAIL(tables_handle.at(i).get_tablet_memtable(tablet_memtable))) {
+            SERVER_LOG(WARN, "fail to get tablet memtables", K(ret));
           } else {
-            TRANS_LOG(INFO, "start dump memtable", K(*mt), K(arg_));
-            mt->dump2text("/tmp/dump_memtable/memtable.txt");
+            TRANS_LOG(INFO, "start dump memtable", K(*tablet_memtable), K(arg_));
+            tablet_memtable->dump2text("/tmp/dump_memtable/memtable.txt");
           }
         }
       }
@@ -2247,6 +2266,19 @@ int ObRpcClearTabletAutoincSeqCacheP::process()
   return ret;
 }
 
+int ObRpcBatchGetTabletBindingP::process()
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(rpc_pkt_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("invalid rpc pkt", K(ret));
+  } else {
+    const int64_t abs_timeout_us = get_send_timestamp() + rpc_pkt_->get_timeout();
+    ret = ObTabletBindingMdsHelper::batch_get_tablet_binding(abs_timeout_us, arg_, result_);
+  }
+  return ret;
+}
+
 #ifdef OB_BUILD_TDE_SECURITY
 int ObDumpTenantCacheMasterKeyP::process()
 {
@@ -2464,9 +2496,14 @@ int ObRegisterTxDataP::process()
   if (OB_ISNULL(tx_svc)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected null tx service ptr", KR(ret), K(arg_));
-  } else if (OB_FAIL(tx_svc->register_mds_into_tx(*(arg_.tx_desc_), arg_.ls_id_, arg_.type_,
-                                                  arg_.buf_.ptr(), arg_.buf_.length(),
-                                                  arg_.request_id_, arg_.register_flag_))) {
+  } else if (OB_FAIL(tx_svc->register_mds_into_tx(*(arg_.tx_desc_),
+                                                  arg_.ls_id_,
+                                                  arg_.type_,
+                                                  arg_.buf_.ptr(),
+                                                  arg_.buf_.length(),
+                                                  arg_.request_id_,
+                                                  arg_.register_flag_,
+                                                  arg_.seq_no_))) {
     LOG_WARN("register into tx failed", KR(ret), K(arg_));
   } else if (OB_FAIL(tx_svc->collect_tx_exec_result(*(arg_.tx_desc_), result_.tx_result_))) {
     LOG_WARN("collect tx result failed", KR(ret), K(result_));

@@ -133,6 +133,8 @@
 #define FETCH_ALL_RLS_GROUP_HISTORY_SQL                   COMMON_SQL_WITH_TENANT
 #define FETCH_ALL_RLS_CONTEXT_HISTORY_SQL                 COMMON_SQL_WITH_TENANT
 #define FETCH_ALL_RLS_SEC_COLUMN_HISTORY_SQL              COMMON_SQL_WITH_TENANT
+#define FETCH_ALL_PROXY_INFO_HISTORY_SQL                       COMMON_SQL_WITH_TENANT
+#define FETCH_ALL_PROXY_ROLE_INFO_HISTORY_SQL                  COMMON_SQL_WITH_TENANT
 #define FETCH_ALL_CASCADE_OBJECT_ID_HISTORY_SQL "SELECT %s object_id, is_deleted FROM %s " \
     "WHERE tenant_id = %lu AND %s = %lu AND schema_version <= %lu " \
     "ORDER BY object_id desc, schema_version desc"
@@ -312,6 +314,7 @@ int ObSchemaServiceSQLImpl::init(
               ObModIds::OB_GEN_SCHEMA_VERSION_MAP, ObModIds::OB_GEN_SCHEMA_VERSION_MAP))) {
   } else {
     if (OB_ISNULL(dblink_proxy)) {
+      // ignore ret
       LOG_WARN("dblink proxy is null");
     }
     mysql_proxy_ = sql_proxy;
@@ -415,7 +418,7 @@ int ObSchemaServiceSQLImpl::get_batch_table_schema(
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid schema_version", K(schema_version), K(ret));
   } else {
-    std::sort(table_ids.begin(), table_ids.end(), std::greater<uint64_t>());
+    lib::ob_sort(table_ids.begin(), table_ids.end(), std::greater<uint64_t>());
     // get not core table schemas from __all_table and __all_column
     if (OB_FAIL(get_not_core_table_schemas(schema_status, schema_version, table_ids,
                                            sql_client, allocator, table_schema_array))) {
@@ -659,7 +662,7 @@ int ObSchemaServiceSQLImpl::get_core_table_priorities(
         }
       }
       if (OB_SUCC(ret)) {
-        std::sort(temp_table_schema_ptrs.begin(), temp_table_schema_ptrs.end(), cmp_table_id);
+        lib::ob_sort(temp_table_schema_ptrs.begin(), temp_table_schema_ptrs.end(), cmp_table_id);
       }
       for (int64_t i = 0; OB_SUCC(ret) && i < temp_table_schema_ptrs.count(); ++i) {
         if (OB_FAIL(core_schemas.push_back(*(temp_table_schema_ptrs.at(i))))) {
@@ -1631,6 +1634,7 @@ int ObSchemaServiceSQLImpl::fetch_all_column_group_info(
       const uint64_t table_id = table_ids[i];
       table_schema = ObSchemaRetrieveUtils::find_table_schema(table_id, table_schema_array);
       if (OB_ISNULL(table_schema)) {
+        // ignore ret
         LOG_WARN("fail to find table schema", KR(ret), K(table_id));
         continue; // for compatibility
       } else if (need_column_group(*table_schema)) {
@@ -1642,7 +1646,7 @@ int ObSchemaServiceSQLImpl::fetch_all_column_group_info(
         } else {
           // TODO @donglou.zl user table only mock default cg now.
           if (table_schema->get_column_group_count() < 1) {
-            if (table_schema->add_default_column_group()) {
+            if (OB_FAIL(table_schema->add_default_column_group())) {
               LOG_WARN("fail to add default column group", KR(ret), K(tenant_id), K(table_id));
             }
           }
@@ -1854,7 +1858,7 @@ int ObSchemaServiceSQLImpl::fetch_all_constraint_info_ignore_inner_table(
       uint64_t table_id = table_ids[i];
       if (OB_ISNULL(table_schema = ObSchemaRetrieveUtils::find_table_schema(table_id,
                                                                             table_schema_array))) {
-        //ret = OB_ERR_UNEXPECTED;
+        // ignore ret
         LOG_WARN("Failed to find table schema", K(ret), K(table_id));
         // for compatibility
         continue;
@@ -2287,7 +2291,7 @@ int ObSchemaServiceSQLImpl::gen_batch_fetch_array(
       uint64_t table_id = table_ids[i];
       if (OB_ISNULL(table_schema = ObSchemaRetrieveUtils::find_table_schema(
                                    table_id, table_schema_array))) {
-        //ret = OB_ERR_UNEXPECTED;
+        //ignore ret
         LOG_WARN("Failed to find table schema", K(ret), K(table_id));
         // for compatibility
         continue;
@@ -2707,6 +2711,29 @@ int ObSchemaServiceSQLImpl::fetch_all_tenant_info(
         if (OB_FAIL(sql.append_fmt("%s(%lu, %lu) ", 0 == i ? "" : ", ", \
                                    fill_extract_tenant_id(schema_status, tenant_id), \
                                    schema_keys[i].column_priv_id_))) { \
+          LOG_WARN("append sql failed", K(ret)); \
+        } \
+      } \
+      if (OB_SUCC(ret)) { \
+        if (OB_FAIL(sql.append(")"))) { \
+          LOG_WARN("append sql failed", K(ret)); \
+        } \
+      } \
+    } \
+    ret; \
+  })
+
+#define SQL_APPEND_PROXY_USERS_ID(schema_keys, tenant_id, schema_key_size, sql) \
+({                                                                 \
+    int ret = OB_SUCCESS; \
+    if (OB_FAIL(sql.append("("))) { \
+      LOG_WARN("append sql failed", K(ret)); \
+    } else { \
+      for (int64_t i = 0; OB_SUCC(ret) && i < schema_key_size; ++i) {  \
+        if (OB_FAIL(sql.append_fmt("%s(%lu, %lu, %lu)", 0 == i ? "" : ", ", \
+                                   fill_extract_tenant_id(schema_status, tenant_id), \
+                                   schema_keys[i].client_user_id_,    \
+                                   schema_keys[i].proxy_user_id_))) { \
           LOG_WARN("append sql failed", K(ret)); \
         } \
       } \
@@ -3326,7 +3353,7 @@ int ObSchemaServiceSQLImpl::get_batch_tenants(
     ret = OB_NOT_INIT;
     LOG_WARN("check inner stat fail");
   } else {
-    std::sort(schema_keys.begin(), schema_keys.end(), SchemaKey::cmp_with_tenant_id);
+    lib::ob_sort(schema_keys.begin(), schema_keys.end(), SchemaKey::cmp_with_tenant_id);
     // split query to tenant space && split big query
     int64_t begin = 0;
     int64_t end = 0;
@@ -3366,7 +3393,7 @@ int ObSchemaServiceSQLImpl::get_batch_tenants(
     } else if (OB_FAIL(schema_array.reserve(schema_keys.count()))) {\
       LOG_WARN("fail to reserve schema array", KR(ret));           \
     } else {                                                       \
-      std::sort(schema_keys.begin(), schema_keys.end(), SchemaKey::cmp_with_tenant_id); \
+      lib::ob_sort(schema_keys.begin(), schema_keys.end(), SchemaKey::cmp_with_tenant_id); \
       int64_t begin = 0;                                                        \
       int64_t end = 0;                                                          \
       while (OB_SUCCESS == ret && end < schema_keys.count()) {                  \
@@ -3419,7 +3446,7 @@ GET_BATCH_SCHEMAS_WITH_ALLOCATOR_FUNC_DEFINE(table, ObSimpleTableSchemaV2);
     } else if (OB_FAIL(schema_array.reserve(schema_keys.count()))) {\
       LOG_WARN("fail to reserve schema array", KR(ret));           \
     } else {                                                       \
-      std::sort(schema_keys.begin(), schema_keys.end(), SchemaKey::cmp_with_tenant_id); \
+      lib::ob_sort(schema_keys.begin(), schema_keys.end(), SchemaKey::cmp_with_tenant_id); \
       int64_t begin = 0;                                                        \
       int64_t end = 0;                                                          \
       while (OB_SUCCESS == ret && end < schema_keys.count()) {                  \
@@ -3606,7 +3633,7 @@ int ObSchemaServiceSQLImpl::get_batch_tenants(
     LOG_WARN("check inner stat fail");
   }
 
-  std::sort(tenant_ids.begin(), tenant_ids.end());
+  lib::ob_sort(tenant_ids.begin(), tenant_ids.end());
   // split query to tenant space && split big query
   int64_t begin = 0;
   int64_t end = 0;
@@ -3644,7 +3671,7 @@ int ObSchemaServiceSQLImpl::get_batch_synonyms(
     LOG_WARN("check inner stat fail");
   }
 
-  std::sort(tenant_synonym_ids.begin(), tenant_synonym_ids.end());
+  lib::ob_sort(tenant_synonym_ids.begin(), tenant_synonym_ids.end());
   // split query to tenant space && split big query
   int64_t begin = 0;
   int64_t end = 0;
@@ -3788,7 +3815,7 @@ int ObSchemaServiceSQLImpl::get_batch_outlines(
     LOG_WARN("check inner stat fail");
   }
 
-  std::sort(tenant_outline_ids.begin(), tenant_outline_ids.end());
+  lib::ob_sort(tenant_outline_ids.begin(), tenant_outline_ids.end());
   // split query to tenant space && split big query
   int64_t begin = 0;
   int64_t end = 0;
@@ -3826,7 +3853,7 @@ int ObSchemaServiceSQLImpl::get_batch_routines(
     LOG_WARN("check inner stat fail");
   }
 
-  std::sort(tenant_routine_ids.begin(), tenant_routine_ids.end());
+  lib::ob_sort(tenant_routine_ids.begin(), tenant_routine_ids.end());
   // split query to tenant space && split big query
   int64_t begin = 0;
   int64_t end = 0;
@@ -3867,7 +3894,7 @@ int ObSchemaServiceSQLImpl::get_batch_udts(
     LOG_WARN("check inner stat fail");
   }
 
-  std::sort(tenant_udt_ids.begin(), tenant_udt_ids.end());
+  lib::ob_sort(tenant_udt_ids.begin(), tenant_udt_ids.end());
   // split query to tenant space && split big query
   int64_t begin = 0;
   int64_t end = 0;
@@ -3915,7 +3942,7 @@ int ObSchemaServiceSQLImpl::get_batch_users(
     LOG_WARN("check inner stat fail");
   }
 
-  std::sort(tenant_user_ids.begin(), tenant_user_ids.end());
+  lib::ob_sort(tenant_user_ids.begin(), tenant_user_ids.end());
   // split query to tenant space && split big query
   int64_t begin = 0;
   int64_t end = 0;
@@ -4014,7 +4041,7 @@ int ObSchemaServiceSQLImpl::get_batch_packages(const ObRefreshSchemaStatus &sche
     LOG_WARN("check inner stat fail");
   }
 
-  std::sort(tenant_package_ids.begin(), tenant_package_ids.end());
+  lib::ob_sort(tenant_package_ids.begin(), tenant_package_ids.end());
   // split query to tenant space && split big query
   int64_t begin = 0;
   int64_t end = 0;
@@ -4051,7 +4078,7 @@ int ObSchemaServiceSQLImpl::get_batch_mock_fk_parent_tables(
     ret = OB_NOT_INIT;
     LOG_WARN("check inner stat fail");
   }
-  std::sort(tenant_mock_fk_parent_table_ids.begin(), tenant_mock_fk_parent_table_ids.end());
+  lib::ob_sort(tenant_mock_fk_parent_table_ids.begin(), tenant_mock_fk_parent_table_ids.end());
   // split query to tenant space && split big query
   int64_t begin = 0;
   int64_t end = 0;
@@ -4088,7 +4115,7 @@ int ObSchemaServiceSQLImpl::get_batch_triggers(const ObRefreshSchemaStatus &sche
     LOG_WARN("check inner stat fail");
   }
 
-  std::sort(tenant_trigger_ids.begin(), tenant_trigger_ids.end());
+  lib::ob_sort(tenant_trigger_ids.begin(), tenant_trigger_ids.end());
   // split query to tenant space && split big query
   int64_t begin = 0;
   int64_t end = 0;
@@ -4593,6 +4620,24 @@ int ObSchemaServiceSQLImpl::fetch_all_user_info(
               user_keys,
               users_size))) {
         LOG_WARN("failed to fetch_role_grantee_map_info", K(ret));
+      } else if (OB_FAIL(fetch_proxy_user_info(schema_status,
+                                               schema_version,
+                                               tenant_id,
+                                               sql_client,
+                                               user_array,
+                                               true, /*get proxy info*/
+                                               user_keys,
+                                               users_size))) {
+        LOG_WARN("fetch proxy user info failed", K(ret));
+      } else if (OB_FAIL(fetch_proxy_user_info(schema_status,
+                                               schema_version,
+                                               tenant_id,
+                                               sql_client,
+                                               user_array,
+                                               false, /*get proxied info*/
+                                               user_keys,
+                                               users_size))) {
+        LOG_WARN("fetch proxy user info failed", K(ret));
       }
     }
   }
@@ -4812,6 +4857,199 @@ int ObSchemaServiceSQLImpl::fetch_role_grantee_map_info(
       }
     }
 
+  }
+  return ret;
+}
+
+
+// fill ObUserInfo
+// 1. If user info is a user, get the users info which the user can proxy and be proxied.
+// 2. If user info is a role, do nothing
+int ObSchemaServiceSQLImpl::fetch_proxy_user_info(
+    const ObRefreshSchemaStatus &schema_status,
+    const int64_t schema_version,
+    const uint64_t tenant_id,
+    ObISQLClient &sql_client,
+    ObArray<ObUserInfo> &user_array,
+    const bool is_fetch_proxy,
+    const uint64_t *user_keys,
+    const int64_t users_size)
+{
+  int ret = OB_SUCCESS;
+  ObSqlString sql;
+  SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+    ObMySQLResult *result = NULL;
+    const bool is_full_schema = (NULL != user_keys && users_size > 0) ? false : true;
+    const int64_t snapshot_timestamp = schema_status.snapshot_timestamp_;
+    const uint64_t exec_tenant_id = fill_exec_tenant_id(schema_status);
+    bool printed = false;
+    if (OB_FAIL(sql.append_fmt(FETCH_ALL_PROXY_INFO_HISTORY_SQL, OB_ALL_USER_PROXY_INFO_HISTORY_TNAME, 0UL))) {
+      LOG_WARN("append sql failed", K(ret));
+    } else if (!is_full_schema) {
+      for (int64_t i = 0; OB_SUCC(ret) && i < users_size; ++i) {
+        const uint64_t user_id = user_keys[i];
+        ObUserInfo *user_info = NULL;
+        if (OB_FAIL(ObSchemaRetrieveUtils::find_user_info(user_id, user_array, user_info))) {
+          LOG_WARN("find user info failed", K(user_id), K(ret));
+        } else if (OB_ISNULL(user_info)) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("unexpected error", K(user_id), K(ret));
+        } else if (user_info->is_role()) {
+          //do nothing
+        } else if (user_info->get_proxy_activated_flag() == ObProxyActivatedFlag::PROXY_NERVER_BEEN_ACTIVATED) {
+          //skip
+        } else {
+          if (!printed) {
+            printed = true;
+            if (is_fetch_proxy) {
+              if (OB_FAIL(sql.append_fmt(" AND proxy_user_id IN (%lu", user_id))) {
+                LOG_WARN("append sql failed", K(ret), K(user_id));
+              }
+            } else {
+              if (OB_FAIL(sql.append_fmt(" AND client_user_id IN (%lu", user_id))) {
+                LOG_WARN("append sql failed", K(ret), K(user_id));
+              }
+            }
+          } else if (OB_FAIL(sql.append_fmt(", %lu", user_id))) {
+            LOG_WARN("append sql failed", K(ret), K(i), K(user_id));
+          }
+        }
+      }
+      if (OB_SUCC(ret)) {
+        if (printed) {
+          if (OB_FAIL(sql.append(")"))) {
+            LOG_WARN("append sql failed", K(ret));
+          }
+        } else {
+          // reset sql if no schema objects need to be fetched from inner table.
+          sql.reset();
+        }
+      }
+    }
+
+    if (OB_SUCC(ret) && !sql.empty()) {
+      if (OB_FAIL(sql.append_fmt(" AND SCHEMA_VERSION <= %ld", schema_version))) {
+        LOG_WARN("append failed", K(ret));
+      } else if (OB_FAIL(sql.append(is_fetch_proxy ?
+                                    " ORDER BY TENANT_ID DESC, PROXY_USER_ID DESC, CLIENT_USER_ID DESC, SCHEMA_VERSION DESC" :
+                                    " ORDER BY TENANT_ID DESC, CLIENT_USER_ID DESC, PROXY_USER_ID DESC, SCHEMA_VERSION DESC"))) {
+        LOG_WARN("sql append failed", K(ret));
+      }
+    }
+
+    if (OB_SUCC(ret) && !sql.empty()) {
+      DEFINE_SQL_CLIENT_RETRY_WEAK_WITH_SNAPSHOT(sql_client, snapshot_timestamp);
+      if (OB_FAIL(sql_client_retry_weak.read(res, exec_tenant_id, sql.ptr()))) {
+        LOG_WARN("execute sql failed", K(ret), K(tenant_id), K(sql));
+      } else if (OB_UNLIKELY(NULL == (result = res.get_result()))) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("Fail to get result", K(ret));
+      } else if (OB_FAIL(ObSchemaRetrieveUtils::retrieve_proxy_info_schema(tenant_id, *result, is_fetch_proxy, user_array))) {
+        LOG_WARN("Failed to retrieve user infos", K(ret));
+      }
+    }
+  }
+  if (OB_SUCC(ret) && !sql.empty()) { //may existed proxy user
+    if (OB_FAIL(fetch_proxy_role_info(schema_status,
+                                      schema_version,
+                                      tenant_id,
+                                      sql_client,
+                                      user_array,
+                                      is_fetch_proxy,
+                                      user_keys,
+                                      users_size))) {
+      LOG_WARN("fetch proxy role info failed", K(ret));
+    }
+  }
+  return ret;
+}
+
+// fill ObUserInfo
+// 1. If user info is a user, get the users info which the user can proxy and be proxied.
+// 2. If user info is a role, do nothing
+int ObSchemaServiceSQLImpl::fetch_proxy_role_info(
+    const ObRefreshSchemaStatus &schema_status,
+    const int64_t schema_version,
+    const uint64_t tenant_id,
+    ObISQLClient &sql_client,
+    ObArray<ObUserInfo> &user_array,
+    const bool is_fetch_proxy,
+    const uint64_t *user_keys /* = NULL */,
+    const int64_t users_size /* = 0 */)
+{
+  int ret = OB_SUCCESS;
+  SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+    ObMySQLResult *result = NULL;
+    ObSqlString sql;
+    const bool is_full_schema = (NULL != user_keys && users_size > 0) ? false : true;
+    const int64_t snapshot_timestamp = schema_status.snapshot_timestamp_;
+    const uint64_t exec_tenant_id = fill_exec_tenant_id(schema_status);
+    bool printed = false;
+    if (OB_FAIL(sql.append_fmt(FETCH_ALL_PROXY_ROLE_INFO_HISTORY_SQL, OB_ALL_USER_PROXY_ROLE_INFO_HISTORY_TNAME, 0UL))) {
+      LOG_WARN("append sql failed", K(ret));
+    } else if (!is_full_schema) {
+      for (int64_t i = 0; OB_SUCC(ret) && i < users_size; ++i) {
+        const uint64_t user_id = user_keys[i];
+        ObUserInfo *user_info = NULL;
+        if (OB_FAIL(ObSchemaRetrieveUtils::find_user_info(user_id, user_array, user_info))) {
+          LOG_WARN("find user info failed", K(user_id), K(ret));
+        } else if (OB_ISNULL(user_info)) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("unexpected error", K(user_id), K(ret));
+        } else if (user_info->is_role()) {
+          //do nothing
+        } else if (user_info->get_proxy_activated_flag() == ObProxyActivatedFlag::PROXY_NERVER_BEEN_ACTIVATED) {
+          //skip
+        } else {
+          if (!printed) {
+            printed = true;
+            if (is_fetch_proxy) {
+              if (OB_FAIL(sql.append_fmt(" AND proxy_user_id IN (%lu", user_id))) {
+                LOG_WARN("append sql failed", K(ret), K(user_id));
+              }
+            } else {
+              if (OB_FAIL(sql.append_fmt(" AND client_user_id IN (%lu", user_id))) {
+                LOG_WARN("append sql failed", K(ret), K(user_id));
+              }
+            }
+          } else if (OB_FAIL(sql.append_fmt(", %lu", user_id))) {
+            LOG_WARN("append sql failed", K(ret), K(i), K(user_id));
+          }
+        }
+      }
+      if (OB_SUCC(ret)) {
+        if (printed) {
+          if (OB_FAIL(sql.append(")"))) {
+            LOG_WARN("append sql failed", K(ret));
+          }
+        } else {
+          // reset sql if no schema objects need to be fetched from inner table.
+          sql.reset();
+        }
+      }
+    }
+
+    if (OB_SUCC(ret) && !sql.empty()) {
+      if (OB_FAIL(sql.append_fmt(" AND SCHEMA_VERSION <= %ld", schema_version))) {
+        LOG_WARN("append failed", K(ret));
+      } else if (OB_FAIL(sql.append(is_fetch_proxy ?
+                                    " ORDER BY TENANT_ID DESC, PROXY_USER_ID DESC, CLIENT_USER_ID DESC, ROLE_ID DESC, SCHEMA_VERSION DESC" :
+                                    " ORDER BY TENANT_ID DESC, CLIENT_USER_ID DESC, PROXY_USER_ID DESC, ROLE_ID DESC, SCHEMA_VERSION DESC"))) {
+        LOG_WARN("sql append failed", K(ret));
+      }
+    }
+
+    if (OB_SUCC(ret) && !sql.empty()) {
+      DEFINE_SQL_CLIENT_RETRY_WEAK_WITH_SNAPSHOT(sql_client, snapshot_timestamp);
+      if (OB_FAIL(sql_client_retry_weak.read(res, exec_tenant_id, sql.ptr()))) {
+        LOG_WARN("execute sql failed", K(ret), K(tenant_id), K(sql));
+      } else if (OB_UNLIKELY(NULL == (result = res.get_result()))) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("Fail to get result", K(ret));
+      } else if (OB_FAIL(ObSchemaRetrieveUtils::retrieve_proxy_role_info_schema(tenant_id, *result, is_fetch_proxy, user_array))) {
+        LOG_WARN("Failed to retrieve user infos", K(ret));
+      }
+    }
   }
   return ret;
 }
@@ -5818,7 +6056,6 @@ int ObSchemaServiceSQLImpl::fetch_rls_columns(const ObRefreshSchemaStatus &schem
   }
   return ret;
 }
-
 /*
   new schema_cache related
 */
@@ -7299,7 +7536,7 @@ int ObSchemaServiceSQLImpl::get_batch_sequences(
     LOG_WARN("check inner stat fail");
   }
 
-  std::sort(tenant_sequence_ids.begin(), tenant_sequence_ids.end());
+  lib::ob_sort(tenant_sequence_ids.begin(), tenant_sequence_ids.end());
   // split query to tenant space && split big query
   int64_t begin = 0;
   int64_t end = 0;
@@ -7396,7 +7633,7 @@ int ObSchemaServiceSQLImpl::get_batch_label_se_policys(
     ret = OB_NOT_INIT;
     LOG_WARN("check inner stat fail");
   }
-  std::sort(tenant_label_se_policy_ids.begin(), tenant_label_se_policy_ids.end());
+  lib::ob_sort(tenant_label_se_policy_ids.begin(), tenant_label_se_policy_ids.end());
   // split query to tenant space && split big query
   int64_t begin = 0;
   int64_t end = 0;
@@ -7491,7 +7728,7 @@ int ObSchemaServiceSQLImpl::get_batch_profiles(
     ret = OB_NOT_INIT;
     LOG_WARN("check inner stat fail");
   }
-  std::sort(tenant_profile_ids.begin(), tenant_profile_ids.end());
+  lib::ob_sort(tenant_profile_ids.begin(), tenant_profile_ids.end());
   // split query to tenant space && split big query
   int64_t begin = 0;
   int64_t end = 0;
@@ -7587,7 +7824,7 @@ int ObSchemaServiceSQLImpl::get_batch_label_se_components(
     ret = OB_NOT_INIT;
     LOG_WARN("check inner stat fail");
   }
-  std::sort(tenant_label_se_component_ids.begin(), tenant_label_se_component_ids.end());
+  lib::ob_sort(tenant_label_se_component_ids.begin(), tenant_label_se_component_ids.end());
   // split query to tenant space && split big query
   int64_t begin = 0;
   int64_t end = 0;
@@ -7681,7 +7918,7 @@ int ObSchemaServiceSQLImpl::get_batch_label_se_labels(
     ret = OB_NOT_INIT;
     LOG_WARN("check inner stat fail");
   }
-  std::sort(tenant_label_se_label_ids.begin(), tenant_label_se_label_ids.end());
+  lib::ob_sort(tenant_label_se_label_ids.begin(), tenant_label_se_label_ids.end());
   // split query to tenant space && split big query
   int64_t begin = 0;
   int64_t end = 0;
@@ -7775,7 +8012,7 @@ int ObSchemaServiceSQLImpl::get_batch_label_se_user_levels(
     ret = OB_NOT_INIT;
     LOG_WARN("check inner stat fail");
   }
-  std::sort(tenant_label_se_user_level_ids.begin(), tenant_label_se_user_level_ids.end());
+  lib::ob_sort(tenant_label_se_user_level_ids.begin(), tenant_label_se_user_level_ids.end());
   // split query to tenant space && split big query
   int64_t begin = 0;
   int64_t end = 0;
@@ -7871,7 +8108,7 @@ int ObSchemaServiceSQLImpl::get_batch_tablespaces(
     ret = OB_NOT_INIT;
     LOG_WARN("check inner stat fail");
   }
-  std::sort(tenant_tablespace_ids.begin(), tenant_tablespace_ids.end());
+  lib::ob_sort(tenant_tablespace_ids.begin(), tenant_tablespace_ids.end());
   // split query to tenant space && split big query
   int64_t begin = 0;
   int64_t end = 0;
@@ -8007,7 +8244,7 @@ int ObSchemaServiceSQLImpl::get_batch_udfs(
     LOG_WARN("check inner stat fail");
   }
 
-  std::sort(tenant_udf_ids.begin(), tenant_udf_ids.end());
+  lib::ob_sort(tenant_udf_ids.begin(), tenant_udf_ids.end());
   // split query to tenant space && split big query
   int64_t begin = 0;
   int64_t end = 0;
@@ -8105,7 +8342,7 @@ int ObSchemaServiceSQLImpl::get_batch_keystores(
     ret = OB_NOT_INIT;
     LOG_WARN("check inner stat fail");
   }
-  std::sort(tenant_keystore_ids.begin(), tenant_keystore_ids.end());
+  lib::ob_sort(tenant_keystore_ids.begin(), tenant_keystore_ids.end());
   // split query to tenant space && split big query
   int64_t begin = 0;
   int64_t end = 0;
@@ -8201,7 +8438,7 @@ int ObSchemaServiceSQLImpl::get_batch_audits(
     ret = OB_NOT_INIT;
     LOG_WARN("check inner stat fail");
   }
-  std::sort(tenant_audit_ids.begin(), tenant_audit_ids.end());
+  lib::ob_sort(tenant_audit_ids.begin(), tenant_audit_ids.end());
   // split query to tenant space && split big query
   int64_t begin = 0;
   int64_t end = 0;
@@ -8666,24 +8903,24 @@ int ObSchemaServiceSQLImpl::sort_partition_array(ObPartitionSchema &partition_sc
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("partition array is empty", K(ret), K(partition_schema));
     } else if (partition_schema.is_range_part()) {
-      std::sort(partition_schema.get_part_array(),
+      lib::ob_sort(partition_schema.get_part_array(),
           partition_schema.get_part_array() + partition_num,
           ObBasePartition::range_like_func_less_than);
-      std::sort(partition_schema.get_hidden_part_array(),
+      lib::ob_sort(partition_schema.get_hidden_part_array(),
           partition_schema.get_hidden_part_array() + partition_schema.get_hidden_partition_num(),
           ObBasePartition::range_like_func_less_than);
     } else if (partition_schema.is_hash_like_part()) {
-      std::sort(partition_schema.get_part_array(),
+      lib::ob_sort(partition_schema.get_part_array(),
           partition_schema.get_part_array() + partition_num,
           ObBasePartition::hash_like_func_less_than);
-      std::sort(partition_schema.get_hidden_part_array(),
+      lib::ob_sort(partition_schema.get_hidden_part_array(),
           partition_schema.get_hidden_part_array() + partition_schema.get_hidden_partition_num(),
           ObBasePartition::hash_like_func_less_than);
     } else if (partition_schema.is_list_part()) {
-      std::sort(partition_schema.get_part_array(),
+      lib::ob_sort(partition_schema.get_part_array(),
           partition_schema.get_part_array() + partition_num,
           ObBasePartition::list_part_func_layout);
-      std::sort(partition_schema.get_hidden_part_array(),
+      lib::ob_sort(partition_schema.get_hidden_part_array(),
           partition_schema.get_hidden_part_array() + partition_schema.get_hidden_partition_num(),
           ObBasePartition::list_part_func_layout);
     } else {
@@ -8724,20 +8961,20 @@ int ObSchemaServiceSQLImpl::sort_subpartition_array(ObPartitionSchema &partition
           ret = OB_ERR_UNEXPECTED;
           LOG_ERROR("subpartition array is empty", K(ret), K(i), K(partition_schema));
         } else if (partition_schema.is_range_subpart()) {
-          std::sort(subpart_array, subpart_array + subpartition_num, ObBasePartition::less_than);
-          std::sort(partition->get_hidden_subpart_array(),
+          lib::ob_sort(subpart_array, subpart_array + subpartition_num, ObBasePartition::less_than);
+          lib::ob_sort(partition->get_hidden_subpart_array(),
                     partition->get_hidden_subpart_array() + partition->get_hidden_subpartition_num(),
                     ObBasePartition::less_than);
         } else if (partition_schema.is_hash_like_subpart()) {
-          std::sort(subpart_array, subpart_array + subpartition_num,
+          lib::ob_sort(subpart_array, subpart_array + subpartition_num,
                     ObSubPartition::hash_like_func_less_than);
-          std::sort(partition->get_hidden_subpart_array(),
+          lib::ob_sort(partition->get_hidden_subpart_array(),
                     partition->get_hidden_subpart_array() + partition->get_hidden_subpartition_num(),
                     ObSubPartition::hash_like_func_less_than);
         } else if (partition_schema.is_list_subpart()) {
-          std::sort(subpart_array, subpart_array + subpartition_num,
+          lib::ob_sort(subpart_array, subpart_array + subpartition_num,
                     ObBasePartition::list_part_func_layout);
-          std::sort(partition->get_hidden_subpart_array(),
+          lib::ob_sort(partition->get_hidden_subpart_array(),
                     partition->get_hidden_subpart_array() + partition->get_hidden_subpartition_num(),
                     ObBasePartition::list_part_func_layout);
         }
@@ -8758,15 +8995,15 @@ int ObSchemaServiceSQLImpl::sort_subpartition_array(ObPartitionSchema &partition
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("def_subpartition array is empty", K(ret), K(partition_schema));
       } else if (partition_schema.is_range_subpart()) {
-        std::sort(partition_schema.get_def_subpart_array(),
+        lib::ob_sort(partition_schema.get_def_subpart_array(),
             partition_schema.get_def_subpart_array() + def_subpartition_num,
             ObBasePartition::less_than);
       } else if (partition_schema.is_hash_like_subpart()) {
-        std::sort(partition_schema.get_def_subpart_array(),
+        lib::ob_sort(partition_schema.get_def_subpart_array(),
             partition_schema.get_def_subpart_array() + def_subpartition_num,
             ObSubPartition::hash_like_func_less_than);
       } else if (partition_schema.is_list_subpart()) {
-        std::sort(partition_schema.get_def_subpart_array(),
+        lib::ob_sort(partition_schema.get_def_subpart_array(),
             partition_schema.get_def_subpart_array() + def_subpartition_num,
             ObBasePartition::list_part_func_layout);
       } else {

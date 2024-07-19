@@ -16,7 +16,7 @@
 #include "ob_lob_manager.h"
 #include "storage/tx/ob_trans_service.h"
 #include "storage/blocksstable/ob_datum_row.h"
-#include "ob_lob_meta.h"
+#include "storage/lob/ob_lob_meta.h"
 #include "storage/tx_storage/ob_access_service.h"
 
 namespace oceanbase
@@ -125,6 +125,17 @@ int64_t ObLobAccessParam::get_inrow_threshold()
   return res;
 }
 
+int ObLobAccessParam::is_timeout()
+{
+  int ret = OB_SUCCESS;
+  int64_t cur_time = ObTimeUtility::current_time();
+  if (cur_time > timeout_) {
+    ret = OB_TIMEOUT;
+    LOG_WARN("query timeout", K(ret), K(cur_time), K(timeout_));
+  }
+  return ret;
+}
+
 int ObInsertLobColumnHelper::start_trans(const share::ObLSID &ls_id,
                                          const bool is_for_read,
                                          const int64_t timeout_ts,
@@ -205,7 +216,10 @@ int ObInsertLobColumnHelper::insert_lob_column(ObIAllocator &allocator,
     // datum with null ptr and zero len should treat as no lob header
     bool set_has_lob_header = has_lob_header && data.length() > 0;
     ObLobLocatorV2 src(data, set_has_lob_header);
-    if (src.has_inrow_data() && lob_mngr->can_write_inrow(data.length(), lob_storage_param.inrow_threshold_)) {
+    int64_t byte_len = 0;
+    if (OB_FAIL(src.get_lob_data_byte_len(byte_len))) {
+      LOG_WARN("fail to get lob data byte len", K(ret), K(src));
+    } else if (src.has_inrow_data() && lob_mngr->can_write_inrow(byte_len, lob_storage_param.inrow_threshold_)) {
       // fast path for inrow data
       if (OB_FAIL(src.get_inrow_data(data))) {
         LOG_WARN("fail to get inrow data", K(ret), K(src));
@@ -307,7 +321,7 @@ int ObInsertLobColumnHelper::insert_lob_column(ObIAllocator &allocator,
     int64_t byte_len = 0;
     if (OB_FAIL(src.get_lob_data_byte_len(byte_len))) {
       LOG_WARN("fail to get lob data byte len", K(ret), K(src));
-    } else if (src.has_inrow_data() && lob_mngr->can_write_inrow(data.length(), lob_storage_param.inrow_threshold_)) {
+    } else if (src.has_inrow_data() && lob_mngr->can_write_inrow(byte_len, lob_storage_param.inrow_threshold_)) {
       // do fast inrow
       if (OB_FAIL(src.get_inrow_data(data))) {
         LOG_WARN("fail to get inrow data", K(ret), K(src));
@@ -325,15 +339,13 @@ int ObInsertLobColumnHelper::insert_lob_column(ObIAllocator &allocator,
       }
     } else {
       ObTransService *txs = MTL(transaction::ObTransService*);
-      ObTxReadSnapshot snapshot;
-      // 4.0 text tc compatiable
       ObLobAccessParam lob_param;
-      // lob_param.tx_desc_ = tx_desc;
+      lob_param.tx_desc_ = tx_desc;
       // lob_param.snapshot_ = snapshot;
       lob_param.sql_mode_ = SMO_DEFAULT;
       lob_param.ls_id_ = ls_id;
       lob_param.tablet_id_ = tablet_id;
-      lob_param.coll_type_ = collation_type;
+      lob_param.coll_type_ = ObLobCharsetUtil::get_collation_type(obj_type, collation_type);
       lob_param.allocator_ = &allocator;
       lob_param.lob_common_ = nullptr;
       lob_param.timeout_ = timeout_ts;
@@ -546,7 +558,7 @@ int ObLobPartialData::get_ori_data_length(int64_t &len) const
 int ObLobPartialData::sort_index()
 {
   int ret = OB_SUCCESS;
-  std::sort(index_.begin(), index_.end(), ObLobChunkIndexComparator());
+  lib::ob_sort(index_.begin(), index_.end(), ObLobChunkIndexComparator());
   search_map_.reuse();
   for (int i = 0; i < index_.count(); ++i) {
     const ObLobChunkIndex &chunk_index = index_[i];

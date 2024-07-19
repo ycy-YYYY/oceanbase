@@ -40,6 +40,7 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
   ObUpdateStmt *update_stmt = NULL;
   ObSEArray<ObTableAssignment, 2> tables_assign;
   bool has_tg = false;
+  bool disable_limit_offset = false;
   if (T_UPDATE != parse_tree.type_
       || 3 > parse_tree.num_child_
       || OB_ISNULL(parse_tree.children_)
@@ -50,6 +51,9 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
   } else if (OB_ISNULL(update_stmt = create_stmt<ObUpdateStmt>())) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_ERROR("create update stmt failed");
+  } else if (OB_FAIL(session_info_->check_feature_enable(ObCompatFeatureType::UPD_LIMIT_OFFSET,
+                                                         disable_limit_offset))) {
+    LOG_WARN("failed to check feature enable", K(ret));
   } else {
     stmt_ = update_stmt;
     update_stmt->set_ignore(false);
@@ -150,16 +154,16 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
       LOG_WARN("failed to add remove const expr", K(ret));
     } else if (OB_FAIL(resolve_update_constraints())) {
       LOG_WARN("failed to resolve check exprs", K(ret));
+    } else if (OB_FAIL(resolve_hints(parse_tree.children_[HINT]))) {
+      LOG_WARN("resolve hints failed", K(ret));
     } else if (OB_FAIL(resolve_where_clause(parse_tree.children_[WHERE]))) {
       LOG_WARN("resolve where clause failed", K(ret));
     } else if (params_.is_batch_stmt_ && OB_FAIL(generate_batched_stmt_info())) {
       LOG_WARN("failed to generate batched stmt info", K(ret));
     } else if (OB_FAIL(resolve_order_clause(parse_tree.children_[ORDER_BY]))) {
       LOG_WARN("resolve order clause failed", K(ret));
-    } else if (OB_FAIL(resolve_limit_clause(parse_tree.children_[LIMIT]))) {
+    } else if (OB_FAIL(resolve_limit_clause(parse_tree.children_[LIMIT], disable_limit_offset))) {
       LOG_WARN("resolve limit clause failed", K(ret));
-    } else if (OB_FAIL(resolve_hints(parse_tree.children_[HINT]))) {
-      LOG_WARN("resolve hints failed", K(ret));
     } else if (OB_FAIL(resolve_returning(parse_tree.children_[RETURNING]))) {
       LOG_WARN("resolve returning failed", K(ret));
     } else if (OB_FAIL(try_expand_returning_exprs())) {
@@ -442,12 +446,8 @@ int ObUpdateResolver::resolve_table_list(const ParseNode &parse_tree)
       LOG_WARN("failed to resolve table", K(ret));
     } else {/*do nothing*/}
     if (OB_SUCC(ret)) {
-      JoinedTable *joined_table = nullptr;
       if (OB_FAIL(column_namespace_checker_.add_reference_table(table_item))) {
         LOG_WARN("add reference table to namespace checker failed", K(ret));
-      } else if (OB_FAIL(try_add_join_table_for_fts(table_item, joined_table))) {
-        LOG_WARN("fail to try add join table for fts", K(ret), KPC(table_item));
-      } else if (nullptr != joined_table && FALSE_IT(table_item = static_cast<TableItem *>(joined_table))) {
       } else if (OB_FAIL(update_stmt->add_from_item(table_item->table_id_, table_item->is_joined_table()))) {
         LOG_WARN("failed to add from item", K(ret));
       } else if (OB_FAIL(check_need_fired_trigger(table_item))) {
@@ -563,7 +563,13 @@ int ObUpdateResolver::generate_update_table_info(ObTableAssignment &table_assign
       }
     }
     if (OB_SUCC(ret)) {
-      if (OB_FAIL(try_update_column_expr_for_fts(*table_item, table_info->column_exprs_))) {
+      TableItem *rowkey_doc = NULL;
+      if (OB_FAIL(try_add_join_table_for_fts(table_item, rowkey_doc))) {
+        LOG_WARN("fail to try add join table for fts", K(ret), KPC(table_item));
+      } else if (OB_NOT_NULL(rowkey_doc) && OB_FAIL(try_update_column_expr_for_fts(
+                                                                      *table_item,
+                                                                      rowkey_doc,
+                                                                      table_info->column_exprs_))) {
         LOG_WARN("fail to try update column expr for fts", K(ret), KPC(table_item));
       } else if (OB_FAIL(update_stmt->get_update_table_info().push_back(table_info))) {
         LOG_WARN("failed to push back table info", K(ret));

@@ -27,6 +27,7 @@ using namespace oceanbase::palf;
 
 namespace cdc
 {
+ERRSIM_POINT_DEF(ERRSIM_FETCH_LOG_RESP_ERROR);
 
 ObCdcFetcher::ObCdcFetcher()
   : is_inited_(false),
@@ -124,8 +125,9 @@ int ObCdcFetcher::fetch_log(const ObCdcLSFetchLogReq &req,
       }
 
       if (OB_NOT_NULL(ls_ctx)) {
-        if (OB_FAIL(host_->revert_client_ls_ctx(ls_ctx))) {
-          LOG_WARN("failed to revert client ls ctx", K(req));
+        int tmp_ret = OB_SUCCESS;
+        if (OB_TMP_FAIL(host_->revert_client_ls_ctx(ls_ctx))) {
+          LOG_WARN_RET(tmp_ret, "failed to revert client ls ctx", K(req));
         } else {
           ls_ctx = nullptr;
         }
@@ -326,6 +328,10 @@ int ObCdcFetcher::do_fetch_log_(const ObCdcLSFetchLogReq &req,
   if (OB_FAIL(ret)) {
     LOG_WARN("fetch log fail", KR(ret), "CDC_Connector_PID", req.get_client_pid(),
         K(req), K(resp));
+  } else if (ERRSIM_FETCH_LOG_RESP_ERROR) {
+    ret = ERRSIM_FETCH_LOG_RESP_ERROR;
+    LOG_WARN("ERRSIM fetch log fail", KR(ret), "CDC_Connector_PID", req.get_client_pid(),
+        K(req), K(resp));
   }
 
   LOG_TRACE("do_fetch_log done", KR(ret), K(frt), K(req), K(resp));
@@ -375,7 +381,7 @@ int ObCdcFetcher::fetch_log_in_archive_(
   int ret = OB_SUCCESS;
   // always reserve 4K for archive header
   const int64_t SINGLE_READ_SIZE = 16 * 1024 * 1024L - 4 * 1024;
-  const int64_t MAX_RETRY_COUNT = 4;
+  const int64_t MAX_RETRY_COUNT = 5;
   if (OB_FAIL(host_->init_archive_source_if_needed(ls_id, ctx))) {
     LOG_WARN("init archive source failed", K(ctx), K(ls_id));
   } else {
@@ -386,6 +392,17 @@ int ObCdcFetcher::fetch_log_in_archive_(
       LOG_WARN("convert progress to scn failed", KR(ret), K(ctx));
     } else  {
       int64_t retry_count = 0;
+      // Retry when we encounter OB_ITER_END, here is the scenario:
+      // 1. Logs does not exist in palf, and it's the first time to read archive log;
+      // 2. The lastest archive log is read, and the lastest archive file is larger than SINGLE_READ_SIZE;
+      // 3. The start_lsn is larger than SINGLE_READ_SIZE;
+      // 4. remoter iter read the latest archive file from the start;
+      // 5. then the iter encountered a incomplete log entry, and find it's reading the latest archive file, then
+      // return OB_ITER_END instead of OB_NEED_RETRY;
+      // 6. So the PieceContext is maintained outside of the iter, if OB_ITER_END is encountered, just call
+      // update_source_cb to update PieceContext, and remote iter would continue to read from the position where
+      // it interrupted last time;
+      // 7. update_source_cb must be valid in this scenario;
       do {
         if (! remote_iter.is_init() && OB_FAIL(remote_iter.init(tenant_id_, ls_id, pre_scn,
             start_lsn, LSN(LOG_MAX_LSN_VAL), large_buffer_pool_, log_ext_handler_, SINGLE_READ_SIZE))) {
@@ -831,7 +848,7 @@ int ObCdcFetcher::check_lag_follower_(const ObLSID &ls_id,
 {
   int ret = OB_SUCCESS;
   ObRole role = INVALID_ROLE;
-  bool is_in_sync = true;
+  bool is_in_sync = false;
   int64_t leader_epoch = OB_INVALID_TIMESTAMP;
   if (OB_FAIL(check_ls_sync_status_(ls_id, palf_handle_guard, role, is_in_sync))) {
     LOG_WARN("failed to check ls sync status", K(ls_id), K(role), K(is_in_sync));
@@ -863,7 +880,6 @@ int ObCdcFetcher::check_ls_sync_status_(const ObLSID &ls_id,
     storage::ObLSHandle ls_handle;
     ObLS *ls = NULL;
     logservice::ObLogHandler *log_handler = NULL;
-    bool is_sync = false;
     bool is_need_rebuild = false;
 
     if (OB_FAIL(ls_service_->get_ls(ls_id, ls_handle, ObLSGetMod::LOG_MOD))) {
@@ -874,8 +890,8 @@ int ObCdcFetcher::check_ls_sync_status_(const ObLSID &ls_id,
     } else if (OB_ISNULL(log_handler = ls->get_log_handler())) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("log_handler is NULL", KR(ret), K(ls_id));
-    } else if (OB_FAIL(log_handler->is_in_sync(is_sync, is_need_rebuild))) {
-      LOG_WARN("log_handler is_in_sync fail", KR(ret), K(ls_id), K(is_sync));
+    } else if (OB_FAIL(log_handler->is_in_sync(in_sync, is_need_rebuild))) {
+      LOG_WARN("log_handler is_in_sync fail", KR(ret), K(ls_id), K(in_sync));
     }
   } else {
     // leader must be in_sync
@@ -907,6 +923,7 @@ int ObCdcFetcher::do_fetch_missing_log_(const obrpc::ObCdcLSFetchMissLogReq &req
     PalfHandleGuard palf_guard;
     int64_t version = 0;
     ObCdcGetSourceFunctor get_source_func(ctx, version);
+    ObCdcUpdateSourceFunctor update_source_func(ctx, version);
     bool ls_exist_in_palf = true;
     bool archive_is_on = true;
     bool need_init_iter = true;
@@ -925,7 +942,7 @@ int ObCdcFetcher::do_fetch_missing_log_(const obrpc::ObCdcLSFetchMissLogReq &req
       for (int64_t idx = 0; OB_SUCC(ret) && ! frt.is_stopped() && idx < miss_log_array.count(); idx++) {
         // need_init_iter should always be true, declared here to ensure need init iter be true in each loop
         PalfBufferIterator palf_iter(ls_id.id(), palf::LogIOUser::CDC);
-        ObRemoteLogpEntryIterator remote_iter(get_source_func);
+        ObRemoteLogpEntryIterator remote_iter(get_source_func, update_source_func);
         const obrpc::ObCdcLSFetchMissLogReq::MissLogParam &miss_log_info = miss_log_array[idx];
         const LSN &missing_lsn = miss_log_info.miss_lsn_;
         palf::PalfBufferIterator log_entry_iter(ls_id.id(), palf::LogIOUser::CDC);
@@ -1210,6 +1227,13 @@ int ObCdcFetcher::do_fetch_raw_log_(const obrpc::ObCdcFetchRawLogReq &req,
   if (retry_count > 1) {
     LOG_INFO("retry multiple times to read log", KR(ret), K(req), K(resp), K(retry_count),
         K(need_retry), K(fetch_log_succ));
+  }
+
+  if (OB_FAIL(ret)) {
+    LOG_WARN("fetch raw log fail", K(req), K(resp));
+  } else if (ERRSIM_FETCH_LOG_RESP_ERROR) {
+    ret = ERRSIM_FETCH_LOG_RESP_ERROR;
+    LOG_WARN("ERRSIM fetch raw log fail", K(req), K(resp));
   }
 
   return ret;

@@ -37,6 +37,7 @@
 #include "storage/column_store/ob_column_oriented_sstable.h"
 #include "storage/compaction/ob_compaction_dag_ranker.h"
 #include "storage/meta_mem/ob_tenant_meta_mem_mgr.h"
+#include "storage/multi_data_source/ob_tablet_mds_merge_ctx.h"
 #include "storage/compaction/ob_basic_tablet_merge_ctx.h"
 #include "storage/compaction/ob_tenant_compaction_progress.h"
 #include "storage/tx_storage/ob_tenant_freezer.h"
@@ -51,72 +52,7 @@ using namespace memtable;
 using namespace blocksstable;
 namespace compaction
 {
-
-/*
- *  ----------------------------------------------ObCompactionTimeGuard--------------------------------------------------
- */
-constexpr float ObStorageCompactionTimeGuard::COMPACTION_SHOW_PERCENT_THRESHOLD;
-const char *ObStorageCompactionTimeGuard::CompactionEventStr[] = {
-    "WAIT_TO_SCHEDULE",
-    "COMPACTION_POLICY",
-    "PRE_PROCESS_TX_TABLE",
-    "GET_PARALLEL_RANGE",
-    "EXECUTE",
-    "CREATE_SSTABLE",
-    "UPDATE_TABLET",
-    "RELEASE_MEMTABLE",
-    "SCHEDULE_OTHER_COMPACTION",
-    "DAG_FINISH"
-};
-
-const char *ObStorageCompactionTimeGuard::get_comp_event_str(enum CompactionEvent event)
-{
-  STATIC_ASSERT(static_cast<int64_t>(COMPACTION_EVENT_MAX) == ARRAYSIZEOF(CompactionEventStr), "events str len is mismatch");
-  const char *str = "";
-  if (event >= COMPACTION_EVENT_MAX || event < DAG_WAIT_TO_SCHEDULE) {
-    str = "invalid_type";
-  } else {
-    str = CompactionEventStr[event];
-  }
-  return str;
-}
-
-int64_t ObStorageCompactionTimeGuard::to_string(char *buf, const int64_t buf_len) const
-{
-  int64_t pos = 0;
-  int64_t total_cost = 0;
-  J_KV(K_(add_time));
-  common::databuff_printf(buf, buf_len, pos, "|");
-  if (idx_ > DAG_WAIT_TO_SCHEDULE && click_poinsts_[DAG_WAIT_TO_SCHEDULE] > COMPACTION_SHOW_TIME_THRESHOLD) {
-    fmt_ts_to_meaningful_str(buf, buf_len, pos, "wait_schedule_time", click_poinsts_[DAG_WAIT_TO_SCHEDULE]);
-  }
-  for (int64_t idx = COMPACTION_POLICY; idx < idx_; ++idx) {
-    total_cost += click_poinsts_[idx];
-  }
-  if (total_cost > COMPACTION_SHOW_TIME_THRESHOLD) {
-    float ratio = 0;
-    for (int64_t idx = COMPACTION_POLICY; idx < idx_; ++idx) {
-      const uint32_t time_interval = click_poinsts_[idx];
-      ratio = (float)(time_interval)/ total_cost;
-      if (ratio >= COMPACTION_SHOW_PERCENT_THRESHOLD || time_interval >= COMPACTION_SHOW_TIME_THRESHOLD) {
-        fmt_ts_to_meaningful_str(buf, buf_len, pos, get_comp_event_str((CompactionEvent)line_array_[idx]), click_poinsts_[idx]);
-        if (ratio > 0.01) {
-          common::databuff_printf(buf, buf_len, pos, "(%.2f)", ratio);
-        }
-        common::databuff_printf(buf, buf_len, pos, "|");
-      }
-    }
-  }
-  fmt_ts_to_meaningful_str(buf, buf_len, pos, "total", total_cost);
-  if (pos != 0 && pos < buf_len) {
-    buf[pos - 1] = ';';
-  }
-
-  if (pos != 0 && pos < buf_len) {
-    pos -= 1;
-  }
-  return pos;
-}
+ERRSIM_POINT_DEF(SPECIFIED_SERVER_STOP_COMPACTION);
 /*
  *  ----------------------------------------------ObMergeParameter--------------------------------------------------
  */
@@ -194,7 +130,7 @@ int ObMergeParameter::init(
     }
 
     if (OB_SUCC(ret) & merge_scn_ > static_param_.scn_range_.end_scn_) {
-      if (ObMergeType::BACKFILL_TX_MERGE != static_param_.get_merge_type()) {
+      if (!static_param_.is_backfill_) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("merge scn is bigger than scn range but merge type is not backfill, unexpected",
             K(ret), K(merge_scn_), K(static_param_.scn_range_), K(static_param_.get_merge_type()));
@@ -204,7 +140,7 @@ int ObMergeParameter::init(
     }
   }
   if (OB_SUCC(ret)) {
-    STORAGE_LOG(INFO, "success to init ObMergeParameter", K(ret), KPC(this));
+    FLOG_INFO("success to init ObMergeParameter", K(ret), K(idx), KPC(this));
   }
   return ret;
 }
@@ -251,7 +187,7 @@ int64_t ObMergeParameter::to_string(char* buf, const int64_t buf_len) const
   if (OB_ISNULL(buf) || buf_len <= 0) {
   } else {
     J_OBJ_START();
-    J_KV(K_(static_param), K_(merge_range), K_(merge_rowid_range), K_(merge_scn));
+    J_KV(K_(static_param), K_(merge_version_range), K_(merge_range), K_(merge_rowid_range), K_(merge_scn));
     J_OBJ_END();
   }
   return pos;
@@ -367,7 +303,7 @@ int ObTabletMergeDag::get_tablet_and_compat_mode()
   // the last compaction dag is not finished yet, tablet is in old version
   ObLSHandle tmp_ls_handle;
   ObTabletHandle tmp_tablet_handle;
-  if (OB_FAIL(MTL(ObLSService *)->get_ls(ls_id_, tmp_ls_handle, ObLSGetMod::STORAGE_MOD))) {
+  if (OB_FAIL(MTL(ObLSService *)->get_ls(ls_id_, tmp_ls_handle, ObLSGetMod::COMPACT_MODE))) {
     LOG_WARN("failed to get log stream", K(ret), K(ls_id_));
   } else if (OB_FAIL(tmp_ls_handle.get_ls()->get_tablet_svr()->get_tablet(
       tablet_id_, tmp_tablet_handle, 0/*timeout_us*/, storage::ObMDSGetTabletMode::READ_ALL_COMMITED))) {
@@ -536,7 +472,7 @@ int ObTabletMergeDag::fill_dag_key(char *buf, const int64_t buf_len) const
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(databuff_printf(buf, buf_len, "ls_id=%ld tablet_id=%ld", ls_id_.id(), tablet_id_.id()))) {
-    LOG_WARN("failed to fill dag key", K(ret), K(ctx_));
+    LOG_WARN("failed to fill dag key", K(ret), K_(ls_id), K_(tablet_id));
   }
   return ret;
 }
@@ -598,9 +534,9 @@ void ObTabletMergeDag::fill_compaction_progress(
 
   if (OB_NOT_NULL(input_progress)
       && OB_UNLIKELY(OB_SUCCESS != (tmp_ret = input_progress->get_progress_info(progress)))) {
-    LOG_WARN_RET(tmp_ret, "failed to get progress info", K(tmp_ret), K(ctx));
+    LOG_WARN_RET(tmp_ret, "failed to get progress info", K(tmp_ret));
   } else {
-    LOG_INFO("success to get progress info", K(tmp_ret), K(ctx), K(input_progress));
+    LOG_TRACE("success to get progress info", K(tmp_ret), K(input_progress));
   }
 
   if (DAG_STATUS_FINISH == progress.status_) { // fix merge_progress
@@ -649,7 +585,7 @@ void ObTabletMergeDag::fill_diagnose_compaction_progress(
       } else if (OB_TMP_FAIL(input_progress->diagnose_progress(progress))) {
         LOG_WARN_RET(tmp_ret, "failed to diagnose progress info", K(tmp_ret), KPC(ctx), K(progress));
       } else {
-        LOG_INFO("success to diagnose progress", K(tmp_ret), K(ctx), K(progress));
+        LOG_TRACE("success to diagnose progress", K(tmp_ret), K(progress));
       }
     }
   }
@@ -728,7 +664,8 @@ int ObTabletMergeExecuteDag::prepare_init(
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY((!is_minor_merge_type(param.merge_type_)
-      && !is_meta_major_merge(param.merge_type_)) || !result.is_valid())) {
+      && !is_meta_major_merge(param.merge_type_) && !is_mds_minor_merge(param.merge_type_))
+      || !result.is_valid())) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("result is invalid", K(ret), K(result));
   } else {
@@ -836,10 +773,12 @@ int ObTabletMergeDag::alloc_merge_ctx()
     ctx_ = NEW_CTX(ObTabletMiniMergeCtx);
   } else if (is_major_or_meta_merge_type(merge_type)) {
     ctx_ = NEW_CTX(ObTabletMajorMergeCtx);
-  } else if (is_multi_version_merge(merge_type)) {
+  } else if (is_multi_version_merge(merge_type) && !is_mds_minor_merge(merge_type)) {
     ctx_ = NEW_CTX(ObTabletExeMergeCtx);
-  } else if (is_mds_table_merge(merge_type) || is_backfill_tx_merge(merge_type)) {
+  } else if (is_mds_mini_merge(merge_type) || is_backfill_tx_merge(merge_type)) {
     ctx_ = NEW_CTX(ObTabletMergeCtx);
+  } else if (is_mds_minor_merge(merge_type)) {
+    ctx_ = NEW_CTX(ObTabletMdsMinorMergeCtx);
   } else {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("invalid merge type", KR(ret), K(merge_type), KP(ctx_));
@@ -1106,7 +1045,7 @@ int ObTabletMergeTask::generate_next_task(ObITask *&next_task)
     LOG_WARN("not init", K(ret));
   } else if (idx_ + 1 == ctx_->get_concurrent_cnt()) {
     ret = OB_ITER_END;
-  } else if (!is_compaction_dag(dag_->get_type())) {
+  } else if (!is_compaction_dag(dag_->get_type()) && !is_ha_backfill_dag(dag_->get_type())) {
     ret = OB_ERR_SYS;
     LOG_ERROR("dag type not match", K(ret), KPC(dag_));
   } else {
@@ -1138,6 +1077,15 @@ int ObTabletMergeTask::process()
   }
   if (OB_NOT_NULL(ctx_) && ctx_->get_tablet_id().id() > ObTabletID::MIN_USER_TABLET_ID) {
     DEBUG_SYNC(MERGE_TASK_PROCESS);
+  }
+  ret = SPECIFIED_SERVER_STOP_COMPACTION;
+  if (OB_FAIL(ret)) {
+    if (-ret == GCTX.server_id_) {
+      STORAGE_LOG(INFO, "ERRSIM SPECIFIED_SERVER_STOP_COMPACTION", K(ret));
+      return OB_EAGAIN;
+    } else {
+      ret = OB_SUCCESS;
+    }
   }
 #endif
 
@@ -1401,7 +1349,7 @@ int ObBatchFreezeTabletsTask::process()
   ObLSHandle ls_handle;
   ObLS *ls = nullptr;
   int64_t weak_read_ts = 0;
-  if (OB_FAIL(MTL(ObLSService *)->get_ls(param.ls_id_, ls_handle, ObLSGetMod::STORAGE_MOD))) {
+  if (OB_FAIL(MTL(ObLSService *)->get_ls(param.ls_id_, ls_handle, ObLSGetMod::COMPACT_MODE))) {
     LOG_WARN("failed to get log stream", K(ret), K(param));
   } else if (OB_ISNULL(ls = ls_handle.get_ls())) {
     ret = OB_ERR_UNEXPECTED;
@@ -1416,20 +1364,22 @@ int ObBatchFreezeTabletsTask::process()
     const ObTabletSchedulePair &cur_pair = param.tablet_pairs_.at(i);
     ObTabletHandle tablet_handle;
     ObTablet *tablet = nullptr;
+    const bool is_sync = true;
+    const bool need_rewrite_meta = true;
 
     if (OB_UNLIKELY(!cur_pair.is_valid())) {
       tmp_ret = OB_ERR_UNEXPECTED;
       LOG_WARN_RET(tmp_ret, "get invalid tablet pair", K(cur_pair));
     } else if (cur_pair.schedule_merge_scn_ > weak_read_ts) {
       // no need to force freeze
-    } else if (OB_TMP_FAIL(MTL(ObTenantFreezer *)->tablet_freeze(cur_pair.tablet_id_, true/*need_rewrite*/, true/*is_sync*/))) {
+    } else if (OB_TMP_FAIL(MTL(ObTenantFreezer *)->tablet_freeze(cur_pair.tablet_id_, need_rewrite_meta, is_sync))) {
       LOG_WARN_RET(tmp_ret, "failed to force freeze tablet", K(param), K(cur_pair));
       ++fail_freeze_cnt;
     } else if (!MTL(ObTenantTabletScheduler *)->could_major_merge_start()) {
       // merge is suspended
     } else if (OB_TMP_FAIL(ls->get_tablet_svr()->get_tablet(cur_pair.tablet_id_,
                                                             tablet_handle,
-                                                            0/*timeout_us*/,
+                                                            0 /*timeout_us*/,
                                                             storage::ObMDSGetTabletMode::READ_ALL_COMMITED))) {
       LOG_WARN_RET(tmp_ret, "failed to get tablet", K(param), K(cur_pair));
     } else if (FALSE_IT(tablet = tablet_handle.get_obj())) {
@@ -1437,10 +1387,8 @@ int ObBatchFreezeTabletsTask::process()
       // do nothing
     } else if (!tablet->is_data_complete()) {
       // no need to schedule merge
-    } else if (OB_TMP_FAIL(compaction::ObTenantTabletScheduler::schedule_merge_dag(param.ls_id_,
-                                                                                   *tablet,
-                                                                                   MEDIUM_MERGE,
-                                                                                   cur_pair.schedule_merge_scn_))) {
+    } else if (OB_TMP_FAIL(compaction::ObTenantTabletScheduler::schedule_merge_dag(
+                   param.ls_id_, *tablet, MEDIUM_MERGE, cur_pair.schedule_merge_scn_))) {
       if (OB_SIZE_OVERFLOW != tmp_ret && OB_EAGAIN != tmp_ret) {
         ret = tmp_ret;
         LOG_WARN_RET(tmp_ret, "failed to schedule medium merge dag", K(param), K(cur_pair));

@@ -127,12 +127,14 @@ int ObTxCallbackList::append_callback(ObITransCallback *callback,
       }
       ++appended_;
       ATOMIC_INC(&length_);
-      data_size_ += callback->get_data_size();
+      int64_t data_size = callback->get_data_size();
+      data_size_ += data_size;
       if (repos_lc) {
         log_cursor_ = get_tail();
       }
       if (for_replay) {
         ++logged_;
+        logged_data_size_ += data_size;
         ++synced_;
       }
       // Once callback is appended into callback lists, we can not handle the
@@ -262,7 +264,7 @@ int ObTxCallbackList::callback_(ObITxCallbackFunctor &functor,
               log_cursor_ = next;
             }
             if (parallel_start_pos_ == iter) {
-              parallel_start_pos_ = (next == &head_) ? NULL : next;
+              parallel_start_pos_ = (is_reverse || next == &head_) ? NULL : next;
             }
             ++removed_;
             if (iter->need_submit_log()) {
@@ -726,10 +728,21 @@ int ObTxCallbackList::replay_fail(const SCN scn, const bool serial_replay)
   functor.scn_ = scn;
 
   LockGuard guard(*this, LOCK_MODE::LOCK_ALL);
+  //
   // for replay fail of serial log, if parallel replay has happened,
   // must reverse traversal from parallel_start_pos_.prev_
-  ObITransCallback *start_pos = (serial_replay && parallel_start_pos_) ? parallel_start_pos_ : get_guard();
-  ObITransCallback *end_pos = get_guard();
+  //
+  // head_ --> ... -> parallel_start_pos_ -> ... -> head_
+  //
+  ObITransCallback *start_pos = NULL;
+  ObITransCallback *end_pos = NULL;
+  if (serial_replay) {
+    start_pos = parallel_start_pos_ ?: get_guard();
+    end_pos = get_guard();
+  } else {
+    start_pos = get_guard();
+    end_pos = parallel_start_pos_ ? parallel_start_pos_->get_prev() : get_guard();
+  }
   if (OB_FAIL(callback_(functor, start_pos, end_pos, guard.state_))) {
     TRANS_LOG(ERROR, "replay fail failed", K(ret), K(functor));
   } else {
@@ -767,7 +780,7 @@ void ObTxCallbackList::update_checksum(const uint64_t checksum, const SCN checks
   LockGuard guard(*this, LOCK_MODE::LOCK_ITERATE);
   if (checksum_scn.is_max()) {
     if (checksum == 0 && id_ > 0) {
-      // only check extends list, because version before 4.3 with 0 may happen
+      // only check extends list, because version before 4.2.4 with 0 may happen
       // and they will be replayed into first list (id_ equals to 0)
       TRANS_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "checksum should not be 0 if checksum_scn is max", KPC(this));
     }

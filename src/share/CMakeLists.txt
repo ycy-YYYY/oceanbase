@@ -8,6 +8,7 @@ ob_set_subtarget(ob_share ALONE
   aggregate/sum.cpp
   aggregate/processor.cpp
   aggregate/single_row.cpp
+  aggregate/approx_count_distinct.cpp
 )
 
 file(GLOB SCHEMA_CPPS "inner_table/ob_inner_table_schema.*.cpp")
@@ -65,6 +66,7 @@ ob_set_subtarget(ob_share cache
   cache/ob_working_set_mgr.cpp
   cache/ob_kvcache_hazard_version.cpp
   cache/ob_kvcache_pre_warmer.cpp
+  cache/ob_kvcache_pointer_swizzle.cpp
 )
 
 ob_set_subtarget(ob_share common
@@ -115,6 +117,7 @@ ob_set_subtarget(ob_share common
   ob_label_security_os.cpp
   ob_leader_election_waiter.cpp
   ob_lease_struct.cpp
+  ob_heartbeat_handler.cpp
   ob_heartbeat_struct.cpp
   ob_list_parser.cpp
   ob_local_device.cpp
@@ -188,6 +191,7 @@ ob_set_subtarget(ob_share common
   ob_throttling_utils.cpp
   ob_storage_ha_diagnose_struct.cpp
   ob_storage_ha_diagnose_operator.cpp
+  ob_compatibility_control.cpp
 )
 
 ob_set_subtarget(ob_share common_mixed
@@ -256,6 +260,7 @@ ob_set_subtarget(ob_share common_mixed
   table/ob_table.cpp
   table/ob_table_rpc_struct.cpp
   table/ob_table_load_define.cpp
+  table/ob_table_load_dml_stat.cpp
   table/ob_table_load_row.cpp
   transfer/ob_transfer_info.cpp
   transfer/ob_transfer_task_operator.cpp
@@ -289,6 +294,7 @@ ob_set_subtarget(ob_share common_mixed
   ash/ob_active_sess_hist_task.cpp
   throttle/ob_share_throttle_define.cpp
   throttle/ob_throttle_common.cpp
+  restore/ob_restore_data_mode.cpp
 )
 
 ob_set_subtarget(ob_share tablet
@@ -564,6 +570,7 @@ ob_set_subtarget(ob_share aggregate
   aggregate/iaggregate.cpp
   aggregate/count.cpp
   aggregate/min_max.cpp
+  aggregate/sys_bit.cpp
 )
 
 ob_add_new_object_target(ob_share ob_share)

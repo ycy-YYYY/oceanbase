@@ -148,8 +148,11 @@ static const uint64_t OB_MIN_ID  = 0;//used for lower_bound
 // table_flags stored in __all_table.table_flag
 #define CASCADE_RLS_OBJECT_FLAG (INT64_C(1) << 0)
 #define EXTERNAL_TABLE_USER_SPECIFIED_PARTITION_FLAG (INT64_C(1) << 1)
-#define EXTERNAL_TABLE_AUTO_REFRESH_FLAG (INT64_C(1) << 2)
-#define EXTERNAL_TABLE_CREATE_ON_REFRESH_FLAG (INT64_C(1) << 3)
+
+#define EXTERNAL_TABLE_AUTO_REFRESH_IMMEDIATE_FLAG (INT64_C(1) << 2)
+#define EXTERNAL_TABLE_AUTO_REFRESH_INTERVAL_FLAG (INT64_C(1) << 3)
+#define EXTERNAL_TABLE_AUTO_REFRESH_FLAG_OFFSET 2
+#define EXTERNAL_TABLE_AUTO_REFRESH_FLAG_BITS 2
 
 // schema array size
 static const int64_t SCHEMA_SMALL_MALLOC_BLOCK_SIZE = 64;
@@ -327,11 +330,16 @@ enum ObIndexType
   // new index types for json multivalue index
   INDEX_TYPE_NORMAL_MULTIVALUE_LOCAL = 23,
   INDEX_TYPE_UNIQUE_MULTIVALUE_LOCAL = 24,
+  INDEX_TYPE_VEC_ROWKEY_VID_LOCAL = 25,
+  INDEX_TYPE_VEC_VID_ROWKEY_LOCAL = 26,
+  INDEX_TYPE_VEC_DELTA_BUFFER_LOCAL = 27,
+  INDEX_TYPE_VEC_INDEX_ID_LOCAL = 28,
+  INDEX_TYPE_VEC_INDEX_SNAPSHOT_DATA_LOCAL = 29,
   /*
   * Attention!!! when add new index type,
   * need update func ObSimpleTableSchemaV2::should_not_validate_data_index_ckm()
   */
-  INDEX_TYPE_MAX = 25,
+  INDEX_TYPE_MAX = 30,
 };
 
 // using type for index
@@ -689,6 +697,44 @@ inline bool is_fts_or_multivalue_index(ObIndexType index_type)
 inline bool is_fts_or_multivalue_index_aux(ObIndexType index_type)
 {
   return is_multivalue_index_aux(index_type) || is_fts_index_aux(index_type);
+}
+
+inline bool is_vec_rowkey_vid_type(const ObIndexType index_type)
+{
+  return index_type == INDEX_TYPE_VEC_ROWKEY_VID_LOCAL;
+}
+
+inline bool is_vec_vid_rowkey_type(const ObIndexType index_type)
+{
+  return index_type == INDEX_TYPE_VEC_VID_ROWKEY_LOCAL;
+}
+
+inline bool is_vec_delta_buffer_type(const ObIndexType index_type)
+{
+  return index_type == INDEX_TYPE_VEC_DELTA_BUFFER_LOCAL;
+}
+
+inline bool is_vec_index_id_type(const ObIndexType index_type)
+{
+  return index_type == INDEX_TYPE_VEC_INDEX_ID_LOCAL;
+}
+
+inline bool is_vec_index_snapshot_data_type(const ObIndexType index_type)
+{
+  return index_type == INDEX_TYPE_VEC_INDEX_SNAPSHOT_DATA_LOCAL;
+}
+
+inline bool is_built_in_vec_index(const ObIndexType index_type)
+{
+  return is_vec_rowkey_vid_type(index_type) ||
+         is_vec_vid_rowkey_type(index_type) ||
+         is_vec_delta_buffer_type(index_type) ||
+         is_vec_index_snapshot_data_type(index_type);
+}
+
+inline bool is_vec_index(const ObIndexType index_type)
+{
+  return is_vec_index_id_type(index_type) || is_built_in_vec_index(index_type);
 }
 
 inline bool is_index_local_storage(ObIndexType index_type)
@@ -2260,6 +2306,9 @@ protected:
   common::ObRowkey low_bound_val_;
   ObTabletID tablet_id_;
   common::ObString external_location_;
+  // split_source_tablet_id_ will not be persisted in inner_table.
+  // it is only used when attempting to split partition.
+  ObTabletID split_source_tablet_id_;
 };
 
 class ObSubPartition;
@@ -4240,6 +4289,11 @@ enum ObUserType
   OB_TYPE_MAX,
 };
 
+#define PROXY_USER_ACTIVATE_ALL_ROLES 1
+#define PROXY_USER_NO_ROLES_BE_ACTIVATED 2
+#define PROXY_USER_MAY_ACTIVATE_ROLE 4
+#define PROXY_USER_ROLE_CAN_NOT_BE_ACTIVATED 8
+
 struct ObProxyInfo
 {
   OB_UNIS_VERSION(1);
@@ -4256,6 +4310,7 @@ public:
   }
   void reset();
   int assign(const ObProxyInfo &other);
+  int add_role_id(const uint64_t role_id);
   uint64_t get_role_id_by_idx(const int64_t idx) const;
 
   TO_STRING_KV(K_(user_id), K_(proxy_flags), K(ObArrayWrap<uint64_t>(role_ids_, role_id_cnt_)), K_(role_id_cnt));
@@ -4385,6 +4440,14 @@ public:
   const common::ObSEArray<uint64_t, 8>& get_grantee_id_array() const { return grantee_id_array_; }
   const common::ObSEArray<uint64_t, 8>& get_role_id_array() const { return role_id_array_; }
   const common::ObSEArray<uint64_t, 8>& get_role_id_option_array() const { return role_id_option_array_; }
+  uint64_t get_proxied_user_info_cnt() const { return proxied_user_info_cnt_; }
+  uint64_t get_proxy_user_info_cnt() const { return proxy_user_info_cnt_; }
+  const ObProxyInfo* get_proxied_user_info_by_idx(uint64_t idx) const;
+  ObProxyInfo* get_proxied_user_info_by_idx_for_update(uint64_t idx);
+  const ObProxyInfo* get_proxy_user_info_by_idx(uint64_t idx) const;
+  ObProxyInfo* get_proxy_user_info_by_idx_for_update(uint64_t idx);
+  int add_proxied_user_info(const ObProxyInfo &proxied_info);
+  int add_proxy_user_info(const ObProxyInfo &proxy_info);
   int add_grantee_id(const uint64_t id) { return grantee_id_array_.push_back(id); }
   int add_role_id(const uint64_t id,
                   const uint64_t admin_option = NO_OPTION,
@@ -4413,7 +4476,16 @@ public:
               );
   bool role_exists(const uint64_t role_id, const uint64_t option) const;
   int get_seq_by_role_id(uint64_t role_id, uint64_t &seq) const;
+  inline void set_flags(const int64_t flags) { user_flags_.flags_ = flags; }
+  inline int64_t get_flags() const { return user_flags_.flags_; }
+  inline void set_proxy_activated_flag(const ObProxyActivatedFlag flag) {
+    static_assert(ObProxyActivatedFlag::PROXY_ACTIVATED_MAX == 2, "proxy activated flag not valid");
+    user_flags_.proxy_activated_flag_ = flag;
+  }
+  inline ObProxyActivatedFlag get_proxy_activated_flag() { return (ObProxyActivatedFlag)(user_flags_.proxy_activated_flag_); }
+
 private:
+  int add_proxy_info_(ObProxyInfo **&arr, uint64_t &capacity, uint64_t &cnt, const ObProxyInfo &proxy_info);
   int assign_proxy_info_array_(ObProxyInfo **src_arr,
                               const uint64_t src_cnt,
                               const uint64_t src_capacity,
@@ -5499,7 +5571,11 @@ struct ObSessionPrivInfo
       user_priv_set_(0),
       db_priv_set_(0),
       effective_tenant_id_(common::OB_INVALID_ID),
-      enable_role_id_array_()
+      enable_role_id_array_(),
+      security_version_(0),
+      proxy_user_id_(),
+      proxy_user_name_(),
+      proxy_host_name_()
   {}
   ObSessionPrivInfo(const uint64_t tenant_id,
                     const uint64_t effective_tenant_id,
@@ -5515,11 +5591,22 @@ struct ObSessionPrivInfo
         user_priv_set_(user_priv_set),
         db_priv_set_(db_priv_set),
         effective_tenant_id_(effective_tenant_id),
-        enable_role_id_array_()
+        enable_role_id_array_(),
+        security_version_(0),
+        proxy_user_id_(),
+        proxy_user_name_(),
+        proxy_host_name_()
   {}
 
   virtual ~ObSessionPrivInfo() {}
 
+  bool is_valid() const
+  {
+    return (tenant_id_ != common::OB_INVALID_ID) && (user_id_ != common::OB_INVALID_ID);
+  }
+
+  bool is_tenant_changed() const { return common::OB_INVALID_ID != effective_tenant_id_
+                                          && tenant_id_ != effective_tenant_id_; }
   void reset()
   {
     tenant_id_ = common::OB_INVALID_ID;
@@ -5531,17 +5618,16 @@ struct ObSessionPrivInfo
     user_priv_set_ = 0;
     db_priv_set_ = 0;
     enable_role_id_array_.reset();
+    security_version_ = 0;
+    proxy_user_id_ = common::OB_INVALID_ID;
+    proxy_user_name_.reset();
+    proxy_host_name_.reset();
   }
-  bool is_valid() const
-  {
-    return (tenant_id_ != common::OB_INVALID_ID) && (user_id_ != common::OB_INVALID_ID);
-  }
-  bool is_tenant_changed() const { return common::OB_INVALID_ID != effective_tenant_id_
-                                          && tenant_id_ != effective_tenant_id_; }
   void set_effective_tenant_id(uint64_t effective_tenant_id) { effective_tenant_id_ = effective_tenant_id; }
   uint64_t get_effective_tenant_id() { return effective_tenant_id_; }
   virtual TO_STRING_KV(K_(tenant_id), K_(effective_tenant_id), K_(user_id), K_(user_name), K_(host_name),
-                       K_(db), K_(user_priv_set), K_(db_priv_set));
+                       K_(db), K_(user_priv_set), K_(db_priv_set),  K_(security_version), K_(proxy_user_id), K_(proxy_user_name),
+                       K_(proxy_host_name));
 
   uint64_t tenant_id_; //for privilege.Current login tenant. if normal tenant access
                        //sys tenant's object should use other method for priv checking.
@@ -5554,6 +5640,10 @@ struct ObSessionPrivInfo
   // Only used for privilege check to determine whether there are currently tenants, otherwise the value is illegal
   uint64_t effective_tenant_id_;
   common::ObSEArray<uint64_t, 8> enable_role_id_array_;
+  uint64_t security_version_;
+  uint64_t proxy_user_id_;
+  common::ObString proxy_user_name_;
+  common::ObString proxy_host_name_;
 };
 
 struct ObUserLoginInfo
@@ -5564,7 +5654,7 @@ struct ObUserLoginInfo
                   const common::ObString &client_ip,
                   const common::ObString &passwd,
                   const common::ObString &db)
-      : tenant_name_(tenant_name), user_name_(user_name), client_ip_(client_ip),
+      : tenant_name_(tenant_name), user_name_(user_name), proxied_user_name_(), client_ip_(client_ip),
         passwd_(passwd), db_(db), scramble_str_()
   {}
 
@@ -5574,13 +5664,25 @@ struct ObUserLoginInfo
                   const common::ObString &passwd,
                   const common::ObString &db,
                   const common::ObString &scramble_str)
-      : tenant_name_(tenant_name), user_name_(user_name), client_ip_(client_ip),
+      : tenant_name_(tenant_name), user_name_(user_name), proxied_user_name_(), client_ip_(client_ip),
         passwd_(passwd), db_(db), scramble_str_(scramble_str)
   {}
 
-  TO_STRING_KV(K_(tenant_name), K_(user_name), K_(client_ip), K_(db), K_(scramble_str));
+  ObUserLoginInfo(const common::ObString &tenant_name,
+                  const common::ObString &user_name,
+                  const common::ObString &proxied_user_name,
+                  const common::ObString &client_ip,
+                  const common::ObString &passwd,
+                  const common::ObString &db,
+                  const common::ObString &scramble_str)
+      : tenant_name_(tenant_name), user_name_(user_name), proxied_user_name_(proxied_user_name), client_ip_(client_ip),
+        passwd_(passwd), db_(db), scramble_str_(scramble_str)
+  {}
+
+  TO_STRING_KV(K_(tenant_name), K_(user_name), K_(proxied_user_name), K_(client_ip), K_(db), K_(scramble_str));
   common::ObString tenant_name_;
   common::ObString user_name_;
+  common::ObString proxied_user_name_;
   common::ObString client_ip_;//client ip for current user
   common::ObString passwd_;
   common::ObString db_;
@@ -5957,7 +6059,9 @@ public:
                        K_(reverse_cluster_name),
                        K_(reverse_tenant_name), K_(reverse_user_name),
                        K_(reverse_password), K_(plain_reverse_password),
-                       K_(reverse_host_addr));
+                       K_(reverse_host_addr),
+                       K_(host_name), K_(host_port),
+                       K_(reverse_host_name), K_(reverse_host_port));
 private:
   int dblink_encrypt(common::ObString &src, common::ObString &dst);
   int dblink_decrypt(common::ObString &src, common::ObString &dst);
@@ -5990,6 +6094,10 @@ protected:
   common::ObAddr reverse_host_addr_;  // used for reverse dblink
   common::ObString database_name_; // used for mysql dblink
   bool if_not_exist_; // used for mysql dblink
+  common::ObString host_name_; // ip string or domin name
+  int32_t host_port_;
+  common::ObString reverse_host_name_; // ip string or domin name
+  int32_t reverse_host_port_;
 };
 
 struct ObTenantDbLinkId
@@ -6091,7 +6199,9 @@ public:
          + reverse_user_name_.length() + 1
          + reverse_password_.length() + 1
          + plain_reverse_password_.length() + 1
-         + database_name_.length() + 1;
+         + database_name_.length() + 1
+         + host_name_.length() + 1
+         + reverse_host_name_.length() + 1;
   }
 };
 

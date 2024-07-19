@@ -3792,9 +3792,12 @@ static const obmysql::EMySQLFieldType opaque_ob_type_to_mysql_type[ObMaxType] =
   obmysql::EMySQLFieldType::MYSQL_TYPE_ORA_BLOB,                          /* ObLobType */
   obmysql::EMySQLFieldType::MYSQL_TYPE_JSON,                              /* ObJsonType */
   obmysql::EMySQLFieldType::MYSQL_TYPE_GEOMETRY,                          /* ObGeometryType */
-  obmysql::EMySQLFieldType::MYSQL_TYPE_COMPLEX,       /* ObUserDefinedSQLType, buf for xml we use long_blob type currently? */
-  obmysql::EMySQLFieldType::MYSQL_TYPE_NEWDECIMAL,                       /* ObDecimalIntType */
-  obmysql::EMySQLFieldType::MYSQL_TYPE_COMPLEX,       /* ObCollectionSQLType */
+  obmysql::EMySQLFieldType::MYSQL_TYPE_COMPLEX,                           /* ObUserDefinedSQLType, buf for xml we use long_blob type currently? */
+  obmysql::EMySQLFieldType::MYSQL_TYPE_NEWDECIMAL,                        /* ObDecimalIntType */
+  obmysql::EMySQLFieldType::MYSQL_TYPE_COMPLEX,                           /* ObCollectionSQLType */
+  obmysql::EMySQLFieldType::MYSQL_TYPE_NOT_DEFINED,                       /* reserved for ObMySQLDateType */
+  obmysql::EMySQLFieldType::MYSQL_TYPE_NOT_DEFINED,                       /* reserved for ObMySQLDateTimeType */
+  obmysql::EMySQLFieldType::MYSQL_TYPE_BLOB,                              /* ObRoaringBitmapType */
   /* ObMaxType */
 };
 
@@ -5130,7 +5133,7 @@ int ObIJsonBase::to_uint(uint64_t &value, bool fail_on_negative, bool check_rang
       int err = 0;
       char *endptr = NULL;
       bool is_unsigned = true;
-      if (OB_ISNULL(data)) {
+      if (OB_ISNULL(data) || length == 0) {
         ret = OB_ERR_NULL_VALUE;
         LOG_WARN("data is null", K(ret));
       } else if (data[0] == '-') {

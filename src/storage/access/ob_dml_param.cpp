@@ -251,7 +251,9 @@ DEF_TO_STRING(ObDMLBaseParam)
        K_(spec_seq_no),
        K_(snapshot),
        K_(branch_id),
-       K_(check_schema_version));
+       K_(direct_insert_task_id),
+       K_(check_schema_version),
+       K_(ddl_task_id));
   J_OBJ_END();
   return pos;
 }
@@ -295,6 +297,7 @@ DEF_TO_STRING(ObTableScanParam)
        K_(sample_info),
        K_(need_scn),
        K_(need_switch_param),
+       K_(is_mds_query),
        K_(fb_read_tx_uncommitted),
        K_(external_file_format),
        K_(external_file_location));

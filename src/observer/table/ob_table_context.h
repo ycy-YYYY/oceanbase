@@ -116,7 +116,10 @@ struct ObTableAssignment : public sql::ObAssignment
   bool is_inc_or_append_; // for append/increment
   sql::ObColumnRefRawExpr *delta_expr_; // for append/increment
   common::ObObj assign_value_;
-  bool is_assigned_; // did user assign specific value or not
+  // did user assign specific value or not,
+  // e.g. virtual generated column will be added into assignment internally
+  //     when its dependent column is assigned by user but its is_assigned_ will false
+  bool is_assigned_;
 };
 
 enum ObTableExecutorType
@@ -183,6 +186,7 @@ public:
     is_ttl_table_ = false;
     is_skip_scan_ = false;
     is_client_set_put_ = false;
+    has_lob_column_ = false;
     binlog_row_image_type_ = ObBinlogRowImage::FULL;
     is_full_table_scan_ = false;
   }
@@ -220,6 +224,7 @@ public:
                K_(is_ttl_table),
                K_(is_skip_scan),
                K_(is_client_set_put),
+               K_(has_lob_column),
                K_(binlog_row_image_type));
 public:
   //////////////////////////////////////// getter ////////////////////////////////////////////////
@@ -265,7 +270,7 @@ public:
   OB_INLINE common::ObQueryFlag::ScanOrder get_scan_order() const { return scan_order_; }
   OB_INLINE ObIArray<sql::ObRawExpr *>& get_filter_exprs() { return filter_exprs_; }
   OB_INLINE const ObIArray<sql::ObRawExpr *>& get_filter_exprs() const { return filter_exprs_; }
-  OB_INLINE const ObIArray<sql::ObRawExpr *>& get_select_exprs() const { return select_exprs_; }
+  OB_INLINE const ObIArray<sql::ObColumnRefRawExpr *>& get_select_exprs() const { return select_exprs_; }
   OB_INLINE const ObIArray<sql::ObRawExpr *>& get_rowkey_exprs() const { return rowkey_exprs_; }
   OB_INLINE const ObIArray<sql::ObRawExpr *>& get_index_exprs() const { return index_exprs_; }
   OB_INLINE const share::schema::ObTableSchema* get_index_schema() const { return index_schema_; }
@@ -318,6 +323,7 @@ public:
   OB_INLINE const common::ObIArray<uint64_t> &get_agg_projs() const { return agg_cell_proj_; }
   OB_INLINE ObPhysicalPlanCtx *get_physical_plan_ctx() { return exec_ctx_.get_physical_plan_ctx(); }
   OB_INLINE bool has_auto_inc() { return has_auto_inc_; }
+  OB_INLINE bool has_lob_column() const { return has_lob_column_; }
   //////////////////////////////////////// setter ////////////////////////////////////////////////
   // for common
   OB_INLINE void set_init_flag(bool is_init) { is_init_ = is_init; }
@@ -398,6 +404,7 @@ public:
   int get_column_item_by_expr(sql::ObRawExpr *raw_expr, const ObTableColumnItem *&item) const;
   int get_column_item_by_expr(sql::ObColumnRefRawExpr *expr, const ObTableColumnItem *&item) const;
   int get_expr_from_column_items(const common::ObString &col_name, sql::ObRawExpr *&expr) const;
+  int get_expr_from_column_items(const common::ObString &col_name, sql::ObColumnRefRawExpr *&expr) const;
   int get_expr_from_assignments(const common::ObString &col_name, sql::ObRawExpr *&expr) const;
   int check_insert_up_can_use_put(bool &use_put);
 public:
@@ -419,7 +426,7 @@ private:
   int init_dml_related_tid();
   // for update
   int init_assignments(const ObTableEntity &entity);
-  int add_stored_generated_column_assignment(const ObTableAssignment &assign);
+  int add_generated_column_assignment(const ObTableAssignment &assign);
   // Init size of aggregation project array.
   //
   // @param [in]  size      The agg size
@@ -487,7 +494,7 @@ private:
   bool is_get_;
   bool read_latest_; // default true, false in single get and multi get
   common::ObQueryFlag::ScanOrder scan_order_;
-  common::ObSEArray<sql::ObRawExpr*, 32> select_exprs_;
+  common::ObSEArray<sql::ObColumnRefRawExpr*, 32> select_exprs_;
   common::ObSEArray<sql::ObRawExpr*, 16> rowkey_exprs_;
   common::ObSEArray<sql::ObRawExpr*, 16> index_exprs_;
   common::ObSEArray<sql::ObRawExpr*, 8> filter_exprs_;
@@ -523,6 +530,7 @@ private:
   bool is_skip_scan_;
   // for put
   bool is_client_set_put_;
+  bool has_lob_column_;
   int64_t binlog_row_image_type_;
   // for audit
   bool is_full_table_scan_;

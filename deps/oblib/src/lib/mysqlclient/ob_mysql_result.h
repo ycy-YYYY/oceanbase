@@ -719,6 +719,30 @@
     } \
   }
 
+#define EXTRACT_VARCHAR_FIELD_MYSQL_SKIP_RET_WITH_COLUMN_INFO(result, column_name, field, column_is_null, column_not_exist) \
+  if (OB_SUCC(ret)) \
+  { \
+    column_is_null = false; \
+    column_not_exist = false; \
+    if (OB_SUCCESS != (ret = (result).get_varchar(column_name, field))) \
+    { \
+      if (OB_ERR_NULL_VALUE == ret) \
+      { \
+        column_is_null = true; \
+        ret = OB_SUCCESS; \
+      } \
+      else if (OB_ERR_COLUMN_NOT_FOUND == ret) \
+      { \
+        column_not_exist = true; \
+        ret = OB_SUCCESS; \
+      } \
+      else \
+      { \
+        SQL_LOG(WARN, "get varchar failed", KR(ret)); \
+      } \
+    } \
+  }
+
 // Macro with default value
 // 1. skip_null_error: indicates whether to ignore NULL values
 // 2. skip_column_error: indicates whether to ignore column errors, and pass in ObSchemaService::g_ignore_column_retrieve_error_
@@ -1063,7 +1087,7 @@
         res_obj.meta_.set_collation_level(CS_LEVEL_IMPLICIT); \
         ret = (class_obj).set_##column_name(res_obj); \
       } \
-      else if (column.is_identity_column() || ob_is_string_type(data_type) || ob_is_geometry(data_type) || ob_is_collection_sql_type(data_type)) \
+      else if (column.is_identity_column() || ob_is_string_type(data_type) || ob_is_geometry(data_type)|| ob_is_roaringbitmap(data_type) || ob_is_collection_sql_type(data_type)) \
       { \
         res_obj.set_string(data_type, str_value); \
         res_obj.meta_.set_collation_type(column.get_collation_type());  \
@@ -1075,7 +1099,7 @@
           SQL_LOG(WARN, "outrow lob unsupported", "column_name", #column_name); \
         } \
         else { \
-          if (ob_is_text_tc(data_type) || ob_is_geometry(data_type) || ob_is_collection_sql_type(data_type)) { res_obj.set_inrow(); } \
+          if (ob_is_text_tc(data_type) || ob_is_geometry(data_type) || ob_is_roaringbitmap(data_type) || ob_is_collection_sql_type(data_type)) { res_obj.set_inrow(); } \
           ret = (class_obj).set_##column_name(res_obj); \
         } \
       }                                               \

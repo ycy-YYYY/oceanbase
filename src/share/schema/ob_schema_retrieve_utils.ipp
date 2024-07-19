@@ -139,8 +139,7 @@ int ObSchemaRetrieveUtils::retrieve_schema(
   ObSchemaRetrieveHelper<TABLE_SCHEMA, SCHEMA> helper(table_schema_array);
   while (OB_SUCC(ret) && common::OB_SUCCESS == (ret = result.next())) {
     bool is_deleted = false;
-    SCHEMA &current = helper.get_current();
-    current.reset();
+    SCHEMA &current = helper.get_and_reset_current();
     if (OB_FAIL(helper.fill_current(tenant_id, check_deleted, result, current, is_deleted))) {
       SHARE_SCHEMA_LOG(WARN, "fill schema failed", K(ret));
     } else if (current.get_table_id() == last_table_id
@@ -213,13 +212,17 @@ int ObSchemaRetrieveUtils::retrieve_column_group_schema(const uint64_t tenant_id
     // store current_schema and last_schema
     bool is_last_deleted = false;
     ObColumnGroupSchema *last_schema = NULL;
-    ObColumnGroupSchema tmp_schemas[2]; // to avoid full copy
+    ObArenaAllocator current_allocator("ColGroScheRetri");
+    ObArenaAllocator another_allocator("ColGroScheRetri");
+    ObColumnGroupSchema tmp_schemas[2] = {ObColumnGroupSchema(&current_allocator),
+                                          ObColumnGroupSchema(&another_allocator)};
     int64_t tmp_idx = 0;
     while (OB_SUCC(ret) && OB_SUCC(result.next())) {
       bool is_deleted = false;
       uint64_t cur_table_id = common::OB_INVALID_ID;
       ObColumnGroupSchema &current = tmp_schemas[tmp_idx];
       current.reset();
+      0 == tmp_idx ? current_allocator.reuse() : another_allocator.reuse();
 
       if (OB_FAIL(ObSchemaRetrieveUtils::fill_column_group_info(check_deleted, result, current, cur_table_id, is_deleted))) {
         SHARE_SCHEMA_LOG(WARN, "fail to fill column_group schema", KR(ret));
@@ -586,7 +589,7 @@ int ObSubPartSchemaRetrieveHelper<TABLE_SCHEMA>::add(ObSubPartition &p)
 template<typename TABLE_SCHEMA>
 int64_t ObSubPartSchemaRetrieveHelper<TABLE_SCHEMA>::get_curr_schema_id()
 {
-  return schemas_[index_].get_sub_part_id();
+  return index_ == 0 ? current_schema_.get_sub_part_id() : another_schema_.get_sub_part_id();
 }
 
 template<typename TABLE_SCHEMA>
@@ -665,7 +668,7 @@ int ObSchemaRetrieveHelper<TABLE_SCHEMA, SCHEMA>::add(SCHEMA &p)
 template<typename TABLE_SCHEMA, typename SCHEMA>
 int64_t ObSchemaRetrieveHelper<TABLE_SCHEMA, SCHEMA>::get_curr_schema_id()
 {
-  return ObSchemaRetrieveHelperBase<TABLE_SCHEMA, SCHEMA>::get_schema_id(schemas_[index_]);
+  return ObSchemaRetrieveHelperBase<TABLE_SCHEMA, SCHEMA>::get_schema_id(index_ == 0 ? current_schema_ : another_schema_);
 }
 
 template<typename TABLE_SCHEMA, typename SCHEMA>
@@ -698,8 +701,7 @@ int ObSchemaRetrieveUtils::retrieve_schema(const uint64_t tenant_id,
     ObSchemaRetrieveHelper<TABLE_SCHEMA, SCHEMA> helper(*table_schema);
     while (OB_SUCC(ret) && common::OB_SUCCESS == (ret = result.next())) {
       bool is_deleted = false;
-      SCHEMA &current = helper.get_current();
-      current.reset();
+      SCHEMA &current = helper.get_and_reset_current();
       if (OB_FAIL(helper.fill_current(tenant_id, check_deleted, result, current, is_deleted))) {
         SHARE_SCHEMA_LOG(WARN, "fill schema fail", K(ret));
       } else if (table_id != current.get_table_id()) {
@@ -839,8 +841,7 @@ int ObSchemaRetrieveUtils::retrieve_subpart_schema(
                                                      is_subpart_template);
   while (OB_SUCC(ret) && OB_SUCC(result.next())) {
     bool is_deleted = false;
-    ObSubPartition &current = helper.get_current();
-    current.reset();
+    ObSubPartition &current = helper.get_and_reset_current();
     if (OB_FAIL(helper.fill_current(tenant_id, check_deleted,
                                     result, current, is_deleted))) {
       SHARE_SCHEMA_LOG(WARN, "fill schema fail", K(ret));
@@ -889,8 +890,7 @@ int ObSchemaRetrieveUtils::retrieve_subpart_schema(
                                                        is_subpart_template);
     while (OB_SUCC(ret) && OB_SUCC(result.next())) {
       bool is_deleted = false;
-      ObSubPartition &current = helper.get_current();
-      current.reset();
+      ObSubPartition &current = helper.get_and_reset_current();
       if (OB_FAIL(helper.fill_current(tenant_id, check_deleted,
                                       result, current, is_deleted))) {
         SHARE_SCHEMA_LOG(WARN, "fill schema fail", K(ret));
@@ -1501,6 +1501,8 @@ int ObSchemaRetrieveUtils::fill_table_schema(
         uint64_t, true, true/*ignore_column_error*/, COLUMN_GROUP_START_ID);
     EXTRACT_INT_FIELD_TO_CLASS_MYSQL_WITH_DEFAULT_VALUE(result, column_store, table_schema,
         bool, true, true/*ignore_column_error*/, false);
+    EXTRACT_INT_FIELD_TO_CLASS_MYSQL_WITH_DEFAULT_VALUE(result, auto_increment_cache_size, table_schema,
+        int64_t, true, true, 0);
   }
   if (OB_SUCC(ret) && OB_FAIL(fill_sys_table_lob_tid(table_schema))) {
     SHARE_SCHEMA_LOG(WARN, "fail to fill lob table id for inner table", K(ret), K(table_schema.get_table_id()));
@@ -1912,6 +1914,17 @@ int ObSchemaRetrieveUtils::fill_user_schema(
     user_info.set_priv((priv_others & 1) != 0 ? OB_PRIV_EXECUTE : 0);
     user_info.set_priv((priv_others & 2) != 0 ? OB_PRIV_ALTER_ROUTINE : 0);
     user_info.set_priv((priv_others & 4) != 0 ? OB_PRIV_CREATE_ROUTINE : 0);
+    user_info.set_priv((priv_others & 8) != 0 ? OB_PRIV_CREATE_TABLESPACE : 0);
+    user_info.set_priv((priv_others & 16) != 0 ? OB_PRIV_SHUTDOWN : 0);
+    user_info.set_priv((priv_others & 32) != 0 ? OB_PRIV_RELOAD : 0);
+
+    if (OB_SUCC(ret)) {
+      int64_t default_flags = 0;
+      //In user schema def, flag is a int column.
+      //int is int64_t, not uint64_t. So only 63 bit can be used.
+      EXTRACT_INT_FIELD_TO_CLASS_MYSQL_WITH_DEFAULT_VALUE(result, flags, user_info, int64_t,
+                                              true/* skip null error*/, ignore_column_error, default_flags);
+    }
   }
   return ret;
 }
@@ -1991,6 +2004,145 @@ int ObSchemaRetrieveUtils::retrieve_role_grantee_map_schema(
     // iterate next <key_id, value_id>
     prev_key_id = is_fetch_role ? grantee_id : role_id;
     prev_value_id = is_fetch_role ? role_id : grantee_id;
+  }
+  if (ret != common::OB_ITER_END) {
+    SHARE_SCHEMA_LOG(WARN, "fail to get role grantee map. iter quit. ", K(ret));
+  } else {
+    ret = common::OB_SUCCESS;
+  }
+  return ret;
+}
+
+template<typename T>
+int ObSchemaRetrieveUtils::retrieve_proxy_info_schema(
+    const uint64_t tenant_id,
+    T &result,
+    const bool is_fetch_proxy,
+    ObArray<ObUserInfo> &user_array)
+{
+  int ret = common::OB_SUCCESS;
+  uint64_t prev_key_id = common::OB_INVALID_ID;
+  uint64_t prev_value_id = common::OB_INVALID_ID;
+  ObArenaAllocator allocator(ObModIds::OB_TEMP_VARIABLES);
+  while (OB_SUCC(ret) && OB_SUCC(result.next())) {
+    allocator.reset();
+    uint64_t proxy_user_id = common::OB_INVALID_ID;
+    uint64_t client_user_id = common::OB_INVALID_ID;
+    bool is_deleted = false;
+    uint64_t flags = 0;
+    uint64_t credential_type = 0;
+    EXTRACT_INT_FIELD_MYSQL(result, "proxy_user_id", proxy_user_id, uint64_t);
+    EXTRACT_INT_FIELD_MYSQL(result, "client_user_id", client_user_id, uint64_t);
+    EXTRACT_INT_FIELD_MYSQL(result, "is_deleted", is_deleted, bool);
+
+    ObUserInfo *user_info = NULL;
+    if (OB_FAIL(ret)) {
+    } else if (is_deleted) {
+      SHARE_SCHEMA_LOG(INFO, "proxy is deleted", K(proxy_user_id), K(client_user_id));
+    } else if (prev_key_id == (is_fetch_proxy ? proxy_user_id : client_user_id)
+            && prev_value_id == (is_fetch_proxy ? client_user_id : proxy_user_id)) {
+      ret = common::OB_SUCCESS;
+    } else {
+      EXTRACT_INT_FIELD_MYSQL(result, "flags", flags, uint64_t);
+      EXTRACT_INT_FIELD_MYSQL(result, "credential_type", credential_type, uint64_t);
+      if (OB_FAIL(ret)) {
+      } else if (OB_FAIL(ObSchemaRetrieveUtils::find_user_info(is_fetch_proxy ? proxy_user_id : client_user_id,
+            user_array, user_info))) {
+        SHARE_SCHEMA_LOG(WARN, "failed to find user info", K(ret), K(client_user_id), K(proxy_user_id));
+      } else if (NULL == user_info) {
+        SHARE_SCHEMA_LOG(INFO, "user info is null", K(ret), K(is_fetch_proxy), K(proxy_user_id), K(client_user_id));
+      } else {
+        ObProxyInfo proxy_info(&allocator);
+        proxy_info.user_id_ = is_fetch_proxy ? client_user_id : proxy_user_id;
+        proxy_info.proxy_flags_ = flags;
+        proxy_info.credential_type_ = credential_type;
+        if (is_fetch_proxy) {
+          OZ (user_info->add_proxy_user_info(proxy_info));
+        } else {
+          OZ (user_info->add_proxied_user_info(proxy_info));
+        }
+      }
+    }
+    // iterate next <key_id, value_id>
+    prev_key_id = is_fetch_proxy ? proxy_user_id : client_user_id;
+    prev_value_id = is_fetch_proxy ? client_user_id : proxy_user_id;
+  }
+  if (ret != common::OB_ITER_END) {
+    SHARE_SCHEMA_LOG(WARN, "fail to get role grantee map. iter quit. ", K(ret));
+  } else {
+    ret = common::OB_SUCCESS;
+  }
+  return ret;
+}
+
+template<typename T>
+int ObSchemaRetrieveUtils::retrieve_proxy_role_info_schema(
+    const uint64_t tenant_id,
+    T &result,
+    const bool is_fetch_proxy,
+    ObArray<ObUserInfo> &user_array)
+{
+  int ret = common::OB_SUCCESS;
+  uint64_t prev_key_id = common::OB_INVALID_ID;
+  uint64_t prev_value_id = common::OB_INVALID_ID;
+  uint64_t prev_role_id = common::OB_INVALID_ID;
+  while (OB_SUCC(ret) && OB_SUCC(result.next())) {
+    uint64_t client_user_id = common::OB_INVALID_ID;
+    uint64_t proxy_user_id = common::OB_INVALID_ID;
+    uint64_t role_id = common::OB_INVALID_ID;
+    bool is_deleted = false;
+    uint64_t flags = 0;
+    EXTRACT_INT_FIELD_MYSQL(result, "proxy_user_id", proxy_user_id, uint64_t);
+    EXTRACT_INT_FIELD_MYSQL(result, "client_user_id", client_user_id, uint64_t);
+    EXTRACT_INT_FIELD_MYSQL(result, "role_id", role_id, uint64_t);
+    EXTRACT_INT_FIELD_MYSQL(result, "is_deleted", is_deleted, bool);
+
+    ObUserInfo *user_info = NULL;
+    if (OB_FAIL(ret)) {
+    } else if (is_deleted) {
+      SHARE_SCHEMA_LOG(INFO, "proxy is deleted", K(proxy_user_id), K(client_user_id), K(role_id));
+    } else if (prev_key_id == (is_fetch_proxy ? proxy_user_id : client_user_id)
+            && prev_value_id == (is_fetch_proxy ? client_user_id : proxy_user_id)
+            && prev_role_id == role_id) {
+      ret = common::OB_SUCCESS;
+    } else {
+      if (OB_FAIL(ObSchemaRetrieveUtils::find_user_info(is_fetch_proxy ? proxy_user_id : client_user_id,
+            user_array, user_info))) {
+        SHARE_SCHEMA_LOG(WARN, "failed to find user info", K(ret), K(client_user_id), K(proxy_user_id));
+      } else if (NULL == user_info) {
+        SHARE_SCHEMA_LOG(INFO, "user info is null", K(ret), K(is_fetch_proxy), K(proxy_user_id), K(client_user_id));
+      } else {
+        if (is_fetch_proxy) {
+          for (int64_t i = 0; OB_SUCC(ret) && i < user_info->get_proxy_user_info_cnt(); i++) {
+            ObProxyInfo *proxy_info = user_info->get_proxy_user_info_by_idx_for_update(i);
+            if (OB_ISNULL(proxy_info)) {
+              ret = OB_ERR_UNEXPECTED;
+              LOG_WARN("unexpected error", K(ret));
+            } else if (proxy_info->user_id_ == client_user_id) {
+              if (OB_FAIL(proxy_info->add_role_id(role_id))) {
+                LOG_WARN("add role id failed", K(ret));
+              }
+            }
+          }
+        } else {
+          for (int64_t i = 0; OB_SUCC(ret) && i < user_info->get_proxied_user_info_cnt(); i++) {
+            ObProxyInfo *proxied_info = user_info->get_proxied_user_info_by_idx_for_update(i);
+            if (OB_ISNULL(proxied_info)) {
+              ret = OB_ERR_UNEXPECTED;
+              LOG_WARN("unexpected error", K(ret));
+            } else if (proxied_info->user_id_ == proxy_user_id) {
+              if (OB_FAIL(proxied_info->add_role_id(role_id))) {
+                LOG_WARN("add role id failed", K(ret));
+              }
+            }
+          }
+        }
+      }
+    }
+    // iterate next <key_id, value_id>
+    prev_key_id = is_fetch_proxy ? proxy_user_id : client_user_id;
+    prev_value_id = is_fetch_proxy ? client_user_id : proxy_user_id;
+    prev_role_id = role_id;
   }
   if (ret != common::OB_ITER_END) {
     SHARE_SCHEMA_LOG(WARN, "fail to get role grantee map. iter quit. ", K(ret));
@@ -2741,6 +2893,9 @@ int ObSchemaRetrieveUtils::fill_sequence_schema(
     EXTRACT_BOOL_FIELD_TO_CLASS_MYSQL(result, order_flag, sequence_schema);
     bool ignore_column_error = false;
     EXTRACT_BOOL_FIELD_TO_CLASS_MYSQL_WITH_DEFAULT_VALUE(result, is_system_generated, sequence_schema, true, ignore_column_error, false);
+    ignore_column_error = true;
+    EXTRACT_INT_FIELD_TO_CLASS_MYSQL_WITH_DEFAULT_VALUE(result, flag, sequence_schema, uint64_t,
+                                                        true, ignore_column_error, 0);
   }
   return ret;
 }

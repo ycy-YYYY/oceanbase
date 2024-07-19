@@ -50,7 +50,7 @@ struct PartitionInfo
 
 enum NUMCHILD {
   CREATE_TABLE_NUM_CHILD = 8,
-  CREATE_TABLE_AS_SEL_NUM_CHILD = 9,
+  CREATE_TABLE_AS_SEL_NUM_CHILD = 11,
   COLUMN_DEFINITION_NUM_CHILD = 4,
   COLUMN_DEF_NUM_CHILD = 3,
   INDEX_NUM_CHILD = 5,
@@ -113,7 +113,8 @@ public:
     SPATIAL_KEY = 2,
     FTS_KEY = 3,
     MULTI_KEY = 4,
-    MULTI_UNIQUE_KEY = 5
+    MULTI_UNIQUE_KEY = 5,
+    VEC_KEY = 6,
   };
   enum COLUMN_NODE {
     COLUMN_REF_NODE = 0,
@@ -234,6 +235,7 @@ public:
   static int check_urowid_column_length(
       const share::schema::ObColumnSchemaV2 &column);
   static int check_default_value_length(
+      const bool is_mysql_mode,
       const share::schema::ObColumnSchemaV2 &column,
       common::ObObj &default_value);
   static int cast_default_value(
@@ -530,7 +532,7 @@ protected:
       const common::ObIArray<uint64_t> &column_ids,
       const uint64_t cg_id,
       share::schema::ObColumnGroupSchema &column_group);
-  int parse_cg_node(const ParseNode &cg_node, bool &exist_all_column_group) const;
+  int parse_cg_node(const ParseNode &cg_node, obrpc::ObCreateIndexArg &create_index_arg) const;
   int parse_column_group(const ParseNode *cg_node,const share::schema::ObTableSchema &table_schema, share::schema::ObTableSchema &dst_table_schema);
   int resolve_index_column_group(const ParseNode *node, obrpc::ObCreateIndexArg &create_index_arg);
   bool need_column_group(const ObTableSchema &table_schema);
@@ -568,10 +570,11 @@ protected:
       ObColumnResolveStat &reslove_stat,
       bool &is_modify_column_visibility,
       common::ObString &pk_name,
+      const ObTableSchema &table_schema,
       const bool is_oracle_temp_table = false,
       const bool is_create_table_as = false,
-      const bool is_external_table = false,
       const bool allow_has_default = true);
+  int resolve_file_prefix(ObString &url, ObSqlString &prefix_str, common::ObStorageType &device_type);
   int resolve_uk_name_from_column_attribute(
       ParseNode *attrs_node,
       common::ObString &uk_name);
@@ -956,8 +959,6 @@ protected:
   int deep_copy_column_expr_name(common::ObIAllocator &allocator, ObIArray<ObRawExpr*> &exprs);
   int check_ttl_definition(const ParseNode *node);
 
-  int get_ttl_columns(const ObString &ttl_definition, ObIArray<ObString> &ttl_columns);
-
   int add_new_indexkey_for_oracle_temp_table();
 
   void reset();
@@ -965,6 +966,11 @@ protected:
                              const uint64_t mv_container_table_id,
                              const share::schema::ObTableSchema *&mv_container_table_schema,
                              common::ObString &mv_container_table_name);
+  static int trim_space_for_default_value(
+      const bool is_mysql_mode,
+      const bool is_char_type,
+      const ObCollationType &collation_type,
+      ObObj &default_value, ObString &str);
   int64_t block_size_;
   int64_t consistency_level_;
   INDEX_TYPE index_scope_;
@@ -1027,6 +1033,9 @@ protected:
   bool have_generate_fts_arg_;
   bool is_set_lob_inrow_threshold_;
   int64_t lob_inrow_threshold_;
+  int64_t auto_increment_cache_size_;
+  ObExternalFileFormat::FormatType external_table_format_type_;
+  common::ObBitSet<> mocked_external_table_column_ids_;
 private:
   template <typename STMT>
   DISALLOW_COPY_AND_ASSIGN(ObDDLResolver);

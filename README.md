@@ -51,6 +51,8 @@ See also [key features](https://en.oceanbase.com/product/opensource) for more 
 
 # Quick start
 
+See also [Quick experience](https://en.oceanbase.com/docs/community-observer-en-10000000000829647) or [Quick Start (Simplified Chinese)](https://open.oceanbase.com/quickStart) for more details.
+
 ## 🔥 Start with all-in-one
 
 You can quickly deploy a stand-alone OceanBase Database to experience with the following commands:
@@ -68,27 +70,35 @@ obd demo
 
 ## 🐳 Start with docker
 
+**Note**: We provide images on [dockerhub](https://hub.docker.com/r/oceanbase/oceanbase-ce/tags), [quay.io](https://quay.io/repository/oceanbase/oceanbase-ce?tab=tags) and [ghcr.io](https://github.com/oceanbase/docker-images/pkgs/container/oceanbase-ce). If you have problems pulling images from dockerhub, please try the other two registries.
+
 1. Start an OceanBase Database instance:
 
     ```shell
     # Deploy a mini standalone instance.
     docker run -p 2881:2881 --name oceanbase-ce -e MODE=mini -d oceanbase/oceanbase-ce
+
+    # Deploy a mini standalone instance using image from quay.io.
+    # docker run -p 2881:2881 --name oceanbase-ce -e MODE=mini -d quay.io/oceanbase/oceanbase-ce
+
+    # Deploy a mini standalone instance using image from ghcr.io.
+    # docker run -p 2881:2881 --name oceanbase-ce -e MODE=mini -d ghcr.io/oceanbase/oceanbase-ce
     ```
 
 2. Connect to the OceanBase Database instance:
 
     ```shell
-    docker exec -it oceanbase-ce ob-mysql sys # Connect to the root user of the sys tenant.
+    docker exec -it oceanbase-ce obclient -h127.0.0.1 -P2881 -uroot # Connect to the root user of the sys tenant.
     ```
 
-See also [Quick experience](https://en.oceanbase.com/docs/community-observer-en-10000000000829647) or [Quick Start (Simplified Chinese)](https://open.oceanbase.com/quickStart) for more details.
+See also [Docker Readme](https://github.com/oceanbase/docker-images/tree/main/oceanbase-ce) for more details.
 
 ## ☸️ Start with Kubernetes
 
 You can deploy and manage OceanBase Database instance in kubernetes cluster with [ob-operator](https://github.com/oceanbase/ob-operator) quickly. Refer to the document [Quick Start for ob-operator](https://oceanbase.github.io/ob-operator) to see details.
 
 ## 👨‍💻 Start developing
-See [OceanBase Developer Document](https://oceanbase.github.io/oceanbase/build-and-run.html) to learn how to compile and deploy a manually compiled observer.
+See [OceanBase Developer Document](https://oceanbase.github.io/oceanbase/build-and-run) to learn how to compile and deploy a manually compiled observer.
 
 # Roadmap
 

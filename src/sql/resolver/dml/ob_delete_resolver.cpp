@@ -60,7 +60,11 @@ int ObDeleteResolver::resolve(const ParseNode &parse_tree)
   // create the delete stmt
   ObDeleteStmt *delete_stmt = NULL;
   bool is_multi_table_delete = false;
-  if (NULL == (delete_stmt = create_stmt<ObDeleteStmt>())) {
+  bool disable_limit_offset = false;
+  if (OB_ISNULL(session_info_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null", K(ret));
+  } else if (OB_ISNULL(delete_stmt = create_stmt<ObDeleteStmt>())) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_ERROR("create delete stmt failed", K(ret));
   } else if (OB_UNLIKELY(parse_tree.type_ != T_DELETE) || OB_UNLIKELY(parse_tree.num_child_ < 2)) {
@@ -69,6 +73,9 @@ int ObDeleteResolver::resolve(const ParseNode &parse_tree)
   } else if (OB_ISNULL(parse_tree.children_[TABLE])) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("table_node is null", K(ret));
+  } else if (OB_FAIL(session_info_->check_feature_enable(ObCompatFeatureType::UPD_LIMIT_OFFSET,
+                                                         disable_limit_offset))) {
+    LOG_WARN("failed to check feature enable", K(ret));
   } else {
     stmt_ = delete_stmt;
     if (OB_FAIL(resolve_outline_data_hints())) {
@@ -102,14 +109,14 @@ int ObDeleteResolver::resolve(const ParseNode &parse_tree)
     }
 
     if (OB_SUCC(ret)) {
-      if (OB_FAIL(resolve_where_clause(parse_tree.children_[WHERE]))) {
+      if (OB_FAIL(resolve_hints(parse_tree.children_[HINT]))) {
+        LOG_WARN("resolve hints failed", K(ret));
+      } else if (OB_FAIL(resolve_where_clause(parse_tree.children_[WHERE]))) {
         LOG_WARN("resolve delete where clause failed", K(ret));
       } else if (OB_FAIL(resolve_order_clause(parse_tree.children_[ORDER_BY]))) {
         LOG_WARN("resolve delete order clause failed", K(ret));
-      } else if (OB_FAIL(resolve_limit_clause(parse_tree.children_[LIMIT]))) {
+      } else if (OB_FAIL(resolve_limit_clause(parse_tree.children_[LIMIT], disable_limit_offset))) {
         LOG_WARN("resolve delete limit clause failed", K(ret));
-      } else if (OB_FAIL(resolve_hints(parse_tree.children_[HINT]))) {
-        LOG_WARN("resolve hints failed", K(ret));
       } else if (OB_FAIL(resolve_returning(parse_tree.children_[RETURNING]))) {
         LOG_WARN("resolve returning failed", K(ret));
       } else if (is_oracle_mode() && NULL != parse_tree.children_[ERRORLOGGING] &&
@@ -214,7 +221,6 @@ int ObDeleteResolver::check_multi_delete_table_conflict()
 int ObDeleteResolver::resolve_table_list(const ParseNode &table_list, bool &is_multi_table_delete)
 {
   int ret = OB_SUCCESS;
-  JoinedTable *joined_table = nullptr;
   TableItem *table_item = NULL;
   is_multi_table_delete = false;
   const ParseNode *delete_list = NULL;
@@ -245,9 +251,6 @@ int ObDeleteResolver::resolve_table_list(const ParseNode &table_list, bool &is_m
         LOG_WARN("invalid table name", K(ret));
       } else if (OB_FAIL(column_namespace_checker_.add_reference_table(table_item))) {
         LOG_WARN("add reference table to namespace checker failed", K(ret));
-      } else if (OB_FAIL(try_add_join_table_for_fts(table_item, joined_table))) {
-        LOG_WARN("fail to try add join table for fts", K(ret), KPC(table_item));
-      } else if (nullptr != joined_table && FALSE_IT(table_item = static_cast<TableItem *>(joined_table))) {
       } else if (OB_FAIL(delete_stmt->add_from_item(table_item->table_id_,
                                                     table_item->is_joined_table()))) {
         LOG_WARN("failed to add from item", K(ret));
@@ -265,9 +268,7 @@ int ObDeleteResolver::resolve_table_list(const ParseNode &table_list, bool &is_m
     if (NULL == delete_list) {
       bool has_tg = false;
       //single table delete, delete list is same with from list
-      if (nullptr == joined_table) { // no fulltext index
-        CK(delete_stmt->get_table_size() == 1);
-      }
+      CK(delete_stmt->get_table_size() == 1);
       OZ(delete_tables_.push_back(delete_stmt->get_table_item(0)));
       OZ (check_need_fired_trigger(table_item));
     } else {
@@ -453,7 +454,13 @@ int ObDeleteResolver::generate_delete_table_info(const TableItem &table_item)
       }
     }
     if (OB_SUCC(ret)) {
-      if (OB_FAIL(try_update_column_expr_for_fts(table_item, table_info->column_exprs_))) {
+      TableItem *rowkey_doc = NULL;
+      if (OB_FAIL(try_add_join_table_for_fts(&table_item, rowkey_doc))) {
+        LOG_WARN("fail to try add join table for fts", K(ret), K(table_item));
+      } else if (OB_NOT_NULL(rowkey_doc) && OB_FAIL(try_update_column_expr_for_fts(
+                                                                      table_item,
+                                                                      rowkey_doc,
+                                                                      table_info->column_exprs_))) {
         LOG_WARN("fail to try update column expr for fts", K(ret), K(table_item));
       } else if (OB_FAIL(delete_stmt->get_delete_table_info().push_back(table_info))) {
         LOG_WARN("failed to push back table info", K(ret));

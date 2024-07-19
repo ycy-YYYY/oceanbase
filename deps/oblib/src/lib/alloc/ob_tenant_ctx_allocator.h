@@ -20,6 +20,7 @@
 #include "lib/time/ob_time_utility.h"
 #include "lib/resource/ob_resource_mgr.h"
 #include "lib/allocator/ob_tc_malloc.h"
+#include "lib/utility/ob_sort.h"
 #include <signal.h>
 
 namespace oceanbase
@@ -298,6 +299,9 @@ private:
     }
     return ret;
   }
+private:
+  static void on_alloc(AObject& obj, const ObMemAttr& attr);
+  static void on_free(AObject& obj);
 public:
   template <typename T>
   static void* common_realloc(const void *ptr, const int64_t size,

@@ -519,7 +519,7 @@ int ObSSTableIndexBuilder::init(const ObDataStoreDesc &data_desc,
   } else {
     index_store_desc_.get_desc().sstable_index_builder_ = this;
     callback_ = callback;
-    optimization_mode_ = mode;
+    optimization_mode_ = data_desc.is_cg() && data_desc.get_major_working_cluster_version() >= DATA_VERSION_4_3_2_0 ? DISABLE : mode;
     if (OB_FAIL(leaf_store_desc_.shallow_copy(index_store_desc_.get_desc()))) {
       STORAGE_LOG(WARN, "fail to assign leaf store desc", K(ret));
     } else {
@@ -756,10 +756,10 @@ int ObSSTableIndexBuilder::sort_roots()
   int ret = OB_SUCCESS;
   if (index_store_desc_.get_desc().is_cg()) {
     ObIndexTreeRootCtxCGCompare cmp(ret);
-    std::sort(roots_.begin(), roots_.end(), cmp);
+    lib::ob_sort(roots_.begin(), roots_.end(), cmp);
   } else {
     ObIndexTreeRootCtxCompare cmp(ret, index_store_desc_.get_desc().get_datum_utils());
-    std::sort(roots_.begin(), roots_.end(), cmp);
+    lib::ob_sort(roots_.begin(), roots_.end(), cmp);
   }
   return ret;
 }
@@ -1097,7 +1097,8 @@ int ObSSTableIndexBuilder::rewrite_small_sstable(ObSSTableMergeRes &res)
   read_info.size_ = upper_align(roots_[0]->last_macro_size_, DIO_READ_ALIGN_SIZE);
   read_info.io_desc_.set_wait_event(ObWaitEventIds::DB_FILE_COMPACT_READ);
   read_info.io_timeout_ms_ = std::max(GCONF._data_storage_io_timeout / 1000, DEFAULT_IO_WAIT_TIME_MS);
-  read_info.io_desc_.set_group_id(ObIOModule::SSTABLE_INDEX_BUILDER_IO);
+  read_info.io_desc_.set_resource_group_id(THIS_WORKER.get_group_id());
+  read_info.io_desc_.set_sys_module_id(ObIOModule::SSTABLE_INDEX_BUILDER_IO);
 
   if (OB_ISNULL(read_info.buf_ = reinterpret_cast<char*>(self_allocator_.alloc(read_info.size_)))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
@@ -1205,7 +1206,8 @@ int ObSSTableIndexBuilder::load_single_macro_block(
   read_info.size_ = nested_size;
   read_info.io_desc_.set_wait_event(ObWaitEventIds::DB_FILE_COMPACT_READ);
   read_info.io_timeout_ms_ = std::max(GCONF._data_storage_io_timeout / 1000, DEFAULT_IO_WAIT_TIME_MS);
-  read_info.io_desc_.set_group_id(ObIOModule::SSTABLE_INDEX_BUILDER_IO);
+  read_info.io_desc_.set_resource_group_id(THIS_WORKER.get_group_id());
+  read_info.io_desc_.set_sys_module_id(ObIOModule::SSTABLE_INDEX_BUILDER_IO);
 
   if (OB_ISNULL(read_info.buf_ = reinterpret_cast<char*>(allocator.alloc(read_info.size_)))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
@@ -1338,7 +1340,10 @@ int ObBaseIndexBlockBuilder::init(const ObDataStoreDesc &data_store_desc,
     } else {
       if (need_pre_warm() && index_store_desc.get_tablet_id().is_user_tablet()) {
         int tmp_ret = OB_SUCCESS;
-        if (OB_TMP_FAIL(index_block_pre_warmer_.init())) {
+        if (OB_TMP_FAIL(index_block_pre_warmer_.init(ObRowkeyVectorHelper::can_use_non_datum_rowkey_vector(
+                                                     index_store_desc_->is_cg(), index_store_desc_->get_tablet_id()) ?
+                                                     &index_store_desc_->get_rowkey_col_descs()
+                                                     : nullptr))) {
           STORAGE_LOG(WARN, "Failed to init index block prewarmer", K(tmp_ret));
         }
       }
@@ -2830,7 +2835,7 @@ int ObIndexBlockRebuilder::close()
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     STORAGE_LOG(WARN, "rebuilder not inited", K(ret), K_(is_inited));
-  } else if (need_sort_ && FALSE_IT(std::sort(macro_meta_list_->begin(), macro_meta_list_->end(), cmp))) {
+  } else if (need_sort_ && FALSE_IT(lib::ob_sort(macro_meta_list_->begin(), macro_meta_list_->end(), cmp))) {
   } else if (OB_FAIL(ret)) {
     STORAGE_LOG(WARN, "fail to sort meta list", K(ret), KPC(index_store_desc_));
   } else if (macro_meta_list_->count() == 0) {

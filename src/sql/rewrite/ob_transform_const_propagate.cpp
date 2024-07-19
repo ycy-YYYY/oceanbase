@@ -145,19 +145,18 @@ int ObTransformConstPropagate::ConstInfoContext::add_const_info(ExprConstInfo &c
 }
 
 int ObTransformConstPropagate::ConstInfoContext::merge_expired_const_infos(ConstInfoContext &other,
-                                                                           bool is_null_side)
+                                                                           bool can_pull_up)
 {
   int ret = OB_SUCCESS;
   for (int64_t i = 0; OB_SUCC(ret) && i < other.active_const_infos_.count(); ++i) {
-    if (other.active_const_infos_.at(i).can_pullup_) {
-      other.active_const_infos_.at(i).can_pullup_ = !is_null_side;
+    if (can_pull_up) {
       if (OB_FAIL(add_const_info(other.active_const_infos_.at(i)))) {
         LOG_WARN("failed to push back", K(ret));
       }
-    } else if (!other.active_const_infos_.at(i).is_used_) {
-      // do nothing
-    } else if (OB_FAIL(expired_const_infos_.push_back(other.active_const_infos_.at(i)))) {
-      LOG_WARN("failed to push back", K(ret));
+    } else if (other.active_const_infos_.at(i).is_used_) {
+      if (OB_FAIL(expired_const_infos_.push_back(other.active_const_infos_.at(i)))) {
+        LOG_WARN("failed to push back", K(ret));
+      }
     }
   }
   if (OB_SUCC(ret)) {
@@ -252,6 +251,7 @@ int ObTransformConstPropagate::do_transform(ObDMLStmt *stmt,
     }
 
     if (OB_SUCC(ret)) {
+      is_happened = false;
       if (OB_FAIL(collect_equal_pair_from_tables(stmt,
                                                  const_ctx,
                                                  is_happened))) {
@@ -263,6 +263,7 @@ int ObTransformConstPropagate::do_transform(ObDMLStmt *stmt,
     }
 
     if (OB_SUCC(ret)) {
+      is_happened = false;
       if (OB_FAIL(collect_equal_pair_from_semi_infos(stmt,
                                                      const_ctx,
                                                      is_happened))) {
@@ -274,6 +275,7 @@ int ObTransformConstPropagate::do_transform(ObDMLStmt *stmt,
     }
 
     if (OB_SUCC(ret)) {
+      is_happened = false;
       if (OB_FAIL(replace_join_conditions(stmt,
                                           const_ctx,
                                           is_happened))) {
@@ -285,6 +287,7 @@ int ObTransformConstPropagate::do_transform(ObDMLStmt *stmt,
     }
 
     if (OB_SUCC(ret) && !const_ctx.active_const_infos_.empty()) {
+      is_happened = false;
       if (OB_FAIL(replace_common_exprs(stmt->get_condition_exprs(),
                                        const_ctx,
                                        is_happened))) {
@@ -313,6 +316,7 @@ int ObTransformConstPropagate::do_transform(ObDMLStmt *stmt,
     if (OB_SUCC(ret) && !const_ctx.active_const_infos_.empty() &&
         (stmt->is_insert_stmt() || stmt->is_merge_stmt())) {
       ObDelUpdStmt *insert = static_cast<ObDelUpdStmt *>(stmt);
+      is_happened = false;
       if (OB_FAIL(replace_common_exprs(insert->get_sharding_conditions(),
                                        const_ctx,
                                        is_happened))) {
@@ -364,9 +368,10 @@ int ObTransformConstPropagate::do_transform(ObDMLStmt *stmt,
 
     if (OB_SUCC(ret) && stmt->is_select_stmt()) {
       if (!const_ctx.active_const_infos_.empty() && !ignore_all_select_exprs && static_cast<ObSelectStmt*>(stmt)->get_aggr_item_size() > 0) {
+        is_happened = false;
         if (OB_FAIL(replace_select_exprs(static_cast<ObSelectStmt*>(stmt),
-                                        const_ctx,
-                                        is_happened))) {
+                                         const_ctx,
+                                         is_happened))) {
           LOG_WARN("failed to replace select exprs", K(ret));
         } else {
           trans_happened |= is_happened;
@@ -389,6 +394,7 @@ int ObTransformConstPropagate::do_transform(ObDMLStmt *stmt,
     }
 
     if (OB_SUCC(ret) && stmt->is_select_stmt()) {
+      is_happened = false;
       if (OB_FAIL(replace_common_exprs(static_cast<ObSelectStmt*>(stmt)->get_having_exprs(),
                                        const_ctx,
                                        is_happened))) {
@@ -641,6 +647,12 @@ int ObTransformConstPropagate::collect_equal_pair_from_semi_infos(ObDMLStmt *stm
   return ret;
 }
 
+/* collect const info from table
+ * 1. As left-join table(also right-join table
+ *    const infos from not_null_side and on_condition can be pulled up to high level const ctx.
+ *    const infos from null_side can only used on self level join table.
+ * 2. inner-join table, const infos can be pulled up to high level const ctx.
+*/
 int ObTransformConstPropagate::recursive_collect_const_info_from_table(ObDMLStmt *stmt,
                                                                        TableItem *table_item,
                                                                        ConstInfoContext &const_ctx,
@@ -648,6 +660,7 @@ int ObTransformConstPropagate::recursive_collect_const_info_from_table(ObDMLStmt
                                                                        bool &trans_happened)
 {
   int ret = OB_SUCCESS;
+  JoinedTable *joined_table = NULL;
   if (OB_ISNULL(stmt) || OB_ISNULL(table_item)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("invalid parameter", K(ret));
@@ -655,71 +668,75 @@ int ObTransformConstPropagate::recursive_collect_const_info_from_table(ObDMLStmt
     if (OB_FAIL(collect_equal_pair_from_pullup(stmt, table_item, const_ctx, is_null_side))) {
       LOG_WARN("failed to collect const info from pullup", K(ret));
     }
-  } else if (table_item->is_joined_table()) {
-    JoinedTable *joined_table = static_cast<JoinedTable *>(table_item);
-    if (LEFT_OUTER_JOIN == joined_table->joined_type_ ||
-        RIGHT_OUTER_JOIN == joined_table->joined_type_) {
-      // FULL_OUT_JOIN is not transformed because may eliminate all equal join conditions
-      ConstInfoContext tmp_ctx(const_ctx.shared_expr_checker_, const_ctx.allow_trans_);
-      bool left_happened = false;
-      bool right_happened = false;
-      bool condition_happened = false;
-      if (OB_FAIL(SMART_CALL(recursive_collect_const_info_from_table(stmt,
-                                                             joined_table->left_table_,
-                                                             tmp_ctx,
-                                                             !joined_table->is_left_join(),
-                                                             left_happened)))) {
-        LOG_WARN("failed to recursive collect const info from table", K(ret));
-      } else if (OB_FAIL(SMART_CALL(recursive_collect_const_info_from_table(stmt,
-                                                                    joined_table->right_table_,
-                                                                    tmp_ctx,
-                                                                    !joined_table->is_right_join(),
-                                                                    right_happened)))) {
-        LOG_WARN("failed to recursive collect const info from table", K(ret));
-      } else if (OB_FAIL(collect_equal_pair_from_condition(stmt,
-                                                           joined_table->get_join_conditions(),
-                                                           tmp_ctx,
-                                                           condition_happened))) {
-        LOG_WARN("failed to collect const info from join condition", K(ret));
-      } else {
-        trans_happened |= left_happened || right_happened || condition_happened;
-      }
-      if (OB_SUCC(ret)) {
-        bool is_happened = false;
-        if (OB_FAIL(SMART_CALL(recursive_replace_join_conditions(joined_table,
-                                                                 tmp_ctx,
-                                                                 is_happened)))) {
-          LOG_WARN("failed to replace exprs in joined table", K(ret));
-        } else if (const_ctx.merge_expired_const_infos(tmp_ctx, is_null_side)) {
-          LOG_WARN("failed to merge expired const infos", K(ret));
-        } else {
-          trans_happened |= is_happened;
-        }
-      }
-    } else if (joined_table->is_inner_join()) {
-      bool left_happened = false;
-      bool right_happened = false;
-      bool condition_happened = false;
-      if (OB_FAIL(SMART_CALL(recursive_collect_const_info_from_table(stmt,
-                                                             joined_table->left_table_,
-                                                             const_ctx,
-                                                             false,
-                                                             left_happened)))) {
-        LOG_WARN("failed to recursive collect const info from table", K(ret));
-      } else if (OB_FAIL(SMART_CALL(recursive_collect_const_info_from_table(stmt,
-                                                                    joined_table->right_table_,
-                                                                    const_ctx,
-                                                                    false,
-                                                                    right_happened)))) {
-        LOG_WARN("failed to recursive collect const info from table", K(ret));
-      } else if (OB_FAIL(collect_equal_pair_from_condition(stmt,
-                                                           joined_table->get_join_conditions(),
-                                                           const_ctx,
-                                                           condition_happened))) {
-        LOG_WARN("failed to collect const info from join condition", K(ret));
-      } else {
-        trans_happened |= left_happened || right_happened || condition_happened;
-      }
+  } else if (!table_item->is_joined_table()) {
+  } else if (FALSE_IT(joined_table = static_cast<JoinedTable *>(table_item))) {
+  } else if (LEFT_OUTER_JOIN == joined_table->joined_type_ ||
+             RIGHT_OUTER_JOIN == joined_table->joined_type_) {
+    // FULL_OUT_JOIN is not transformed because may eliminate all equal join conditions
+    TableItem *left_table = LEFT_OUTER_JOIN == joined_table->joined_type_ ?
+                            joined_table->left_table_ : joined_table->right_table_;
+    TableItem *right_table = LEFT_OUTER_JOIN == joined_table->joined_type_ ?
+                              joined_table->right_table_ : joined_table->left_table_;
+    ConstInfoContext tmp_ctx(const_ctx.shared_expr_checker_, const_ctx.allow_trans_);
+    bool left_happened = false;
+    bool right_happened = false;
+    bool condition_happened = false;
+    bool replace_join_left = false;
+    bool replace_join_right = false;
+    if (OB_FAIL(SMART_CALL(recursive_collect_const_info_from_table(stmt, left_table,
+                                                                   tmp_ctx, false,
+                                                                   left_happened)))) {
+      LOG_WARN("failed to recursive collect const info from table", K(ret));
+    } else if (OB_FAIL(SMART_CALL(recursive_replace_join_conditions(joined_table, tmp_ctx,
+                                                                    replace_join_left)))) {
+      LOG_WARN("failed to replace exprs in joined table", K(ret));
+    } else if (OB_FAIL(const_ctx.merge_expired_const_infos(tmp_ctx, true))) {
+      LOG_WARN("failed to merge expired const infos", K(ret));
+    } else if (FALSE_IT(tmp_ctx.reset())) {
+    } else if (OB_FAIL(SMART_CALL(recursive_collect_const_info_from_table(stmt, right_table,
+                                                                          tmp_ctx, true,
+                                                                          right_happened)))) {
+      LOG_WARN("failed to recursive collect const info from table", K(ret));
+    } else if (OB_FAIL(collect_equal_pair_from_condition(stmt, joined_table->get_join_conditions(),
+                                                         tmp_ctx, condition_happened))) {
+      LOG_WARN("failed to collect const info from join condition", K(ret));
+    } else if (OB_FAIL(SMART_CALL(recursive_replace_join_conditions(joined_table, tmp_ctx,
+                                                                    replace_join_right)))) {
+      LOG_WARN("failed to replace exprs in joined table", K(ret));
+    } else if (OB_FAIL(const_ctx.merge_expired_const_infos(tmp_ctx, false))) {
+      LOG_WARN("failed to merge expired const infos", K(ret));
+    } else {
+      trans_happened |= left_happened || right_happened || condition_happened ||
+                        replace_join_left || replace_join_right;
+      LOG_TRACE("collect const info from table", K(trans_happened), K(left_happened),
+                K(right_happened), K(condition_happened), K(replace_join_left),
+                K(replace_join_right));
+    }
+  } else if (joined_table->is_inner_join()) {
+    bool left_happened = false;
+    bool right_happened = false;
+    bool condition_happened = false;
+    if (OB_FAIL(SMART_CALL(recursive_collect_const_info_from_table(stmt,
+                                                                   joined_table->left_table_,
+                                                                   const_ctx,
+                                                                   false,
+                                                                   left_happened)))) {
+      LOG_WARN("failed to recursive collect const info from table", K(ret));
+    } else if (OB_FAIL(SMART_CALL(recursive_collect_const_info_from_table(stmt,
+                                                                         joined_table->right_table_,
+                                                                         const_ctx,
+                                                                         false,
+                                                                         right_happened)))) {
+      LOG_WARN("failed to recursive collect const info from table", K(ret));
+    } else if (OB_FAIL(collect_equal_pair_from_condition(stmt,
+                                                         joined_table->get_join_conditions(),
+                                                         const_ctx,
+                                                         condition_happened))) {
+      LOG_WARN("failed to collect const info from join condition", K(ret));
+    } else {
+      trans_happened |= left_happened || right_happened || condition_happened;
+      LOG_TRACE("collect const info from table", K(trans_happened), K(left_happened),
+                K(right_happened), K(condition_happened));
     }
   }
   return ret;
@@ -744,7 +761,6 @@ int ObTransformConstPropagate::collect_equal_pair_from_pullup(ObDMLStmt *stmt,
     for (int64_t j = 0; OB_SUCC(ret) && j < child_stmt->get_select_item_size(); ++j) {
       ObRawExpr *select_expr = child_stmt->get_select_items().at(j).expr_;
       ExprConstInfo equal_info;
-      equal_info.can_pullup_ = !is_null_side;
       equal_info.mem_equal_ = true;
       const uint64_t column_id = j + OB_APP_MIN_COLUMN_ID;
       if (OB_ISNULL(select_expr)) {
@@ -1276,7 +1292,7 @@ int ObTransformConstPropagate::remove_const_exec_param_exprs(ObDMLStmt *stmt,
       LOG_WARN("failed to remove const exec param", K(ret));
     } else if (!is_happened) {
       // do nothing
-    } else if (expr->formalize(ctx_->session_info_)) {
+    } else if (OB_FAIL(expr->formalize(ctx_->session_info_))) {
       LOG_WARN("failed to formalize expr", K(ret));
     } else if (OB_FAIL(expr_ptr.set(expr))) {
       LOG_WARN("failed to update expr", K(ret));
@@ -1375,8 +1391,12 @@ int ObTransformConstPropagate::check_need_cast_when_replace(ObRawExpr *expr,
     need_cast = true;
   } else if (parent_expr->is_win_func_expr()) {
     ObWinFunRawExpr *win_expr = static_cast<ObWinFunRawExpr*>(parent_expr);
-    if (OB_NOT_NULL(win_expr->get_agg_expr()) &&
-        ObOptimizerUtil::find_item(win_expr->get_agg_expr()->get_real_param_exprs(), expr)) {
+    ObAggFunRawExpr *agg_expr = win_expr->get_agg_expr();
+    ObSEArray<ObRawExpr*,4> agg_params;
+    if (OB_NOT_NULL(agg_expr) && OB_FAIL(agg_expr->get_param_exprs(agg_params))) {
+      // Type deduction of some aggr funcs relies on not only real params, e.g. MEDIAN, GROUP_PERCENTILE_CONT
+      LOG_WARN("failed to get agg params", K(ret));
+    } else if (OB_NOT_NULL(agg_expr) && ObOptimizerUtil::find_item(agg_params, expr)) {
       need_cast = true;
     } else if (ObOptimizerUtil::find_item(win_expr->get_func_params(), expr)) {
       need_cast = true;
@@ -1489,6 +1509,12 @@ int ObTransformConstPropagate::check_cast_const_expr(ExprConstInfo &const_info,
                                                         need_cast,
                                                         is_scale_adjust_cast))) {
     LOG_WARN("failed to check need cast expr", K(ret));
+    if (OB_ERR_INVALID_TYPE_FOR_OP == ret) {  // rewrite should not happened instead of failed a error
+      ret = OB_SUCCESS;
+      is_valid = false;
+    } else {
+      LOG_WARN("failed to check need cast expr", K(ret));
+    }
   } else if (!need_cast) {
     // do nothing
   } else if (OB_FAIL(ObSQLUtils::calc_const_or_calculable_expr(ctx_->exec_ctx_,
@@ -1511,7 +1537,12 @@ int ObTransformConstPropagate::check_cast_const_expr(ExprConstInfo &const_info,
     ObObjType cmp_type = ObMaxType;
     int64_t eq_cmp = 0;
     if (OB_FAIL(ret)) {
-      LOG_WARN("failed to cast obj to dest type", K(ret), K(value), K(dst_type.get_type()));
+      if (OB_ERR_INVALID_DATATYPE == ret) {  // rewrite should not happened instead of failed a error
+        ret = OB_SUCCESS;
+        is_valid = false;
+      } else {
+        LOG_WARN("failed to cast obj to dest type", K(ret), K(value), K(dst_type.get_type()));
+      }
     } else if (OB_FAIL(ObExprResultTypeUtil::get_relational_cmp_type(cmp_type,
                                                                       value.get_type(),
                                                                       dest_val->get_type()))) {

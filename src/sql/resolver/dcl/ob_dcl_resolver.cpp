@@ -322,10 +322,12 @@ int ObDCLResolver::check_dcl_on_inner_user(const ObItemType &type,
                                                   host_name,
                                                   user_id))) {
         if (OB_USER_NOT_EXIST == ret) {
-          ret = OB_ERR_USER_OR_ROLE_DOES_NOT_EXIST;
-          LOG_USER_ERROR(OB_ERR_USER_OR_ROLE_DOES_NOT_EXIST, user_name.length(), user_name.ptr());
+          // do not check user exists here
+          ret = OB_SUCCESS;
+          LOG_TRACE("user is not exists", K(user_name), K(host_name));
+        } else {
+          LOG_WARN("failed to get user id", K(ret), K(user_name));
         }
-        LOG_WARN("failed to get user id", K(ret), K(user_name));
       }
       if (OB_SUCC(ret)) {
         if (OB_SYS_USER_ID == user_id ||
@@ -448,7 +450,12 @@ int ObDCLResolver::resolve_user_host(const ParseNode *user_pass,
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("Child 0 of user_pass should not be NULL", K(ret));
   } else {
-    user_name = ObString(user_pass->children_[0]->str_len_, user_pass->children_[0]->str_value_);
+    if (user_pass->children_[0]->type_ == T_FUN_SYS_CURRENT_USER) {
+      user_name = session_info_->get_user_name();
+      host_name = session_info_->get_host_name();
+    } else {
+      user_name = ObString(user_pass->children_[0]->str_len_, user_pass->children_[0]->str_value_);
+    }
 
     if (user_pass->children_[0]->type_ != T_IDENT
         && OB_FAIL(ObSQLUtils::convert_sql_text_to_schema_for_storing(
@@ -459,7 +466,11 @@ int ObDCLResolver::resolve_user_host(const ParseNode *user_pass,
       ret = OB_ERR_NO_PRIVILEGE;
       LOG_WARN("__oceanbase_inner_restore_user is reserved", K(ret));
     } else if (NULL == user_pass->children_[3]) {
-      host_name.assign_ptr(OB_DEFAULT_HOST_NAME, static_cast<int32_t>(STRLEN(OB_DEFAULT_HOST_NAME)));
+      if (user_pass->children_[0]->type_ == T_FUN_SYS_CURRENT_USER) {
+        //skip
+      } else {
+        host_name.assign_ptr(OB_DEFAULT_HOST_NAME, static_cast<int32_t>(STRLEN(OB_DEFAULT_HOST_NAME)));
+      }
     } else {
       host_name.assign_ptr(user_pass->children_[3]->str_value_,
                            static_cast<int32_t>(user_pass->children_[3]->str_len_));

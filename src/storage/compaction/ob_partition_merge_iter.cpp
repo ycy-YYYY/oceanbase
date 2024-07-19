@@ -217,7 +217,7 @@ int ObPartitionMergeIter::init_query_base_params(const ObMergeParameter &merge_p
       // 1.normal minor merge merge scn equal to end scn
       // 2.backfill may merge scn is bigger than end scn
       access_context_.merge_scn_ = merge_param.merge_scn_;
-      if (static_param.get_merge_type() != BACKFILL_TX_MERGE) {
+      if (!static_param.is_backfill_) {
         if (OB_UNLIKELY(access_context_.merge_scn_ != static_param.scn_range_.end_scn_)) {
           ret = OB_ERR_UNEXPECTED;
           STORAGE_LOG(ERROR, "Unexpected merge scn", K(ret), K(merge_param), K(static_param));
@@ -1592,14 +1592,14 @@ int ObPartitionMinorRowMergeIter::next()
     if (OB_UNLIKELY(ret != OB_ITER_END)) {
       LOG_WARN("Failed to inner next row", K(ret));
     }
+  } else if (OB_FAIL(skip_ghost_row())) {
+    if (OB_UNLIKELY(ret != OB_ITER_END)) {
+      LOG_WARN("Failed to skip_ghost_row", K(ret));
+    }
   } else if (OB_ISNULL(curr_row_)) {
     if (typeid(*this) == typeid(ObPartitionMinorRowMergeIter)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("Unexpceted null current row", K(ret), K(*this));
-    }
-  } else if (OB_FAIL(skip_ghost_row())) {
-    if (OB_UNLIKELY(ret != OB_ITER_END)) {
-      LOG_WARN("Failed to skip_ghost_row", K(ret));
     }
   } else if (need_recycle_mv_row()) {
     if (OB_FAIL(compact_old_row())) {

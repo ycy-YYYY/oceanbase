@@ -222,13 +222,14 @@ int ObCreateIndexResolver::resolve_index_column_node(
 
       // 索引排序方式
       if (OB_FAIL(ret)) {
-      } else if (col_node->children_[2]
-          && col_node->children_[2]->type_ == T_SORT_DESC) {
+      } else if (is_oracle_mode() && col_node->children_[2]
+                 && col_node->children_[2]->type_ == T_SORT_DESC) {
         // sort_item.order_type_ = common::ObOrderType::DESC;
         ret = OB_NOT_SUPPORTED;
         LOG_WARN("not support desc index now", K(ret));
         LOG_USER_ERROR(OB_NOT_SUPPORTED, "create desc index");
       } else {
+        //兼容mysql5.7, 降序索引不生效且不报错
         sort_item.order_type_ = common::ObOrderType::ASC;
       }
 
@@ -365,12 +366,9 @@ int ObCreateIndexResolver::resolve_index_option_node(
 
     // block_size
     if (OB_SUCC(ret)) {
-      if(T_TABLE_OPTION_LIST != index_option_node->type_ || index_option_node->num_child_ < 1) {
+      if(T_TABLE_OPTION_LIST != index_option_node->type_) {
         ret = OB_ERR_UNEXPECTED;
         SQL_RESV_LOG(WARN, "invalid parse node", K(ret));
-      } else if (OB_ISNULL(index_option_node->children_)) {
-        ret = OB_ERR_UNEXPECTED;
-        SQL_RESV_LOG(WARN, "node children is null", K(index_option_node->children_), K(ret));
       } else {
         int64_t num = index_option_node->num_child_;
         for (int64_t i = 0; OB_SUCC(ret) && i < num; ++i) {
@@ -751,8 +749,20 @@ int ObCreateIndexResolver::set_table_option_to_stmt(bool is_partitioned)
         index_arg.index_type_ = INDEX_TYPE_SPATIAL_LOCAL;
       }
     } else if (FTS_KEY == index_keyname_) {
-      // TODO hanxuan
-      ret = OB_NOT_SUPPORTED;
+      uint64_t tenant_data_version = 0;
+      if (OB_FAIL(GET_MIN_DATA_VERSION(session_info_->get_effective_tenant_id(), tenant_data_version))) {
+      LOG_WARN("get tenant data version failed", K(ret));
+      } else if (tenant_data_version < DATA_VERSION_4_3_2_0) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_WARN("tenant data version is less than 4.3.2, create fulltext index on existing table not supported", K(ret), K(tenant_data_version));
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "tenant data version is less than 4.3.2, fulltext index");
+      } else if (global_) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_WARN("not support global fts index now", K(ret));
+      } else {
+        // set type to fts_index_aux first, append other fts arg later
+        index_arg.index_type_ = INDEX_TYPE_FTS_INDEX_LOCAL;
+      }
     }
     index_arg.data_table_id_ = data_table_id_;
     index_arg.index_table_id_ = index_table_id_;

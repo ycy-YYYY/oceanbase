@@ -374,7 +374,8 @@ int ObMacroBlock::flush(ObMacroBlockHandle &macro_handle,
     write_info.buffer_ = data_.data();
     write_info.size_ = data_.upper_align_length();
     write_info.io_desc_.set_wait_event(ObWaitEventIds::DB_FILE_COMPACT_WRITE);
-    write_info.io_desc_.set_group_id(ObIOModule::SSTABLE_MACRO_BLOCK_WRITE_IO);
+    write_info.io_desc_.set_resource_group_id(THIS_WORKER.get_group_id());
+    write_info.io_desc_.set_sys_module_id(ObIOModule::SSTABLE_MACRO_BLOCK_WRITE_IO);
     write_info.io_timeout_ms_ = std::max(GCONF._data_storage_io_timeout / 1000, DEFAULT_IO_WAIT_TIME_MS);
     if (OB_FAIL(macro_handle.async_write(write_info))) {
       STORAGE_LOG(WARN, "Fail to async write block", K(ret), K(macro_handle), K(write_info));
@@ -488,6 +489,7 @@ int ObMacroBlock::get_macro_block_meta(ObDataMacroBlockMeta &macro_meta)
   macro_meta.val_.logic_id_.column_group_idx_= spec_->get_table_cg_idx();
   macro_meta.val_.logic_id_.data_seq_.macro_data_seq_ = macro_header_.fixed_header_.data_seq_;
   macro_meta.val_.logic_id_.tablet_id_ = spec_->get_tablet_id().id();
+  macro_meta.val_.logic_id_.is_mds_ = is_mds_merge(spec_->get_merge_type());
   macro_meta.val_.macro_id_ = ObIndexBlockRowHeader::DEFAULT_IDX_ROW_MACRO_ID;
   macro_meta.val_.rowkey_count_ = macro_header_.fixed_header_.rowkey_column_count_;
   macro_meta.val_.compressor_type_ = spec_->get_compressor_type();

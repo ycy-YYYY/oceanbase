@@ -121,6 +121,7 @@ enum ObSchemaOperationCategory
   ACT(OB_DDL_DROP_COLUMN_GROUP, = 64)                            \
   ACT(OB_DDL_EXCHANGE_PARTITION, = 65)                           \
   ACT(OB_DDL_MODIFY_MVIEW_REFERENCE_TABLE_STATUS, = 66)          \
+  ACT(OB_DDL_MODIFY_INDEX_TYPE, = 67)                            \
   ACT(OB_DDL_TABLE_OPERATION_END, = 100)                         \
   ACT(OB_DDL_TENANT_OPERATION_BEGIN, = 101)                      \
   ACT(OB_DDL_ADD_TENANT,)                                        \
@@ -403,10 +404,12 @@ public:
   union {
     uint64_t user_id_;
     uint64_t grantee_id_;
+    uint64_t client_user_id_;
   };
   union {
     uint64_t database_id_;
     uint64_t grantor_id_;
+    uint64_t proxy_user_id_;
   };
   common::ObString database_name_;
   uint64_t tablegroup_id_;

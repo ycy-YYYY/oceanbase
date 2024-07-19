@@ -51,7 +51,9 @@ ObPxFifoCoordOp::ObPxFifoCoordOp(ObExecContext &exec_ctx, const ObOpSpec &spec, 
     rd_wf_piece_msg_proc_(exec_ctx, msg_proc_),
     init_channel_piece_msg_proc_(exec_ctx, msg_proc_),
     reporting_wf_piece_msg_proc_(exec_ctx, msg_proc_),
-    opt_stats_gather_piece_msg_proc_(exec_ctx, msg_proc_)
+    opt_stats_gather_piece_msg_proc_(exec_ctx, msg_proc_),
+    sp_winfunc_px_piece_msg_proc_(exec_ctx, msg_proc_),
+    rd_winfunc_px_piece_msg_proc_(exec_ctx, msg_proc_)
   {}
 
 int ObPxFifoCoordOp::inner_open()
@@ -102,6 +104,8 @@ int ObPxFifoCoordOp::setup_loop_proc()
       .register_processor(init_channel_piece_msg_proc_)
       .register_processor(reporting_wf_piece_msg_proc_)
       .register_processor(opt_stats_gather_piece_msg_proc_)
+      .register_processor(sp_winfunc_px_piece_msg_proc_)
+      .register_processor(rd_winfunc_px_piece_msg_proc_)
       .register_interrupt_processor(interrupt_proc_);
   return ret;
 }
@@ -142,10 +146,11 @@ int ObPxFifoCoordOp::fetch_rows(const int64_t row_cnt)
   ObSQLSessionInfo *session = ctx_.get_my_session();
   int64_t query_timeout = 0;
   session->get_query_timeout(query_timeout);
-  if (OB_FAIL(OB_E(EventTable::EN_PX_QC_EARLY_TERMINATE, query_timeout) OB_SUCCESS)) {
-    LOG_WARN("fifo qc not interrupt qc by design", K(ret), K(query_timeout));
+  int ecode = EVENT_CALL(EventTable::EN_PX_QC_EARLY_TERMINATE, query_timeout);
+  if (OB_SUCCESS != ecode && OB_SUCC(ret)) {
+    LOG_WARN("fifo qc not interrupt qc by design", K(ecode), K(query_timeout));
     sleep(14);
-    return ret;
+    return ecode;
   }
 #endif
 
@@ -230,6 +235,8 @@ int ObPxFifoCoordOp::fetch_rows(const int64_t row_cnt)
         case ObDtlMsgType::DH_INIT_CHANNEL_PIECE_MSG:
         case ObDtlMsgType::DH_SECOND_STAGE_REPORTING_WF_PIECE_MSG:
         case ObDtlMsgType::DH_OPT_STATS_GATHER_PIECE_MSG:
+        case ObDtlMsgType::DH_SP_WINFUNC_PX_PIECE_MSG:
+        case ObDtlMsgType::DH_RD_WINFUNC_PX_PIECE_MSG:
           // all message processed in callback
           break;
         default:

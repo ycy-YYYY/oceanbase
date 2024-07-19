@@ -257,7 +257,7 @@ ObPushdownFilterExecutor* TestCOSSTableRowsFilter::create_physical_filter(
     column_exprs->push_back(nullptr);
     cg_idxes.push_back(_cg_idxes.at(i));
   }
-  filter->cg_col_exprs_ = cg_col_exprs;
+  filter->cg_col_exprs_.assign(*cg_col_exprs);
   return filter;
 }
 
@@ -543,8 +543,8 @@ TEST_F(TestCOSSTableRowsFilter, co_sstable_rows_filter_test_rewrite_filter_case_
   init_multi_white_and_black_filter_case_two();
   ret = co_filter_.rewrite_filter();
   ASSERT_EQ(OB_SUCCESS, ret);
-  ASSERT_EQ(3, co_filter_.filter_iters_.count());
-  ASSERT_EQ(3, co_filter_.iter_filter_node_.count());
+  ASSERT_EQ(5, co_filter_.filter_iters_.count());
+  ASSERT_EQ(5, co_filter_.iter_filter_node_.count());
   ASSERT_EQ(3, co_filter_.bitmap_buffer_.count());
   ASSERT_EQ(ObICGIterator::ObCGIterType::OB_CG_SCANNER,
              co_filter_.filter_iters_[0]->get_type());

@@ -50,7 +50,9 @@ int ObDelUpdLogPlan::compute_dml_parallel()
   max_dml_parallel_ = ObGlobalHint::UNSET_PARALLEL;
   const ObOptimizerContext &opt_ctx = get_optimizer_context();
   const ObSQLSessionInfo *session_info = NULL;
-  if (OB_ISNULL(session_info = get_optimizer_context().get_session_info())) {
+  const ObDelUpdStmt *del_upd_stmt = NULL;
+  if (OB_ISNULL(session_info = get_optimizer_context().get_session_info()) ||
+      OB_ISNULL(del_upd_stmt = get_stmt())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected null", K(ret), K(get_optimizer_context().get_session_info()));
   } else if (!opt_ctx.can_use_pdml()) {
@@ -69,6 +71,13 @@ int ObDelUpdLogPlan::compute_dml_parallel()
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("get unexpected parallel", K(ret), K(dml_parallel), K(opt_ctx.get_parallel_rule()));
     } else {
+      if (del_upd_stmt->is_insert_stmt() &&
+          static_cast<const ObInsertStmt*>(del_upd_stmt)->is_overwrite()) {
+        const int64_t default_insert_overwrite_parallel = 2;
+        if (dml_parallel <= ObGlobalHint::DEFAULT_PARALLEL) {
+          dml_parallel = default_insert_overwrite_parallel;
+        }
+      }
       max_dml_parallel_ = dml_parallel;
       use_pdml_ = (opt_ctx.is_online_ddl() || session_info->get_ddl_info().is_mview_complete_refresh() ||
                   (ObGlobalHint::DEFAULT_PARALLEL < dml_parallel &&
@@ -1179,7 +1188,9 @@ int ObDelUpdLogPlan::create_pdml_insert_plan(ObLogicalOperator *&top,
   } else if (OB_FAIL(allocate_exchange_as_top(top, exch_info))) {
     LOG_WARN("failed to allocate exchange as top", K(ret));
   } else if (osg_info != NULL &&
-             OB_FAIL(allocate_optimizer_stats_gathering_as_top(top, *osg_info))) {
+             OB_FAIL(allocate_optimizer_stats_gathering_as_top(top,
+                                                               *osg_info,
+                                                               OSG_TYPE::GATHER_OSG))) {
     LOG_WARN("failed to allocate optimizer stats gathering");
   } else if (OB_FAIL(allocate_pdml_insert_as_top(top,
                                                  is_index_maintenance,
@@ -1194,7 +1205,8 @@ int ObDelUpdLogPlan::create_pdml_insert_plan(ObLogicalOperator *&top,
 }
 
 int ObDelUpdLogPlan::allocate_optimizer_stats_gathering_as_top(ObLogicalOperator *&old_top,
-                                                               OSGShareInfo &info)
+                                                               OSGShareInfo &info,
+                                                               OSG_TYPE type)
 {
   int ret = OB_SUCCESS;
   ObLogOptimizerStatsGathering *osg = NULL;
@@ -1206,8 +1218,6 @@ int ObDelUpdLogPlan::allocate_optimizer_stats_gathering_as_top(ObLogicalOperator
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("failed to allocate sequence operator", K(ret));
   } else {
-    OSG_TYPE type = old_top->need_osg_merge() ? OSG_TYPE::MERGE_OSG :
-                    old_top->is_sharding() ? OSG_TYPE::GATHER_OSG : OSG_TYPE::NORMAL_OSG;
     osg->set_child(ObLogicalOperator::first_child, old_top);
     osg->set_osg_type(type);
     osg->set_table_id(info.table_id_);
@@ -1215,6 +1225,7 @@ int ObDelUpdLogPlan::allocate_optimizer_stats_gathering_as_top(ObLogicalOperator
     osg->set_generated_column_exprs(info.generated_column_exprs_);
     osg->set_col_conv_exprs(info.col_conv_exprs_);
     osg->set_column_ids(info.column_ids_);
+    osg->set_online_sample_percent(info.online_sample_rate_);
     if (type == OSG_TYPE::GATHER_OSG) {
       osg->set_need_osg_merge(true);
     }

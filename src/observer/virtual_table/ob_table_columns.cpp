@@ -357,8 +357,9 @@ int ObTableColumns::fill_row_cells(const ObTableSchema &table_schema,
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_ERROR("fail to allocate memory", K(ret));
   } else {
-    session_->get_session_priv_info(session_priv);
-    if (OB_UNLIKELY(!session_priv.is_valid())) {
+    if (OB_FAIL(session_->get_session_priv_info(session_priv))) {
+      LOG_WARN("fail to get session priv info", K(ret));
+    } else if (OB_UNLIKELY(!session_priv.is_valid())) {
       ret = OB_INVALID_ARGUMENT;
       LOG_WARN("Session priv is invalid", "tenant_id", session_priv.tenant_id_,
                 "user_id", session_priv.user_id_, K(ret));
@@ -512,6 +513,16 @@ int ObTableColumns::fill_row_cells(const ObTableSchema &table_schema,
         } else if (ob_is_enum_or_set_type(def_obj.get_type())) {
           if (OB_FAIL(def_obj.print_plain_str_literal(column_schema.get_extended_type_info(), buf, buf_len, pos))) {
             LOG_WARN("fail to print plain str literal",  K(column_schema), K(buf), K(buf_len), K(pos), K(ret));
+          } else {
+            cur_row_.cells_[cell_idx].set_varchar(ObString(static_cast<int32_t>(pos), buf));
+            cur_row_.cells_[cell_idx].set_collation_type(ObCharset::get_system_collation());
+          }
+        } else if (ob_is_roaringbitmap(def_obj.get_type())) {
+          if (min_data_version_ < DATA_VERSION_4_3_2_0) {
+            ret = OB_NOT_SUPPORTED;
+            LOG_USER_ERROR(OB_NOT_SUPPORTED, "roaringbitmap type in data version less than 4.3.2.0");
+          } else if (OB_FAIL(def_obj.print_varchar_literal(buf, buf_len, pos, TZ_INFO(session_)))) {
+            LOG_WARN("fail to print varchar literal", K(ret), K(def_obj), K(buf_len), K(pos), K(buf));
           } else {
             cur_row_.cells_[cell_idx].set_varchar(ObString(static_cast<int32_t>(pos), buf));
             cur_row_.cells_[cell_idx].set_collation_type(ObCharset::get_system_collation());

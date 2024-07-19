@@ -277,12 +277,6 @@ int ObCopyMacroBlockObReader::alloc_from_memctx_first(char* &buf)
   int ret = OB_SUCCESS;
   buf = NULL;
   if (OB_ISNULL(buf = reinterpret_cast<char*>(macro_block_mem_context_.alloc()))) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-    LOG_WARN("fail to alloc buf from mem ctx", K(ret));
-  }
-
-  if (OB_ISNULL(buf)) {
-    ret = OB_SUCCESS;
     if (OB_ISNULL(buf = reinterpret_cast<char*>(allocator_.alloc(OB_DEFAULT_MACRO_BLOCK_SIZE)))) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
       LOG_WARN("fail to alloc buf", K(ret));
@@ -571,6 +565,7 @@ ObCopyMacroBlockObProducer::ObCopyMacroBlockObProducer()
     macro_idx_(0),
     handle_idx_(0),
     prefetch_meta_time_(0),
+    tablet_allocator_("HaTabletHdl"),
     tablet_handle_(),
     sstable_handle_(),
     sstable_(nullptr),
@@ -606,6 +601,9 @@ int ObCopyMacroBlockObProducer::init(
   MAKE_TENANT_SWITCH_SCOPE_GUARD(guard);
   ObSSTableMetaHandle meta_handle;
   common::ObSafeArenaAllocator allocator(allocator_);
+  ObTabletMapKey map_key;
+  map_key.ls_id_ = ls_id;
+  map_key.tablet_id_ = table_key.get_tablet_id();
 
   if (is_inited_) {
     ret = OB_INIT_TWICE;
@@ -625,8 +623,9 @@ int ObCopyMacroBlockObProducer::init(
   } else if (OB_UNLIKELY(nullptr == (ls = ls_handle.get_ls()))) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("log stream should not be NULL", KR(ret), K(tenant_id), K(ls_id), KPC(ls));
-  } else if (OB_FAIL(ls->ha_get_tablet(table_key.get_tablet_id(), tablet_handle_))) {
-    LOG_WARN("failed to get tablet handle", K(ret), K(table_key), K(ls_id));
+  } else if (OB_FAIL(ls->ha_get_tablet_without_memtables(
+      WashTabletPriority::WTP_LOW, map_key, tablet_allocator_, tablet_handle_))) {
+    LOG_WARN("failed to ha get tablet with allocator without memtables", K(ret), K(map_key));
   } else if (OB_UNLIKELY(nullptr == (tablet = tablet_handle_.get_obj()))) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("tablet not be NULL", KR(ret), K(tenant_id), K(ls_id), KPC(tablet));
@@ -650,14 +649,11 @@ int ObCopyMacroBlockObProducer::init(
     datum_range_.set_left_closed();
     datum_range_.set_right_open();
 
-    const storage::ObITableReadInfo *index_read_info = &tablet->get_rowkey_read_info();
-    if (!sstable_->is_normal_cg_sstable()) {
-      // do nothing
-    } else if (OB_FAIL(MTL(ObTenantCGReadInfoMgr *)->get_index_read_info(index_read_info))) {
-      LOG_WARN("failed to get index read info from ObTenantCGReadInfoMgr", K(ret), K(table_key), K(ls_id));
-    }
+    const storage::ObITableReadInfo *index_read_info = NULL;
 
-    if (FAILEDx(second_meta_iterator_.open(datum_range_, blocksstable::DATA_BLOCK_META,
+    if (OB_FAIL(tablet->get_sstable_read_info(sstable_, index_read_info))) {
+      LOG_WARN("failed to get index read info ", KR(ret), K(sstable_));
+    } else if (OB_FAIL(second_meta_iterator_.open(datum_range_, blocksstable::DATA_BLOCK_META,
          *sstable_, *index_read_info, allocator_, is_reverse_scan))) {
       LOG_WARN("failed to open second meta iterator", K(ret), K(ls_id), K(table_key), K(copy_macro_range_info));
     } else {
@@ -777,10 +773,10 @@ int ObCopyMacroBlockObProducer::prefetch_()
       read_info.offset_ = sstable_->get_macro_offset();
       read_info.size_ = sstable_->get_macro_read_size();
       read_info.io_desc_.set_wait_event(ObWaitEventIds::DB_FILE_MIGRATE_READ);
-      read_info.io_desc_.set_group_id(ObIOModule::HA_COPY_MACRO_BLOCK_IO);
       read_info.io_timeout_ms_ = GCONF._data_storage_io_timeout / 1000L;
       read_info.buf_ = io_buf_[handle_idx_];
-      read_info.io_desc_.set_group_id(ObIOModule::HA_COPY_MACRO_BLOCK_IO);
+      read_info.io_desc_.set_resource_group_id(THIS_WORKER.get_group_id());
+      read_info.io_desc_.set_sys_module_id(ObIOModule::HA_COPY_MACRO_BLOCK_IO);
       if (OB_FAIL(ObBlockManager::async_read_block(read_info, copy_macro_block_handle_[handle_idx_].read_handle_))) {
         STORAGE_LOG(WARN, "Fail to async read block, ", K(ret), K(read_info));
       }
@@ -1808,6 +1804,8 @@ int ObCopySSTableInfoObProducer::check_need_copy_sstable_(
                             "need_copy_scn_range", tablet_sstable_info_.ddl_sstable_scn_range_);
 
 #endif
+    } else if (sstable->is_mds_sstable()) {
+      need_copy_sstable = true;
     } else {
       need_copy_sstable = false;
       ret = OB_ERR_UNEXPECTED;
@@ -2342,10 +2340,8 @@ int ObCopySSTableMacroRangeObProducer::init(
   } else if (OB_FAIL(table_handle_.get_sstable(sstable))) {
     LOG_WARN("failed to get sstable", K(ret), K(header), K(tablet_id), K(ls_id));
   } else if (FALSE_IT(datum_range_.set_whole_range())) {
-  } else if (FALSE_IT(index_read_info = &tablet->get_rowkey_read_info())) {
-  } else if (sstable->is_normal_cg_sstable() &&
-      OB_FAIL(MTL(ObTenantCGReadInfoMgr *)->get_index_read_info(index_read_info))) {
-    LOG_WARN("failed to get index read info from ObTenantCGReadInfoMgr", K(ret), K(tablet_id), K(ls_id));
+  } else if (OB_FAIL(tablet->get_sstable_read_info(sstable, index_read_info))) {
+    LOG_WARN("failed to get index read info ", KR(ret), K(sstable));
   } else if (OB_FAIL(second_meta_iterator_.open(datum_range_, blocksstable::DATA_BLOCK_META,
       *sstable, *index_read_info, allocator_, is_reverse_scan))) {
     LOG_WARN("failed to open second meta iterator", K(ret), K(header), K(tablet_id));

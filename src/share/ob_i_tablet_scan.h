@@ -96,6 +96,49 @@ struct SampleInfo
   OB_UNIS_VERSION(1);
 };
 
+struct ObTableScanOption
+{
+  OB_UNIS_VERSION(1);
+public:
+  static const int64_t MAX_IO_READ_BATCH_SIZE = 16_MB;
+  static const int64_t MAX_STORAGE_ROWSETS_SIZE = (1 << 20);
+  ObTableScanOption() :
+      io_read_batch_size_(0),
+      io_read_gap_size_(0),
+      storage_rowsets_size_(1)
+  {}
+  bool is_io_valid() const
+  {
+    return (io_read_batch_size_ >= 0 && io_read_batch_size_ <= MAX_IO_READ_BATCH_SIZE &&
+            io_read_gap_size_ >= 0 && io_read_gap_size_ < io_read_batch_size_);
+  }
+  bool is_rowsets_valid() const
+  {
+    return storage_rowsets_size_ > 0 && storage_rowsets_size_ <= MAX_STORAGE_ROWSETS_SIZE;
+  }
+  void reset()
+  {
+    io_read_batch_size_ = 0;
+    io_read_gap_size_ = 0;
+    storage_rowsets_size_ = 1;
+  }
+  ObTableScanOption &operator=(const ObTableScanOption &opt)
+  {
+    if (this == &opt) {
+    } else {
+      io_read_batch_size_ = opt.io_read_batch_size_;
+      io_read_gap_size_ = opt.io_read_gap_size_;
+      storage_rowsets_size_ = opt.storage_rowsets_size_;
+    }
+    return *this;
+  }
+  TO_STRING_KV(K_(io_read_batch_size), K_(io_read_gap_size), K_(storage_rowsets_size));
+
+  int64_t io_read_batch_size_;
+  int64_t io_read_gap_size_;
+  int64_t storage_rowsets_size_;
+};
+
 struct ObLimitParam
 {
   int64_t offset_;
@@ -223,9 +266,14 @@ ObVTableScanParam() :
       pd_storage_filters_(nullptr),
       pd_storage_flag_(false),
       row2exprs_projector_(NULL),
+      table_scan_opt_(),
       ext_file_column_exprs_(NULL),
       ext_column_convert_exprs_(NULL),
-      schema_guard_(NULL)
+      schema_guard_(NULL),
+      auto_split_filter_type_(OB_INVALID_ID),
+      auto_split_filter_(NULL),
+      auto_split_params_(NULL),
+      is_tablet_spliting_(false)
   { }
 
   virtual ~ObVTableScanParam()
@@ -297,6 +345,7 @@ ObVTableScanParam() :
   int32_t pd_storage_flag_;
   // project storage output row to %output_exprs_
   storage::ObRow2ExprsProjector *row2exprs_projector_;
+  ObTableScanOption table_scan_opt_;
 
   // external table
   const sql::ExprFixedArray *ext_file_column_exprs_;
@@ -342,6 +391,12 @@ private:
   // New schema, used throughout the life cycle of table_scan
   share::schema::ObSchemaGetterGuard *schema_guard_;
   char schema_guard_buf_[sizeof(share::schema::ObSchemaGetterGuard)];
+
+public:
+  uint64_t auto_split_filter_type_;
+  const sql::ObExpr *auto_split_filter_;
+  sql::ExprFixedArray *auto_split_params_;
+  bool is_tablet_spliting_;
 };
 
 class ObITabletScan

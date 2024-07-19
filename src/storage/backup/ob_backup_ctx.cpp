@@ -291,7 +291,7 @@ ObBackupDataCtx::~ObBackupDataCtx()
 }
 
 int ObBackupDataCtx::open(const ObLSBackupDataParam &param, const share::ObBackupDataType &backup_data_type,
-    const int64_t file_id)
+    const int64_t file_id, common::ObInOutBandwidthThrottle &bandwidth_throttle)
 {
   int ret = OB_SUCCESS;
   static const int64_t BUF_SIZE = 4 * 1024 * 1024;
@@ -315,9 +315,10 @@ int ObBackupDataCtx::open(const ObLSBackupDataParam &param, const share::ObBacku
     file_id_ = file_id;
     file_offset_ = 0;
     backup_data_type_ = backup_data_type;
-    is_inited_ = true;
-    if (OB_FAIL(prepare_file_write_ctx_(param, backup_data_type, file_id))) {
+    if (OB_FAIL(prepare_file_write_ctx_(param, backup_data_type, file_id, bandwidth_throttle))) {
       LOG_WARN("failed to prepare file write ctx", K(ret), K(param), K(backup_data_type), K(file_id));
+    } else {
+      is_inited_ = true;
     }
   }
   return ret;
@@ -408,7 +409,7 @@ int ObBackupDataCtx::close()
       LOG_WARN("fail to complete multipart upload", K(ret), K_(dev_handle), K_(io_fd));
     }
   } else {
-    if (OB_TMP_FAIL(dev_handle_->abort(io_fd_))) {
+    if (OB_NOT_NULL(dev_handle_) && OB_TMP_FAIL(dev_handle_->abort(io_fd_))) {
       ret = COVER_SUCC(tmp_ret);
       LOG_WARN("fail to abort multipart upload", K(ret), K(tmp_ret), K_(dev_handle), K_(io_fd));
     }
@@ -441,7 +442,8 @@ int ObBackupDataCtx::open_file_writer_(const share::ObBackupPath &backup_path)
 }
 
 int ObBackupDataCtx::prepare_file_write_ctx_(
-    const ObLSBackupDataParam &param, const share::ObBackupDataType &type, const int64_t file_id)
+    const ObLSBackupDataParam &param, const share::ObBackupDataType &type, const int64_t file_id,
+    common::ObInOutBandwidthThrottle &bandwidth_throttle)
 {
   int ret = OB_SUCCESS;
   share::ObBackupPath backup_path;
@@ -450,7 +452,7 @@ int ObBackupDataCtx::prepare_file_write_ctx_(
     LOG_WARN("failed to get macro block backup path", K(ret), K(file_id));
   } else if (OB_FAIL(open_file_writer_(backup_path))) {
     LOG_WARN("failed to open file writer", K(ret), K(backup_path));
-  } else if (OB_FAIL(file_write_ctx_.open(data_file_size, io_fd_, *dev_handle_))) {
+  } else if (OB_FAIL(file_write_ctx_.open(data_file_size, io_fd_, *dev_handle_, bandwidth_throttle))) {
     LOG_WARN("failed to open file write ctx", K(ret), K(param), K(type), K(backup_path), K(data_file_size), K(file_id));
   }
   return ret;
@@ -592,7 +594,7 @@ int ObBackupDataCtx::append_index_(const IndexType &index, ObBackupIndexBufferNo
   } else if (OB_FAIL(buffer_node.put_backup_index(index))) {
     LOG_WARN("failed to put backup index", K(ret), K(index));
   } else {
-    LOG_INFO("append index", K(index));
+    LOG_DEBUG("append index", K(index));
   }
   return ret;
 }
@@ -853,7 +855,9 @@ ObLSBackupCtx::ObLSBackupCtx()
       sql_proxy_(NULL),
       rebuild_seq_(),
       check_tablet_info_cost_time_(),
-      backup_tx_table_filled_tx_scn_(share::SCN::min_scn())
+      backup_tx_table_filled_tx_scn_(share::SCN::min_scn()),
+      tablet_checker_(),
+      bandwidth_throttle_(NULL)
 {}
 
 ObLSBackupCtx::~ObLSBackupCtx()
@@ -862,7 +866,8 @@ ObLSBackupCtx::~ObLSBackupCtx()
 }
 
 int ObLSBackupCtx::open(
-    const ObLSBackupParam &param, const share::ObBackupDataType &backup_data_type, common::ObMySQLProxy &sql_proxy)
+    const ObLSBackupParam &param, const share::ObBackupDataType &backup_data_type,
+    common::ObMySQLProxy &sql_proxy, ObBackupIndexKVCache &index_kv_cache, common::ObInOutBandwidthThrottle &bandwidth_throttle)
 {
   int ret = OB_SUCCESS;
   ObArray<common::ObTabletID> tablet_list;
@@ -884,6 +889,8 @@ int ObLSBackupCtx::open(
     LOG_WARN("failed to init stat", K(ret));
   } else if (OB_FAIL(param_.assign(param))) {
     LOG_WARN("failed to assign param", K(ret), K(param));
+  } else if (OB_FAIL(tablet_checker_.init(param, backup_data_type, sql_proxy, index_kv_cache))) {
+    LOG_WARN("failed to init tablet checker", K(ret), K(param), K(backup_data_type));
   } else {
     max_file_id_ = 0;
     prefetch_task_id_ = 0;
@@ -893,6 +900,7 @@ int ObLSBackupCtx::open(
     sql_proxy_ = &sql_proxy;
     rebuild_seq_ = 0;
     check_tablet_info_cost_time_ = 0;
+    bandwidth_throttle_ = &bandwidth_throttle;
     is_inited_ = true;
     if (OB_FAIL(prepare_tablet_id_reader_(reader))) {
       LOG_WARN("failed to prepare tablet id reader", K(ret), K(param));
@@ -963,32 +971,32 @@ void ObLSBackupCtx::reuse()
   check_tablet_info_cost_time_ = 0;
 }
 
-int ObLSBackupCtx::hold_tablet(const common::ObTabletID &tablet_id, storage::ObTabletHandle &tablet_handle)
+int ObLSBackupCtx::set_tablet(const common::ObTabletID &tablet_id, ObBackupTabletHandleRef *tablet_handle)
 {
   int ret = OB_SUCCESS;
   ObMutexGuard guard(mutex_);
-  if (!tablet_id.is_valid() || !tablet_handle.is_valid()) {
+  if (!tablet_id.is_valid() || OB_ISNULL(tablet_handle)) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("get invalid args", K(ret), K(tablet_id), K(tablet_handle));
-  } else if (OB_FAIL(tablet_holder_.hold_tablet(tablet_id, tablet_handle))) {
-    LOG_WARN("failed to hold tablet", K(ret), K(tablet_id));
+    LOG_WARN("get invalid args", K(ret), K(tablet_id), KP(tablet_handle));
+  } else if (OB_FAIL(tablet_holder_.set_tablet(tablet_id, tablet_handle))) {
+    LOG_WARN("failed to hold tablet", K(ret), K(tablet_id), KPC(tablet_handle));
   } else {
-    LOG_INFO("hold tablet", K(tablet_id));
+    LOG_DEBUG("backup set tablet", K(tablet_id), KP(tablet_handle));
   }
   return ret;
 }
 
-int ObLSBackupCtx::get_tablet(const common::ObTabletID &tablet_id, storage::ObTabletHandle &tablet_handle)
+int ObLSBackupCtx::get_tablet(const common::ObTabletID &tablet_id, ObBackupTabletHandleRef *&tablet_handle)
 {
   int ret = OB_SUCCESS;
   ObMutexGuard guard(mutex_);
   if (!tablet_id.is_valid()) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("get invalid args", K(ret), K(tablet_id), K(tablet_handle));
+    LOG_WARN("get invalid args", K(ret), K(tablet_id));
   } else if (OB_FAIL(tablet_holder_.get_tablet(tablet_id, tablet_handle))) {
     LOG_WARN("failed to get tablet", K(ret), K(tablet_id));
   } else {
-    LOG_INFO("acquire tablet", K(tablet_id));
+    LOG_DEBUG("backup get tablet", K(tablet_id), KP(tablet_handle));
   }
   return ret;
 }
@@ -1003,7 +1011,7 @@ int ObLSBackupCtx::release_tablet(const common::ObTabletID &tablet_id)
   } else if (OB_FAIL(tablet_holder_.release_tablet(tablet_id))) {
     LOG_WARN("failed to release tablet", K(ret), K(tablet_id));
   } else {
-    LOG_INFO("release tablet", K(tablet_id));
+    LOG_DEBUG("release tablet", K(tablet_id));
   }
   return ret;
 }
@@ -1060,16 +1068,6 @@ int ObLSBackupCtx::set_max_file_id(const int64_t file_id)
   int ret = OB_SUCCESS;
   ObMutexGuard guard(mutex_);
   max_file_id_ = std::max(file_id, max_file_id_);
-  return ret;
-}
-
-int ObLSBackupCtx::get_prefetch_task_id(int64_t &prefetch_task_id)
-{
-  int ret = OB_SUCCESS;
-  ObMutexGuard guard(mutex_);
-  prefetch_task_id = prefetch_task_id_;
-  prefetch_task_id_++;
-  LOG_INFO("get prefetch task id", K(prefetch_task_id));
   return ret;
 }
 
@@ -1155,7 +1153,7 @@ int ObLSBackupCtx::check_and_sort_retry_list_(
   }
   if (OB_SUCC(ret)) {
     BackupRetryCmp cmp;
-    std::sort(retry_list.begin(), retry_list.end(), cmp);
+    lib::ob_sort(retry_list.begin(), retry_list.end(), cmp);
   }
   return ret;
 }
@@ -1421,7 +1419,7 @@ int ObLSBackupCtx::inner_recover_need_reuse_macro_block_(const ObBackupRetryDesc
     }
   }
   if (OB_SUCC(ret)) {
-    std::sort(backup_retry_ctx_.reused_pair_list_.begin(), backup_retry_ctx_.reused_pair_list_.end());
+    lib::ob_sort(backup_retry_ctx_.reused_pair_list_.begin(), backup_retry_ctx_.reused_pair_list_.end());
   }
   return ret;
 }

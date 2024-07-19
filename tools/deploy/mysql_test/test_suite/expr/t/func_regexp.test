@@ -1,7 +1,7 @@
 --disable_query_log
 set @@session.explicit_defaults_for_timestamp=off;
 --enable_query_log
-# owner: jiangxiu.wt
+# owner: zongmei.zzm
 # owner group: SQL1
 # description: regexp的测试
 
@@ -533,5 +533,9 @@ INSERT INTO `table10_bigint` VALUES (9,3,NULL,7,6.00000,NULL,NULL,NULL,NULL,8,1,
 set names GB18030;
 
 SELECT TRIM( SUBSTRING( SUBSTRING( '∷ ∶ ∫ ∮ ∝ ∞ ∧ ∨ ∑ ∏ ∪ ∩ ∈ ∵ ∴ ⊥ ∥ ∠ ⌒ ⊙ √∟⊿ ㏒ ㏑ % ‰' , 1, LEAST( 228, 20 ) ) , 1 , LEAST( 228, 20 ) ) ) NOT REGEXP CONCAT( 'tu', '%' ) FROM table10_bigint WHERE col_int NOT IN ( 5387431054241955840 , 13633803446934044672 , 65066 , 45808 , 6755399441055744000 ) ORDER BY col_char_20 DESC , pk ASC LIMIT 6 OFFSET 1;
+
+##bug:
+
+select cast('NAMEXX' as BINARY) regexp BINARY '^[A-Z]+$', cast('NAME66' as BINARY) regexp BINARY '^[A-Z]+$';
 
 drop database ly;

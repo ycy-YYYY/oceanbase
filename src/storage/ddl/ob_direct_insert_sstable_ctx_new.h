@@ -84,7 +84,8 @@ public:
       const int64_t context_id,
       const int64_t execution_id,
       const ObTabletDirectLoadInsertParam &param,
-      const share::SCN checkpoint_scn = share::SCN::min_scn());
+      const share::SCN checkpoint_scn = share::SCN::min_scn(),
+      const bool only_persisted_ddl_data = false);
 
   int replay_create_tablet_direct_load(
       const ObTabletHandle &tablet_handle,
@@ -274,7 +275,8 @@ public:
     return common::murmurhash(&slice_id, sizeof(slice_id), 0L);
   }
   void reset_slice_ctx_on_demand();
-  TO_STRING_KV(K_(build_param), K_(is_task_end), K_(task_finish_count), K_(task_total_cnt), K_(sorted_slices_idx));
+  void cleanup_slice_writer(const int64_t context_id);
+  TO_STRING_KV(K_(build_param), K_(is_task_end), K_(task_finish_count), K_(task_total_cnt), K_(sorted_slices_idx), K_(commit_scn), KPC(storage_schema_));
   struct AggregatedCGInfo final {
   public:
     AggregatedCGInfo()
@@ -287,13 +289,27 @@ public:
     int64_t last_idx_;
   };
 public:
+  struct SliceKey
+  {
+  public:
+    SliceKey() : context_id_(0), slice_id_(0) {}
+    explicit SliceKey(const int64_t context_id, const int64_t slice_id): context_id_(context_id), slice_id_(slice_id) {}
+    ~SliceKey() {}
+    uint64_t hash() const { return murmurhash(&slice_id_, sizeof(slice_id_), 0); }
+    int hash(uint64_t &hash_val) const { hash_val = hash(); return OB_SUCCESS;}
+    bool operator == (const SliceKey &other) const { return context_id_ == other.context_id_ && slice_id_ == other.slice_id_; }
+    TO_STRING_KV(K_(context_id), K_(slice_id));
+  public:
+    int64_t context_id_;
+    int64_t slice_id_;
+  };
   typedef common::hash::ObHashMap<
-    int64_t,
+    SliceKey,
     ObDirectLoadSliceWriter *> SLICE_MGR_MAP;
   common::ObConcurrentFIFOAllocator allocator_;
   common::ObConcurrentFIFOAllocator slice_writer_allocator_;
   ObTabletDirectLoadInsertParam build_param_;
-  SLICE_MGR_MAP slice_mgr_map_; // key is slice_id, decided by upper caller.
+  SLICE_MGR_MAP slice_mgr_map_; // key is <context_id, slice_id>, decided by upper caller.
   blocksstable::ObWholeDataStoreDesc data_block_desc_;
   blocksstable::ObSSTableIndexBuilder *index_builder_;
   common::ObArray<ObOptColumnStat*> column_stat_array_; // online column stat result.
@@ -303,6 +319,9 @@ public:
   int64_t task_finish_count_; // reach the parallel slice cnt, means the tablet data finished.
   int64_t task_total_cnt_; // parallelism of the PX.
   int64_t fill_column_group_finish_count_;
+  share::SCN commit_scn_;
+  ObArenaAllocator schema_allocator_;
+  ObStorageSchema *storage_schema_;
 };
 
 class ObTabletDirectLoadMgr
@@ -320,6 +339,7 @@ public:
   virtual int open_sstable_slice(
       const bool is_data_tablet_process_for_lob,
       const blocksstable::ObMacroDataSeq &start_seq,
+      const int64_t context_id,
       const int64_t slice_id);
   virtual int fill_sstable_slice(
       const ObDirectLoadSliceInfo &slice_info,
@@ -341,6 +361,12 @@ public:
       const ObArray<int64_t> &lob_column_idxs,
       const ObArray<common::ObObjMeta> &col_types,
       blocksstable::ObDatumRow &datum_row);
+  // for delete lob in incremental direct load only
+  virtual int fill_lob_meta_sstable_slice(
+      const ObDirectLoadSliceInfo &slice_info /*contains data_tablet_id, lob_slice_id, start_seq*/,
+      const share::SCN &start_scn,
+      ObIStoreRowIterator *iter,
+      int64_t &affected_rows);
   virtual int close_sstable_slice(
       const bool is_data_tablet_process_for_lob,
       const ObDirectLoadSliceInfo &slice_info,
@@ -378,9 +404,10 @@ public:
   virtual int wait_notify(const ObDirectLoadSliceWriter *slice_writer, const share::SCN &start_scn);
   int fill_column_group(const int64_t thread_cnt, const int64_t thread_id);
   virtual int notify_all();
-  virtual int calc_range(const ObStorageSchema *storage_schema, const blocksstable::ObStorageDatumUtils &datum_utils, const int64_t thread_cnt);
+  virtual int calc_range(const int64_t thread_cnt);
   int calc_cg_range(ObArray<ObDirectLoadSliceWriter *> &sorted_slices, const int64_t thread_cnt);
   const ObIArray<ObColumnSchemaItem> &get_column_info() const { return column_items_; };
+  int prepare_storage_schema(ObTabletHandle &tablet_handle);
 
   VIRTUAL_TO_STRING_KV(K_(is_inited), K_(is_schema_item_ready), K_(ls_id), K_(tablet_id), K_(table_key), K_(data_format_version), K_(ref_cnt),
                K_(direct_load_type), K_(sqc_build_ctx), KPC(lob_mgr_handle_.get_obj()), K_(schema_item), K_(column_items), K_(lob_column_idxs));
@@ -424,7 +451,6 @@ protected:
   ObArray<ObColumnSchemaItem> column_items_;
   ObArray<int64_t> lob_column_idxs_;
   ObArray<common::ObObjMeta> lob_col_types_;
-  ObTabletHandle tablet_handle_;
   ObTableSchemaItem schema_item_;
   int64_t dir_id_;
 };
@@ -488,6 +514,7 @@ public:
       const ObTablet &tablet,
       ObDDLTableMergeDagParam &merge_param);
   int prepare_major_merge_param(ObTabletDDLParam &param);
+  void cleanup_slice_writer(const int64_t context_id);
   INHERIT_TO_STRING_KV("ObTabletDirectLoadMgr", ObTabletDirectLoadMgr, K_(start_scn), K_(commit_scn), K_(execution_id));
 private:
   bool is_started() { return start_scn_.is_valid_and_not_min(); }

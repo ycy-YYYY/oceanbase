@@ -287,22 +287,23 @@ int ObParallelMergeCtx::init_parallel_mini_merge(compaction::ObBasicTabletMergeC
     ObArray<ObStoreRange> store_ranges;
     store_ranges.set_attr(lib::ObMemAttr(MTL_ID(), "TmpMiniRanges", ObCtxIds::MERGE_NORMAL_CTX_ID));
 
+    ObStoreRange input_range;
+    input_range.set_whole_range();
     if (concurrent_cnt_ <= 1) {
       if (OB_FAIL(init_serial_merge())) {
         STORAGE_LOG(WARN, "Failed to init serialize merge", K(ret));
       }
-    } else if (OB_FAIL(memtable->get_split_ranges(nullptr, nullptr, concurrent_cnt_, store_ranges))) {
-      if (OB_ENTRY_NOT_EXIST == ret) {
+    } else if (OB_FAIL(memtable->get_split_ranges(input_range, concurrent_cnt_, store_ranges))) {
+      STORAGE_LOG(WARN, "Failed to get split ranges from memtable", K(ret));
+    } else if (OB_UNLIKELY(store_ranges.count() != concurrent_cnt_)) {
+      if (1 == store_ranges.count()) {
         if (OB_FAIL(init_serial_merge())) {
           STORAGE_LOG(WARN, "Failed to init serialize merge", K(ret));
         }
       } else {
-        STORAGE_LOG(WARN, "Failed to get split ranges from memtable", K(ret));
+        ret = OB_ERR_UNEXPECTED;
+        STORAGE_LOG(WARN, "Unexpected range array and concurrent_cnt", K(ret), K_(concurrent_cnt), K(store_ranges));
       }
-    } else if (OB_UNLIKELY(store_ranges.count() != concurrent_cnt_)) {
-      ret = OB_ERR_UNEXPECTED;
-      STORAGE_LOG(WARN, "Unexpected range array and concurrent_cnt", K(ret), K_(concurrent_cnt),
-                  K(store_ranges));
     } else {
       for (int64_t i = 0; OB_SUCC(ret) && i < store_ranges.count(); i++) {
         ObDatumRange datum_range;
@@ -341,10 +342,10 @@ int ObParallelMergeCtx::init_parallel_mini_minor_merge(compaction::ObBasicTablet
       STORAGE_LOG(WARN, "Failed to get all sstables from merge ctx", K(ret), K(merge_ctx));
     } else if (OB_FAIL(range_spliter.get_range_split_info(tables, rowkey_read_info, whole_range, range_info))) {
       STORAGE_LOG(WARN, "Failed to init range spliter", K(ret));
-    } else if (OB_UNLIKELY(tablet_size <= 0 || range_info.total_size_ < 0 || tables.count() <= 1)) {
+    } else if (OB_UNLIKELY(tablet_size <= 0 || range_info.total_size_ < 0 || (tables.count() <= 1 && !merge_ctx.static_param_.is_backfill_))) {
       ret = OB_INVALID_ARGUMENT;
       STORAGE_LOG(WARN, "Invalid argument to calc mini minor parallel degree", K(ret), K(tablet_size),
-                K(range_info), K(tables.count()));
+                K(range_info), K(tables.count()), K(merge_ctx));
     } else {
       calc_adaptive_parallel_degree(ObDagPrio::DAG_PRIO_COMPACTION_MID,
                                     ObCompactionEstimator::MINOR_MEM_PER_THREAD,

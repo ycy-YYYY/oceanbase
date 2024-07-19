@@ -119,6 +119,19 @@ public:
   bool is_valid() const override { return true; }
 };
 
+struct ObBackupResourcePool
+{
+public:
+    ObBackupResourcePool()
+      : resource_pool_(),
+        unit_config_() {}
+    int assign(const ObBackupResourcePool &that);
+    TO_STRING_KV(K_(resource_pool), K_(unit_config));
+public:
+    share::ObResourcePool resource_pool_;
+    share::ObUnitConfig unit_config_;
+};
+
 struct ObExternTenantLocalityInfoDesc final : public ObExternBackupDataDesc
 {
 public:
@@ -141,7 +154,8 @@ public:
       locality_(),
       primary_zone_(),
       sys_time_zone_(),
-      sys_time_zone_wrap_() {}
+      sys_time_zone_wrap_(),
+      resource_pool_infos_() {}
   virtual ~ObExternTenantLocalityInfoDesc() {}
   int assign(const ObExternTenantLocalityInfoDesc &that);
   bool is_valid() const override;
@@ -159,6 +173,7 @@ public:
   PrimaryZone primary_zone_;
   TimeZone sys_time_zone_;
   ObTimeZoneInfoWrap sys_time_zone_wrap_;
+  common::ObSArray<ObBackupResourcePool> resource_pool_infos_;
 };
 
 struct ObExternBackupSetInfoDesc final : public ObExternBackupDataDesc
@@ -310,6 +325,7 @@ public:
   int init(const share::ObBackupDest &backup_dest, const share::ObBackupSetDesc &backup_desc);
   const share::ObBackupSetDesc &get_backup_set_desc() const { return backup_desc_; }
   const share::ObBackupDest &get_backup_set_dest() const { return backup_set_dest_; }
+  void reset();
 
   int write_ls_attr(const int64_t turn_id, const ObBackupDataLSAttrDesc &ls_info); 
   int read_ls_attr_info(ObBackupDataLSAttrDesc &ls_info);
@@ -347,11 +363,12 @@ public:
   // write and read backup set info
   int write_backup_set_info(const ObExternBackupSetInfoDesc &backup_set_info);
   int read_backup_set_info(ObExternBackupSetInfoDesc &backup_set_info);
-
+  int is_backup_set_info_file_exist(bool &is_exist) const;
   int get_backup_set_array(const common::ObString &passwd_array, const share::SCN &restore_scn,
       share::SCN &restore_start_scn, common::ObIArray<share::ObRestoreBackupSetBriefInfo> &backup_set_list);
   int get_max_backup_set_file_info(const common::ObString &passwd_array, ObBackupSetFileDesc &output_desc);
   int get_backup_sys_time_zone_wrap(common::ObTimeZoneInfoWrap & time_zone_wrap);
+  int get_single_backup_set_sys_time_zone_wrap(common::ObTimeZoneInfoWrap & time_zone_wrap);
   int get_max_sys_ls_retry_id(
       const share::ObBackupPath &backup_path, const share::ObLSID &ls_id, const int64_t turn_id, int64_t &retry_id);
   int write_root_key_info(const uint64_t tenant_id);

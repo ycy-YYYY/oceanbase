@@ -203,6 +203,7 @@ public:
   int check_dup_table_lease_valid(const share::ObLSID ls_id, bool &is_dup_ls, bool &is_lease_valid);
   //get the memory used condition of transaction module
   int iterate_trans_memory_stat(ObTransMemStatIterator &mem_stat_iter);
+  int get_trans_start_session_id(const share::ObLSID &ls_id, const ObTransID &tx_id, uint32_t &session_id);
   int dump_elr_statistic();
   int remove_callback_for_uncommited_txn(
     const share::ObLSID ls_id,
@@ -229,7 +230,8 @@ public:
                            const char *buf,
                            const int64_t buf_len,
                            const int64_t request_id = 0,
-                           const ObRegisterMdsFlag &register_flag = ObRegisterMdsFlag());
+                           const ObRegisterMdsFlag &register_flag = ObRegisterMdsFlag(),
+                           const transaction::ObTxSEQ seq_no = transaction::ObTxSEQ());
   ObTxELRUtil &get_tx_elr_util() { return elr_util_; }
   int create_tablet(const common::ObTabletID &tablet_id, const share::ObLSID &ls_id)
   {
@@ -260,6 +262,7 @@ private:
                              const ObTxDataSourceType &type,
                              const char *buf,
                              const int64_t buf_len,
+                             const transaction::ObTxSEQ seq_no,
                              const ObRegisterMdsFlag &register_flag);
 private:
   int handle_redo_sync_task_(ObDupTableRedoSyncTask *task, bool &need_release_task);

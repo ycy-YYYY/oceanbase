@@ -255,7 +255,7 @@ int ObSelectResolver::do_resolve_set_query_in_cte(const ParseNode &parse_tree, b
       if (is_oracle_mode()){
         /* do nothing */
         LOG_WARN("Failed to resolve child stmt", K(ret));
-      } else if (params_.has_recursive_word_) {
+      } else if (cte_ctx_.has_recursive_word_) {
         ret = OB_ERR_CTE_NEED_QUERY_BLOCKS;  // mysql error: Recursive Common Table Expression 'cte' should have one or
                                              // more non-recursive query blocks followed by one or more recursive ones
         LOG_WARN("Failed to resolve child stmt", K(ret));
@@ -281,7 +281,7 @@ int ObSelectResolver::do_resolve_set_query_in_cte(const ParseNode &parse_tree, b
   } 
   
   if (OB_SUCC(ret)) {
-    if (!params_.has_cte_param_list_ && 
+    if (!cte_ctx_.has_cte_param_list_ &&
         !left_resolver.cte_ctx_.cte_col_names_.empty()) {
       right_resolver.cte_ctx_.cte_col_names_.reset();
       cte_ctx_.cte_col_names_.reset();
@@ -1033,6 +1033,268 @@ int ObSelectResolver::search_connect_group_by_clause(const ParseNode &parent,
   return ret;
 }
 
+int ObSelectResolver::check_and_mark_aggr_in_having_scope(ObSelectStmt *select_stmt) {
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(select_stmt)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null pointer", K(ret));
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && i < select_stmt->get_having_expr_size(); ++i) {
+      ObRawExpr* expr = select_stmt->get_having_exprs().at(i);
+      ObArray<ObAggFunRawExpr*> aggrs;
+      if (OB_ISNULL(expr)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("expr is NULL ptr", K(ret));
+      } else if (OB_FAIL(ObTransformUtils::extract_aggr_expr(expr, aggrs))) {
+        LOG_WARN("failed to extrace aggr expr", K(ret));
+      } else {
+        // having aggr must in inner stmt
+        for (int64_t j = 0; OB_SUCC(ret) && j < aggrs.count(); ++j) {
+          ObAggFunRawExpr* aggr_expr = aggrs.at(j);
+          if (OB_ISNULL(aggr_expr)) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("expr is NULL ptr", K(ret));
+          } else if (aggr_expr->contain_nested_aggr()) {
+            ret = OB_ERR_WRONG_FIELD_WITH_GROUP;
+            LOG_USER_ERROR(OB_ERR_WRONG_FIELD_WITH_GROUP,
+                           aggr_expr->get_expr_name().length(),
+                           aggr_expr->get_expr_name().ptr());
+          } else {
+            aggr_expr->set_nested_aggr_inner_stmt(true);
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+// block :
+// 1 id and aggr(aggr(col)) in diff level
+// select id from test group by id order by max(max(id));
+// select id from test group by id order by max(max(data));
+// select id, max(max(data)) from test group by id;
+// select item must be outer
+// select max(data) + 1 as data1 group by id order by max(data1);
+int ObSelectResolver::check_aggr_in_select_scope(ObSelectStmt *select_stmt) {
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(select_stmt)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null pointer", K(ret));
+  } else {
+    ObIArray<SelectItem> &select_items = select_stmt->get_select_items();
+    for (int64_t i = 0; OB_SUCC(ret) && i < select_items.count(); ++i) {
+      ObArray<ObAggFunRawExpr*> aggrs;
+      if (OB_ISNULL(select_items.at(i).expr_)) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_WARN("invalid expr in select items.", K(ret));
+        //compatible oracle: select 1, sum(max(c1)) from t1 group by c1;
+      } else if (select_items.at(i).expr_->is_const_expr()) {
+        //do nothing
+      } else if (!select_items.at(i).expr_->has_flag(CNT_AGG)) {
+        //in oracle it's "not a single-group group function."
+        // select id, max(max(id))
+        ret = OB_ERR_WRONG_FIELD_WITH_GROUP;
+        ObString column_name = select_items.at(i).is_real_alias_ ?
+              select_items.at(i).alias_name_ :
+              select_items.at(i).expr_name_;
+        LOG_USER_ERROR(OB_ERR_WRONG_FIELD_WITH_GROUP,
+                      column_name.length(),
+                      column_name.ptr());
+      } else if (OB_FAIL(ObTransformUtils::extract_aggr_expr(select_items.at(i).expr_, aggrs))){
+        LOG_WARN("failed to extrace aggr_expr", K(ret));
+      } else {
+        for (int64_t j = 0; OB_SUCC(ret) && j < aggrs.count(); ++j) {
+          ObAggFunRawExpr* aggr_expr = aggrs.at(j);
+          if (OB_ISNULL(aggr_expr)) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("expr is NULL ptr", K(ret));
+          } else if (aggr_expr->in_inner_stmt()) {
+            ret = OB_ERR_NOT_A_SINGLE_GROUP_FUNCTION;
+            LOG_WARN("select in aggr alias can not be nested in aggr", K(ret));
+          }
+        }
+      }
+    }
+    if (OB_SUCC(ret)) {
+      if (select_stmt->get_group_expr_size() == 0 &&
+          select_stmt->get_rollup_expr_size() == 0 &&
+          select_stmt->get_grouping_sets_items_size() == 0 &&
+          select_stmt->get_rollup_items_size() == 0 &&
+          select_stmt->get_cube_items_size() == 0) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_WARN("nested group function without group by", K(ret));
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "nested group function without group by");
+      }
+    }
+  }
+  return ret;
+}
+
+int ObSelectResolver::mark_aggr_in_select_scope(ObSelectStmt *select_stmt) {
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(select_stmt)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null pointer", K(ret));
+  } else {
+    ObRawExprCopier copier(*params_.expr_factory_);
+    ObIArray<SelectItem> &select_items = select_stmt->get_select_items();
+    ObSEArray<ObAggFunRawExpr*, 4> origin_mark_inner_expr;
+    for (int64_t i = 0; OB_SUCC(ret) && i < select_items.count(); ++i) {
+      ObArray<ObAggFunRawExpr*> aggrs;
+      if (OB_ISNULL(select_items.at(i).expr_)) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_WARN("invalid expr in select items.", K(ret));
+      } else if (OB_FAIL(ObTransformUtils::extract_aggr_expr(select_items.at(i).expr_, aggrs))){
+        LOG_WARN("failed to extrace aggr_eObIRawExprCopierxpr", K(ret));
+      } else {
+        for (int64_t j = 0; OB_SUCC(ret) && j < aggrs.count(); ++j) {
+          ObAggFunRawExpr* aggr_expr = aggrs.at(j);
+          if (OB_ISNULL(aggr_expr)) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("expr is NULL ptr", K(ret));
+          } else if (aggr_expr->in_inner_stmt()) {
+            // select max(id) + 1 from test group by id having max(id) = 1 order by max(id),max(max(data));
+            // select sum(b),sum(b) + sum(c) as inn from t3 group by b,c having sum(b)+sum(c) > 1 order by 1,sum(b) + sum(sum(e + c));
+            if(OB_FAIL(add_var_to_array_no_dup(origin_mark_inner_expr, aggr_expr))) {
+              LOG_WARN("error to add aggr to array", K(ret));
+            }
+          } else {
+            aggr_expr->set_nested_aggr_inner_stmt(false);
+          }
+        }
+      }
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < origin_mark_inner_expr.count(); ++i) {
+      ObRawExpr *aggr_expr = origin_mark_inner_expr.at(i);
+      ObRawExpr *aggr_expr_cp = NULL;
+      if (OB_FAIL(ObRawExprCopier::copy_expr_node(*params_.expr_factory_, aggr_expr, aggr_expr_cp))) {
+        LOG_WARN("failed to expr copy", K(ret));
+      } else if (aggr_expr_cp == NULL) {
+        LOG_WARN("unexpected null ptr", K(ret));
+      } else {
+        ObAggFunRawExpr* new_agg = static_cast<ObAggFunRawExpr*>(aggr_expr_cp);
+        new_agg->set_nested_aggr_inner_stmt(false);
+        if (OB_FAIL(copier.add_replaced_expr(aggr_expr, new_agg))) {
+          LOG_WARN("failed to add replace expr", K(ret));
+        } else if (OB_FAIL(select_stmt->add_agg_item(*new_agg))) {
+          LOG_WARN("failed to add agg item", K(ret));
+        }
+      }
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < select_items.count(); ++i) {
+      ObRawExpr* new_expr = NULL;
+      if (OB_ISNULL(select_items.at(i).expr_)) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_WARN("invalid expr in select items.", K(ret));
+      } else if (OB_FAIL(copier.copy_on_replace(select_items.at(i).expr_, new_expr))) {
+        LOG_WARN("failed to copy on replace the expr", K(ret));
+      } else if (new_expr == NULL) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected null ptr", K(ret));
+      } else {
+        select_items.at(i).expr_ = new_expr;
+      }
+    }
+    ObIArray<OrderItem> &order_items = select_stmt->get_order_items();
+    for (int64_t i = 0; OB_SUCC(ret) && i < order_items.count(); ++i) {
+      ObRawExpr* new_expr = NULL;
+      if (OB_ISNULL(order_items.at(i).expr_)) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_WARN("invalid expr in order items.", K(ret));
+      } else if (OB_FAIL(copier.copy_on_replace(order_items.at(i).expr_, new_expr))) {
+        LOG_WARN("failed to copy on replace the expr", K(ret));
+      } else if (new_expr == NULL) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected null ptr", K(ret));
+      } else {
+        order_items.at(i).expr_ = new_expr;
+      }
+    }
+  }
+  return ret;
+}
+
+// if orderby has aggr(aggr) then orderby should be outer else it should be inner
+// positive example following max(data) have to checked;
+// select max(data) group by id order by max(max(data));
+// select max(id) group by id order by max(max(id));
+// negetive example following max(data) should not to be checked in inner stmt
+// select id from test group by id having max(data) = 1 ordered by max(max(data))
+int ObSelectResolver::mark_aggr_in_order_by_scope(ObSelectStmt *select_stmt) {
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(select_stmt)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null pointer", K(ret));
+  } else {
+    ObIArray<SelectItem> &select_items = select_stmt->get_select_items();
+    ObSEArray<ObAggFunRawExpr*, 4> select_agg_expr;
+
+    for (int64_t i = 0; OB_SUCC(ret) && i < select_items.count(); ++i) {
+      ObArray<ObAggFunRawExpr*> aggrs;
+      if (OB_ISNULL(select_items.at(i).expr_)) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_WARN("invalid expr in select items.", K(ret));
+      } else if (OB_FAIL(ObTransformUtils::extract_aggr_expr(select_items.at(i).expr_, aggrs))){
+        LOG_WARN("failed to extrace aggr_eObIRawExprCopierxpr", K(ret));
+      } else {
+        for (int64_t j = 0; OB_SUCC(ret) && j < aggrs.count(); ++j) {
+          ObAggFunRawExpr* aggr_expr = aggrs.at(j);
+          if (OB_ISNULL(aggr_expr)) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("unexpected null ptr", K(ret));
+          } else if (OB_FAIL(add_var_to_array_no_dup(select_agg_expr, aggr_expr))) {
+            LOG_WARN("error to add aggr to array", K(ret));
+          }
+        }
+      }
+    }
+
+    ObIArray<OrderItem> &order_items = select_stmt->get_order_items();
+    for (int64_t i = 0; OB_SUCC(ret) && i < order_items.count(); ++i) {
+      ObArray<ObAggFunRawExpr*> aggrs;
+      if (OB_ISNULL(order_items.at(i).expr_)) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_WARN("invalid expr in select items.", K(ret));
+        //compatible oracle: select 1, sum(max(c1)) from t1 group by c1;
+      } else if (order_items.at(i).expr_->is_const_expr()) {
+        // do nothing
+      } else if (OB_FAIL(ObTransformUtils::extract_aggr_expr(order_items.at(i).expr_, aggrs))) {
+        LOG_WARN("invalid expr in extrace aggr expr", K(ret));
+      } else {
+        for (int64_t j = 0; OB_SUCC(ret) && j < aggrs.count(); ++j) {
+          ObAggFunRawExpr* aggr_expr = aggrs.at(j);
+          if (OB_ISNULL(aggr_expr)) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("expr is NULL ptr", K(ret));
+          } else if (aggr_expr->contain_nested_aggr()) {
+            aggr_expr->set_nested_aggr_inner_stmt(false);
+          } else {
+            if(!aggr_expr->in_inner_stmt()) {
+              // there are two types of aggr in order by
+              // 1 derive from the select -- outer
+              // 2 derive from the having -- inner
+              // 3 new appear in order by -- inner
+              // select max(id) from test group by id order by 1,max(max(data));
+              // select max(id) from test group by id order by max(id),max(max(data));
+              // select sum(b) + sum(c) from t3 group by b,c having sum(b)+sum(c) > 1 order by 1,sum(b) + sum(sum(e + c));
+              // select sum(b) + sum(c),sum(sum(b)) from t3 group by b,c having sum(b)+sum(c) > 1 order by 1,sum(b) + sum(sum(e + c));
+              // In oracle next stmt can be compiled but running with error.
+              // select sum(b) + sum(c) from t3 group by b,c having sum(b)+sum(c) > 1 order by 1,sum(b) + sum(sum(e + c)) + sum(e);
+              if (!has_exist_in_array(select_agg_expr, aggr_expr)) {
+                aggr_expr->set_nested_aggr_inner_stmt(true);
+              }
+            }
+            // this branch means aggr_expr in_inner_stmt
+            // select sub(c) from test group by b having sum(b) > 1 order by sum(b)
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 int ObSelectResolver::resolve_normal_query(const ParseNode &parse_tree)
 {
   int ret = OB_SUCCESS;
@@ -1074,6 +1336,7 @@ int ObSelectResolver::resolve_normal_query(const ParseNode &parse_tree)
   if (OB_SUCC(ret) && (start_with != NULL || connect_by != NULL)) {
     select_stmt->set_hierarchical_query(true);
   }
+  OZ( resolve_hints(parse_tree.children_[PARSE_SELECT_HINTS]) );
   /* resolve from clause */
   OZ( resolve_from_clause(parse_tree.children_[PARSE_SELECT_FROM]) );
   /* resolve start with clause */
@@ -1133,17 +1396,10 @@ int ObSelectResolver::resolve_normal_query(const ParseNode &parse_tree)
     }
   }
 
-  if (OB_SUCC(ret) && select_stmt->has_for_update() && select_stmt->is_hierarchical_query()) {
-    ret = OB_NOT_SUPPORTED;
-    LOG_WARN("for update with hierarchical not support", K(ret));
-    LOG_USER_ERROR(OB_NOT_SUPPORTED, "for update with hierarchical");
-  }
-
   if (OB_SUCC(ret) && has_top_limit_) {
     has_top_limit_ = false;
     select_stmt->set_has_top_limit(NULL != parse_tree.children_[PARSE_SELECT_LIMIT]);
   }
-  OZ( resolve_hints(parse_tree.children_[PARSE_SELECT_HINTS]) );
 
   //bug:
   //由于支持mysql模式下的name window,需要提前解析name window保存下来，然后再解析引用的win expr的表达式,当前实现
@@ -1166,6 +1422,18 @@ int ObSelectResolver::resolve_normal_query(const ParseNode &parse_tree)
   }
 
   OZ( select_stmt->formalize_stmt(session_info_) );
+
+  if (OB_SUCC(ret) && has_nested_aggr_) {
+    if (OB_FAIL(check_aggr_in_select_scope(select_stmt))) {
+      LOG_WARN("failed to check expr in select scope", K(ret));
+    } else if (OB_FAIL(check_and_mark_aggr_in_having_scope(select_stmt))) {
+      LOG_WARN("failed to check and mark the expr having", K(ret));
+    } else if (OB_FAIL(mark_aggr_in_select_scope(select_stmt))) {
+      LOG_WARN("failed to check and mark the expr select", K(ret));
+    } else if (OB_FAIL(mark_aggr_in_order_by_scope(select_stmt))) {
+      LOG_WARN("failed to check and mark the expr order", K(ret));
+    }
+  }
 
   //统一为本层的表达式进行only full group by验证，避免检查的逻辑过于分散
   OZ( check_group_by() );
@@ -1284,7 +1552,7 @@ int ObSelectResolver::resolve(const ParseNode &parse_tree)
       }
     }
   }
-  if (OB_SUCC(ret) && !is_oracle_mode() && !params_.has_cte_param_list_) {
+  if (OB_SUCC(ret) && !is_oracle_mode() && !cte_ctx_.has_cte_param_list_) {
     cte_ctx_.cte_col_names_.reuse();
     for (int64_t i = 0; OB_SUCC(ret) && i < select_stmt->get_select_item_size(); i++) {
       if (OB_FAIL(cte_ctx_.cte_col_names_.push_back(select_stmt->get_select_item(i).alias_name_))) {
@@ -1326,6 +1594,8 @@ int ObSelectResolver::resolve_query_options(const ParseNode *node)
           ret = OB_ERR_CANT_USE_OPTION_HERE;
           LOG_USER_ERROR(OB_ERR_CANT_USE_OPTION_HERE, "SQL_CALC_FOUND_ROWS");
         }
+      } else if (option_node->type_ == T_STRAIGHT_JOIN) {
+        select_stmt->set_select_straight_join(true);
       }
     }
   }
@@ -1604,6 +1874,9 @@ int ObSelectResolver::set_for_update_oracle(ObSelectStmt &stmt,
         if (OB_ISNULL(view = table->ref_query_)) {
           ret = OB_ERR_UNEXPECTED;
           LOG_WARN("view is invalid", K(ret), K(*table));
+        } else if (0 == view->get_table_size()) {
+          // table is DUAL, does not need FOR UPDATE
+          table->for_update_ = false;
         } else if (NULL != col) {
           int64_t sel_id = col->get_column_id() - OB_APP_MIN_COLUMN_ID;
           ObRawExpr *sel_expr = NULL;
@@ -1794,6 +2067,7 @@ int ObSelectResolver::resolve_field_list(const ParseNode &node)
   ParseNode *alias_node = NULL;
   bool is_bald_star = false;
   ObSelectStmt *select_stmt = NULL;
+  bool enable_modify_null_name = false;
   //LOG_INFO("resolve_select_1", "usec", ObSQLUtils::get_usec());
   current_scope_ = T_FIELD_LIST_SCOPE;
   if (OB_ISNULL(session_info_) || OB_ISNULL(select_stmt = get_select_stmt())) {
@@ -1831,6 +2105,17 @@ int ObSelectResolver::resolve_field_list(const ParseNode &node)
         if (OB_FAIL(ob_write_string(*allocator_, alias_name, select_item.alias_name_))) {
           LOG_WARN("Can not malloc space for alias name", K(ret));
         }
+      }
+    } else if (OB_FAIL(session_info_->check_feature_enable(ObCompatFeatureType::PROJECT_NULL,
+                                                           enable_modify_null_name))) {
+      LOG_WARN("failed to check feature enable", K(ret));
+    } else if (is_mysql_mode() && node.children_[i]->children_[0]->type_ == T_NULL &&
+               enable_modify_null_name) {
+      // MySQL sets the alias of standalone null value("\N","null"...) to "NULL" during projection.
+      // Note: when null value is in a composite expression, its alias is not modified.
+      ObString alias_name = ObString::make_string("NULL");
+      if (OB_FAIL(ob_write_string(*allocator_, alias_name, select_item.alias_name_))) {
+        LOG_WARN("Can not malloc space for alias name", K(ret));
       }
     } else {
       select_item.alias_name_.assign_ptr(node.children_[i]->str_value_,
@@ -2220,43 +2505,13 @@ int ObSelectResolver::resolve_field_list(const ParseNode &node)
     // for oracle mode, check grouping here
     if (OB_FAIL(ret) || !is_oracle_mode()) {
       /*do nothing*/
-    } else if (OB_FAIL(recursive_check_grouping_columns(select_stmt, select_item.expr_))) {
+    } else if (OB_ISNULL(select_item.expr_)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected null", K(ret));
+    } else if (OB_FAIL(recursive_check_grouping_columns(select_stmt, select_item.expr_, false))) {
       LOG_WARN("failed to recursive check grouping columns", K(ret));
     } else {/*do nothing*/}
   } // end for
-
-  if (OB_SUCC(ret) && has_nested_aggr_) {
-    ObIArray<SelectItem> &select_items = select_stmt->get_select_items();
-    for (int64_t i = 0; OB_SUCC(ret) && i < select_items.count(); i++) {
-      if (OB_ISNULL(select_items.at(i).expr_)) {
-        ret = OB_INVALID_ARGUMENT;
-        LOG_WARN("invalid expr in select items.", K(ret));
-        //compatible oracle: select 1, sum(max(c1)) from t1 group by c1;
-      } else if (select_items.at(i).expr_->is_const_expr()) {
-        //do nothing
-      } else if (!select_items.at(i).expr_->has_flag(CNT_AGG)) {
-        //in oracle it's "not a single-group group function."
-        ret = OB_ERR_WRONG_FIELD_WITH_GROUP;
-        ObString column_name = select_items.at(i).is_real_alias_ ?
-              select_items.at(i).alias_name_ :
-              select_items.at(i).expr_name_;
-        LOG_USER_ERROR(OB_ERR_WRONG_FIELD_WITH_GROUP,
-                       column_name.length(),
-                       column_name.ptr());
-      } else { /*do nothing.*/ }
-    }
-    if (OB_SUCC(ret)) {
-      if (select_stmt->get_group_expr_size() == 0 &&
-          select_stmt->get_rollup_expr_size() == 0 &&
-          select_stmt->get_grouping_sets_items_size() == 0 &&
-          select_stmt->get_rollup_items_size() == 0 &&
-          select_stmt->get_cube_items_size() == 0) {
-        ret = OB_NOT_SUPPORTED;
-        LOG_WARN("nested group function without group by", K(ret));
-        LOG_USER_ERROR(OB_NOT_SUPPORTED, "nested group function without group by");
-      }
-    }
-  }
 
   if (OB_SUCC(ret)) {
     // Oracle mode, * can't be used with other expresion
@@ -2660,23 +2915,13 @@ int ObSelectResolver::resolve_all_generated_table_columns(
     *  但是对于select * from(select c1,c1 from t1)；这样的查询肯定引用了，因此必须在展开*对应的查询时进行一次
     *  检查，如果存在重复列是不允许的；
      */
-    // if the select item is a duplicable column in generated table, skip the check.
-    // else we should set the skip_join_dup parameter to true. 
-    if (OB_FAIL(is_need_check_col_dup(select_item.expr_, need_check_col_dup))) {
-      LOG_WARN("failed to check if need to check col duplicate", K(ret));
-    } else if ((!is_skip || need_check_col_dup)
-      && OB_FAIL(column_namespace_checker_.check_column_exists(table_item,
-                                                               select_item.alias_name_,
-                                                               is_exists, // the return value of is_exists is unused.
-                                                               !table_ref->is_view_stmt()))) { //if is a view stmt, do not pass the duplicated column.
-      LOG_WARN("failed to check column exists", K(ret));
-    } else if (OB_FAIL(resolve_generated_table_column_item(table_item,
-                                                           select_item.alias_name_,
-                                                           col_item,
-                                                           NULL,
-                                                           OB_INVALID_ID,
-                                                           i,
-                                                           is_skip))) {
+    if (OB_FAIL(resolve_generated_table_column_item(table_item,
+                                                    select_item.alias_name_,
+                                                    col_item,
+                                                    NULL,
+                                                    i + OB_APP_MIN_COLUMN_ID,
+                                                    i,
+                                                    is_skip))) {
       LOG_WARN("resolve column item failed", K(ret));
     } else if (column_items != NULL) {
       if (OB_FAIL(column_items->push_back(*col_item))) {
@@ -3259,6 +3504,7 @@ int ObSelectResolver::resolve_cycle_pseudo(const ParseNode *cycle_set_clause,
   ObRawExpr *expr_d_v = nullptr;
   //for pseudo column
   if (OB_ISNULL(cycle_set_clause)) {
+    ret = OB_ERR_UNEXPECTED;
     LOG_WARN("cycle clause must have set pseudo column", K(ret));
   } else if (OB_FAIL(resolve_and_split_sql_expr(*cycle_set_clause,
                                                 r_union_stmt->get_cte_exprs()))) {
@@ -3715,7 +3961,7 @@ int ObSelectResolver::gen_unpivot_target_column(const int64_t table_count,
           if (OB_ISNULL(first_select_item.expr_)) {
             ret = OB_ERR_UNEXPECTED;
             LOG_WARN("expr is null", K(ret), K(first_select_item.expr_));
-          } else if (types.push_back(first_select_item.expr_->get_result_type())) {
+          } else if (OB_FAIL(types.push_back(first_select_item.expr_->get_result_type()))) {
             LOG_WARN("fail to push left_type", K(ret));
           }
           while (OB_SUCC(ret) && item_idx < select_item_count) {
@@ -4417,7 +4663,10 @@ int ObSelectResolver::check_grouping_columns()
   } else {
     common::ObIArray<SelectItem> &select_items = select_stmt->get_select_items();
     for (int64_t i = 0; OB_SUCC(ret) && i < select_items.count(); ++i) {
-      if (OB_FAIL(recursive_check_grouping_columns(select_stmt, select_items.at(i).expr_))) {
+      if (OB_ISNULL(select_items.at(i).expr_)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected null", K(ret));
+      } else if (OB_FAIL(recursive_check_grouping_columns(select_stmt, select_items.at(i).expr_, false))) {
         LOG_WARN("failed to recursive check grouping columns", K(ret));
       }
     }
@@ -4490,39 +4739,6 @@ int ObSelectResolver::check_grouping_columns(ObSelectStmt &stmt, ObRawExpr *&exp
   return ret;
 }
 
-int ObSelectResolver::check_nested_aggr_in_having(ObRawExpr* raw_expr)
-{
-  int ret = OB_SUCCESS;
-  bool is_stack_overflow = false;
-  if (OB_FAIL(check_stack_overflow(is_stack_overflow))) {
-    LOG_WARN("check stack overflow failed", K(ret));
-  } else if (is_stack_overflow) {
-    ret = OB_SIZE_OVERFLOW;
-    LOG_WARN("stack is overflow", K(ret), K(is_stack_overflow));
-  } else if (OB_ISNULL(raw_expr)) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("raw expr is NULL ptr", K(ret));
-  } else {
-    int64_t N = raw_expr->get_param_count();
-    for (int64_t i = 0; OB_SUCC(ret) && i < N; ++i) {
-      ObRawExpr *child_expr = raw_expr->get_param_expr(i);
-      if (OB_ISNULL(child_expr)) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("expr is NULL ptr", K(ret));
-      } else if (child_expr->is_aggr_expr() &&
-        static_cast<ObAggFunRawExpr *>(child_expr)->is_nested_aggr()) {
-        ret = OB_ERR_WRONG_FIELD_WITH_GROUP;
-        LOG_USER_ERROR(OB_ERR_WRONG_FIELD_WITH_GROUP,
-            child_expr->get_expr_name().length(),
-          child_expr->get_expr_name().ptr());
-      } else if (OB_FAIL(SMART_CALL(check_nested_aggr_in_having(child_expr)))) {
-        LOG_WARN("replace reference column failed", K(ret));
-      } else { /*do nothing.*/ }
-    } // end for
-  }
-  return ret;
-}
-
 int ObSelectResolver::resolve_having_clause(const ParseNode *node)
 {
   int ret = OB_SUCCESS;
@@ -4538,9 +4754,7 @@ int ObSelectResolver::resolve_having_clause(const ParseNode *node)
       if (OB_ISNULL(expr)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("expr is NULL ptr", K(ret));
-      } else if (OB_FAIL(check_nested_aggr_in_having(expr))) {
-        LOG_WARN("failed to check nested aggr in having.", K(ret));
-      } else if (OB_FAIL(recursive_check_grouping_columns(select_stmt, expr))) {
+      } else if (OB_FAIL(recursive_check_grouping_columns(select_stmt, expr, false))) {
         LOG_WARN("failed to recursive check grouping columns", K(ret));
       } else if (expr->has_flag(CNT_ROWNUM)
           || expr->has_flag(CNT_LEVEL)
@@ -4768,6 +4982,10 @@ int ObSelectResolver::resolve_into_const_node(const ParseNode *node, ObObj &obj)
       obj.set_varchar(node_str);
       obj.set_collation_type(cs_type);
     }
+  } else if (T_HEX_STRING == node->type_) {
+    ObString node_str(node->str_len_, node->str_value_);
+    obj.set_varchar(node_str);
+    obj.set_collation_type(CS_TYPE_BINARY);
   } else if (T_QUESTIONMARK == node->type_) {
     obj.set_unknown(node->value_);
   } else {
@@ -4870,7 +5088,12 @@ int ObSelectResolver::resolve_into_file_node(const ParseNode *list_node, ObSelec
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("child of list node is null", K(ret));
       } else if (T_SINGLE_OPT == node->type_) {
-        into_item.is_single_ = node->value_;
+        if (node->num_child_ != 1 || OB_ISNULL(node->children_[0])) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("get unexpected single node", K(ret));
+        } else {
+          into_item.is_single_ = node->children_[0]->value_;
+        }
       } else if (T_MAX_FILE_SIZE == node->type_) {
         if (OB_FAIL(resolve_max_file_size_node(node, into_item))) {
           LOG_WARN("failed to resolve max file size", K(ret));
@@ -4970,6 +5193,10 @@ int ObSelectResolver::resolve_into_clause(const ParseNode *node)
           if (CHARSET_INVALID == (charset_type = ObCharset::charset_type(charset.trim()))) {
             ret = OB_ERR_UNKNOWN_CHARSET;
             LOG_USER_ERROR(OB_ERR_UNKNOWN_CHARSET, charset.length(), charset.ptr());
+          } else if (CHARSET_UTF16 == charset_type) {
+            ret = OB_NOT_SUPPORTED;
+            LOG_WARN("select into outfile character set utf16", K(ret));
+            LOG_USER_ERROR(OB_NOT_SUPPORTED, "upload data using utf16");
           } else {
             into_item->cs_type_ = ObCharset::get_default_collation(charset_type);
           }
@@ -5688,7 +5915,7 @@ int ObSelectResolver::mark_nested_aggr_if_required(
       }
     }
   }
-  if (has_nested_aggr_) {
+  if (OB_SUCC(ret) && has_nested_aggr_) {
     ObArray<ObAggFunRawExpr*> param_aggrs;
     ObArray<ObWinFunRawExpr *> param_winfuncs;
     if (OB_UNLIKELY(is_mysql_mode())) {
@@ -5732,7 +5959,7 @@ int ObSelectResolver::mark_nested_aggr_if_required(
         ret = OB_ERR_INVALID_GROUP_FUNC_USE;
         LOG_WARN("nested aggr should not contain nested aggr", K(ret));
       } else {
-        param_aggrs.at(i)->set_in_nested_aggr(true);
+        param_aggrs.at(i)->set_nested_aggr_inner_stmt(true);
       }
     }
   }
@@ -5814,7 +6041,7 @@ int ObSelectResolver::add_aggr_expr(ObAggFunRawExpr *&final_aggr_expr)
   } else if (OB_UNLIKELY(select_stmt->is_set_stmt())) {
     ret = OB_ERR_AGGREGATE_ORDER_FOR_UNION;
     LOG_WARN("can't use aggregate function in union stmt");
-  } else if (OB_FAIL(select_stmt->check_and_get_same_aggr_item(final_aggr_expr,
+  } else if (OB_FAIL(select_stmt->check_and_get_same_aggr_item(final_aggr_expr, // 这里实际上判断是错误的
                                                                same_aggr_expr))) {
     LOG_WARN("failed to check and get same aggr item.", K(ret));
   } else if (same_aggr_expr != NULL) {
@@ -6845,7 +7072,7 @@ int ObSelectResolver::check_cube_items_valid(const ObIArray<ObCubeItem> &cube_it
   return ret;
 }
 
-int ObSelectResolver::recursive_check_grouping_columns(ObSelectStmt *stmt, ObRawExpr *expr)
+int ObSelectResolver::recursive_check_grouping_columns(ObSelectStmt *stmt, ObRawExpr *expr, bool is_in_aggr)
 {
   int ret = OB_SUCCESS;
   ObAggFunRawExpr *c_expr = NULL;
@@ -6858,7 +7085,7 @@ int ObSelectResolver::recursive_check_grouping_columns(ObSelectStmt *stmt, ObRaw
     if (OB_ISNULL(c_expr = static_cast<ObAggFunRawExpr*>(expr))) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("unable to convert expr to ObAggFunRawExpr", K(ret));
-    } else if (c_expr->is_nested_aggr()) {
+    } else if (is_in_aggr && c_expr->is_aggr_expr()) {
       ret = OB_ERR_GROUP_FUNC_NOT_ALLOWED;
       LOG_WARN("grouping shouldn't be nested", K(ret));
     } else if (1 != c_expr->get_real_param_exprs().count() ||
@@ -6875,7 +7102,7 @@ int ObSelectResolver::recursive_check_grouping_columns(ObSelectStmt *stmt, ObRaw
     if (OB_ISNULL(c_expr = static_cast<ObAggFunRawExpr*>(expr))) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("unable to convert expr to ObAggFunRawExpr", K(ret));
-    } else if (c_expr->is_nested_aggr()) {
+    } else if (is_in_aggr && c_expr->is_aggr_expr()) {
       ret = OB_ERR_GROUP_FUNC_NOT_ALLOWED;
       LOG_WARN("grouping shouldn't be nested", K(ret));
     } else if (c_expr->get_real_param_count() < 1) {
@@ -6893,7 +7120,7 @@ int ObSelectResolver::recursive_check_grouping_columns(ObSelectStmt *stmt, ObRaw
     if (OB_ISNULL(c_expr = static_cast<ObAggFunRawExpr*>(expr))) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("unable to convert expr to ObAggFunRawExpr", K(ret));
-    } else if (c_expr->is_nested_aggr()) {
+    } else if (is_in_aggr && c_expr->is_aggr_expr()) {
       ret = OB_ERR_GROUP_FUNC_NOT_ALLOWED;
       LOG_WARN("group_id shouldn't be nested", K(ret));
     } else if (stmt->get_group_expr_size() == 0 &&
@@ -6906,7 +7133,11 @@ int ObSelectResolver::recursive_check_grouping_columns(ObSelectStmt *stmt, ObRaw
     }
   } else {
     for (int64_t i = 0; OB_SUCC(ret) && i < expr->get_param_count(); ++i) {
-      if (OB_FAIL(SMART_CALL(recursive_check_grouping_columns(stmt, expr->get_param_expr(i))))) {
+      ObRawExpr *expr_param = expr->get_param_expr(i);
+      if (OB_ISNULL(expr_param)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected null", K(ret));
+      } else if (OB_FAIL(SMART_CALL(recursive_check_grouping_columns(stmt, expr_param, is_in_aggr || expr->is_aggr_expr())))) {
         LOG_WARN("failed to recursive check grouping columns", K(ret));
       } else {/*do nothing*/}
     }
@@ -7020,7 +7251,7 @@ int ObSelectResolver::check_listagg_aggr_param_valid(ObAggFunRawExpr *aggr_expr)
       LOG_WARN("argument is should be a const expr", K(ret), KPC(aggr_expr));
     } else if (OB_FAIL(check_separator_exprs.push_back(aggr_expr->get_real_param_exprs().at(aggr_expr->get_real_param_count() - 1)))) {
       LOG_WARN("failed to push back", K(ret));
-    } else if (get_select_stmt()->get_all_group_by_exprs(all_group_by_exprs)) {
+    } else if (OB_FAIL(get_select_stmt()->get_all_group_by_exprs(all_group_by_exprs))) {
       LOG_WARN("failed to get all group by exprs", K(ret));
     } else if (OB_FAIL(ObGroupByChecker::check_by_expr(params_.param_list_,
                                                        get_select_stmt(),

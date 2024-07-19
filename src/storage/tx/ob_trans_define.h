@@ -23,6 +23,7 @@
 #include "lib/trace/ob_trace_event.h"
 #include "logservice/palf/lsn.h"
 #include "logservice/ob_log_base_header.h"
+#include "share/scn.h"
 #include "share/ob_cluster_version.h"
 #include "share/ob_ls_id.h"
 #include "share/allocator/ob_reserve_arena.h"
@@ -32,8 +33,9 @@
 #include "storage/tx/ob_trans_result.h"
 #include "storage/tx/ob_xa_define.h"
 #include "storage/tx/ob_direct_load_tx_ctx_define.h"
-#include "ob_multi_data_source.h"
-#include "share/scn.h"
+#include "storage/tx/ob_multi_data_source_tx_buffer_node.h"
+#include "storage/tx/ob_tx_on_demand_print.h"
+#include "storage/tx/ob_tx_seq.h"
 
 namespace oceanbase
 {
@@ -89,6 +91,7 @@ class AggreLogTask;
 class ObXACtx;
 class ObITxCallback;
 class ObTxMultiDataSourceLog;
+enum class NotifyType : int64_t;
 typedef palf::LSN LogOffSet;
 enum { MAX_CALLBACK_LIST_COUNT = 64 };
 class ObTransErrsim
@@ -283,119 +286,6 @@ public:
 private:
   int64_t tx_id_;
 };
-
-// Transaction used Sequence number,
-// since 4.3 the Sequence number split into two parts:
-//   part 1: sequence number offset against transaction start
-//   part 2: id of parallel write branch
-class ObTxSEQ
-{
-public:
-  ObTxSEQ() : raw_val_(0) {}
-  explicit ObTxSEQ(int64_t seq, int16_t branch):
-    branch_(branch), seq_(seq), n_format_(true), _sign_(0)
-  {
-    OB_ASSERT(seq > 0 && seq >> 62 == 0);
-    OB_ASSERT(branch >= 0);
-  }
-private:
-  explicit ObTxSEQ(int64_t raw_v): raw_val_(raw_v) {}
-public:
-  // old version builder
-  static ObTxSEQ mk_v0(int64_t seq_v)
-  {
-    OB_ASSERT(seq_v > 0);
-    return ObTxSEQ(seq_v);
-  }
-  static const ObTxSEQ &INVL() { static ObTxSEQ v; return v; }
-  static const ObTxSEQ &MAX_VAL() { static ObTxSEQ v(INT64_MAX); return v; }
-  void reset() { raw_val_ = 0; }
-  bool is_valid() const { return raw_val_ > 0; }
-  bool is_max() const { return *this == MAX_VAL(); }
-  ObTxSEQ clone_with_seq(int64_t seq_abs, int64_t seq_base) const
-  {
-    ObTxSEQ n = *this;
-    if (n_format_) { n.seq_ = seq_abs - seq_base; } else { n.seq_v0_ = seq_abs; }
-    return n;
-  }
-  bool operator>(const ObTxSEQ &b) const
-  {
-    return n_format_ ? seq_ > b.seq_ : seq_v0_ > b.seq_v0_;
-  }
-  bool operator>=(const ObTxSEQ &b) const
-  {
-    return *this > b || (n_format_ ? (seq_ == b.seq_) : (seq_v0_ == b.seq_v0_));
-  }
-  bool operator<(const ObTxSEQ &b) const
-  {
-    return b > *this;
-  }
-  bool operator<=(const ObTxSEQ &b) const
-  {
-    return b >= *this;
-  }
-  bool operator==(const ObTxSEQ &b) const
-  {
-    return raw_val_ == b.raw_val_;
-  }
-  bool operator!=(const ObTxSEQ &b) const
-  {
-    return !(*this == b);
-  }
-  ObTxSEQ &operator++() {
-    if (n_format_) { ++seq_; } else { ++seq_v0_; }
-    return *this;
-  }
-  ObTxSEQ operator+(int n) const {
-    int64_t s = n_format_ ? seq_ + n : seq_v0_ + n;
-    return n_format_ ? ObTxSEQ(s, branch_) : ObTxSEQ::mk_v0(s);
-  }
-  uint64_t hash() const { return murmurhash(&raw_val_, sizeof(raw_val_), 0); }
-  // atomic incremental update
-  int64_t inc_update(const ObTxSEQ &b) { return common::inc_update(&raw_val_, b.raw_val_); }
-  uint64_t cast_to_int() const { return raw_val_; }
-  static ObTxSEQ cast_from_int(int64_t seq) { return ObTxSEQ(seq); }
-  bool support_branch() const { return n_format_; }
-  // return sequence number
-  int64_t get_seq() const { return n_format_ ? seq_ : seq_v0_; }
-  int16_t get_branch() const { return n_format_ ? branch_ : 0; }
-  ObTxSEQ &set_branch(int16_t branch) { branch_ = branch; return *this; }
-  // atomic Load/Store
-  void atomic_reset() { ATOMIC_SET(&raw_val_, 0); }
-  ObTxSEQ atomic_load() const { auto v = ATOMIC_LOAD(&raw_val_); ObTxSEQ s; s.raw_val_ = v; return s; }
-  void atomic_store(ObTxSEQ seq) { ATOMIC_STORE(&raw_val_, seq.raw_val_); }
-  NEED_SERIALIZE_AND_DESERIALIZE;
-  DECLARE_TO_STRING;
-private:
-  union {
-    int64_t raw_val_;
-    union {
-      struct { // v0, old_version
-        uint64_t seq_v0_     :62;
-      };
-      struct { // new_version
-        uint16_t branch_     :15;
-        uint64_t seq_        :47;
-        bool     n_format_   :1;
-        int     _sign_       :1;
-      };
-    };
-  };
-};
-static_assert(sizeof(ObTxSEQ) == sizeof(int64_t), "ObTxSEQ should sizeof(int64_t)");
-
-inline OB_DEF_SERIALIZE_SIMPLE(ObTxSEQ)
-{
-  return serialization::encode_vi64(buf, buf_len, pos, raw_val_);
-}
-inline OB_DEF_SERIALIZE_SIZE_SIMPLE(ObTxSEQ)
-{
-  return serialization::encoded_length_vi64(raw_val_);
-}
-inline OB_DEF_DESERIALIZE_SIMPLE(ObTxSEQ)
-{
-  return serialization::decode_vi64(buf, data_len, pos, &raw_val_);
-}
 
 struct ObLockForReadArg
 {
@@ -1080,96 +970,86 @@ private:
 class ObTxSubState
 {
 public:
-  ObTxSubState() : flag_(0) {}
+  ObTxSubState() : flag_() {}
   ~ObTxSubState() {}
-  void reset() { flag_ = 0; }
+  void reset() { flag_.reset(); }
 
-  bool is_info_log_submitted() const
-  { return flag_ & INFO_LOG_SUBMITTED_BIT; }
-  void set_info_log_submitted()
-  { flag_ |= INFO_LOG_SUBMITTED_BIT; }
-  void clear_info_log_submitted()
-  { flag_ &= ~INFO_LOG_SUBMITTED_BIT; }
+  bool is_info_log_submitted() const { return flag_.info_log_submitted_; }
+  void set_info_log_submitted() { flag_.info_log_submitted_ = 1; }
+  void clear_info_log_submitted() { flag_.info_log_submitted_ = 0; }
 
-  bool is_gts_waiting() const
-  { return flag_ & GTS_WAITING_BIT; }
-  void set_gts_waiting()
-  { flag_ |= GTS_WAITING_BIT; }
-  void clear_gts_waiting()
-  { flag_ &= ~GTS_WAITING_BIT; }
+  bool is_gts_waiting() const { return flag_.gts_waiting_; }
+  void set_gts_waiting() { flag_.gts_waiting_ = 1; }
+  void clear_gts_waiting() { flag_.gts_waiting_ = 0; }
 
-  bool is_state_log_submitting() const
-  { return flag_ & STATE_LOG_SUBMITTING_BIT; }
-  void set_state_log_submitting()
-  { flag_ |= STATE_LOG_SUBMITTING_BIT; }
-  void clear_state_log_submitting()
-  { flag_ &= ~STATE_LOG_SUBMITTING_BIT; }
+  bool is_state_log_submitting() const { return flag_.state_log_submitting_; }
+  void set_state_log_submitting() { flag_.state_log_submitting_ = 1; }
+  void clear_state_log_submitting() { flag_.state_log_submitting_ = 0; }
 
-  bool is_state_log_submitted() const
-  { return flag_ & STATE_LOG_SUBMITTED_BIT; }
-  void set_state_log_submitted()
-  { flag_ |= STATE_LOG_SUBMITTED_BIT; }
-  void clear_state_log_submitted()
-  { flag_ &= ~STATE_LOG_SUBMITTED_BIT; }
+  bool is_state_log_submitted() const { return flag_.state_log_submitted_; }
+  void set_state_log_submitted() { flag_.state_log_submitted_ = 1; }
+  void clear_state_log_submitted() { flag_.state_log_submitted_ = 0; }
 
-  bool is_prepare_notified() const
-  { return flag_ & PREPARE_NOTIFY_BIT; }
-  void set_prepare_notified()
-  { flag_ |= PREPARE_NOTIFY_BIT; }
-  void clear_prepare_notified()
-  { flag_ &= ~PREPARE_NOTIFY_BIT; }
+  bool is_prepare_notified() const { return flag_.prepare_notify_; }
+  void set_prepare_notified() { flag_.prepare_notify_ = 1; }
+  void clear_prepare_notified() { flag_.prepare_notify_ = 0; }
 
-  bool is_force_abort() const
-  { return flag_ & FORCE_ABORT_BIT; }
-  void set_force_abort()
-  { flag_ |= FORCE_ABORT_BIT; }
-  void clear_force_abort()
-  { flag_ &= ~FORCE_ABORT_BIT; }
+  bool is_force_abort() const { return flag_.force_abort_; }
+  void set_force_abort() { flag_.force_abort_ = 1; }
+  void clear_force_abort() { flag_.force_abort_ = 0; }
 
-  bool is_transfer_blocking() const
-  { return flag_ & TRANSFER_BLOCKING_BIT; }
-  void set_transfer_blocking()
-  { flag_ |= TRANSFER_BLOCKING_BIT; }
-  void clear_transfer_blocking()
-  { flag_ &= ~TRANSFER_BLOCKING_BIT; }
+  bool is_transfer_blocking() const { return flag_.transfer_blocking_; }
+  void set_transfer_blocking() { flag_.transfer_blocking_ = 1; }
+  void clear_transfer_blocking() { flag_.transfer_blocking_ = 0; }
 
-  // bool is_prepare_log_submitted() const
-  // { return flag_ & PREPARE_LOG_SUBMITTED_BIT; }
-  // void set_prepare_log_submitted()
-  // { flag_ |= PREPARE_LOG_SUBMITTED_BIT; }
+  DECLARE_ON_DEMAND_TO_STRING
+  TO_STRING_KV("info_log_submitted",
+               flag_.info_log_submitted_,
+               "gts_waiting",
+               flag_.gts_waiting_,
+               "state_log_submitting",
+               flag_.state_log_submitting_,
+               "state_log_submitted",
+               flag_.state_log_submitted_,
+               // "prepare_notify",
+               // flag_.prepare_notify_,
+               "force_abort",
+               flag_.force_abort_,
+               "transfer_blocking",
+               flag_.transfer_blocking_);
 
-  // bool is_commit_log_submitted() const
-  // { return flag_ & COMMIT_LOG_SUBMITTED_BIT; }
-  // void set_commit_log_submitted()
-  // { return flag_ |= COMMIT_LOG_SUBMITTED_BIT; }
-
-  // bool is_abort_log_submitted() const
-  // { return flag_ & ABORT_LOG_SUBMITTED_BIT; }
-  // void set_abort_log_submitted()
-  // { flag_ |= ABORT_LOG_SUBMITTED_BIT; }
-
-  // bool is_clear_log_submitted() const
-  // { return flag_ & CLEAR_LOG_SUBMITTED_BIT; }
-  // void set_clear_log_submitted()
-  // { flag_ |= CLEAR_LOG_SUBMITTED_BIT; }
-  TO_STRING_KV(K_(flag));
+  bool is_valid() const { return flag_.is_valid(); }
 private:
-  static const int64_t INIT = 0;
-  static const int64_t INFO_LOG_SUBMITTED_BIT = 1UL << 1;
-  static const int64_t GTS_WAITING_BIT = 1UL << 2;
-  // static const int64_t GTS_RECEIVED = 3;
-  static const int64_t STATE_LOG_SUBMITTING_BIT = 1UL << 3;
-  static const int64_t STATE_LOG_SUBMITTED_BIT = 1UL << 4;
-  // static const int64_t PREPARE_LOG_SUBMITTED_BIT = 1UL << 4;
-  // static const int64_t COMMIT_LOG_SUBMITTED_BIT = 1UL << 5;
-  // static const int64_t ABORT_LOG_SUBMITTED_BIT = 1UL << 6;
-  // static const int64_t CLEAR_LOG_SUBMITTED_BIT =  1UL << 7;
-  // indicate whether notified multi data source to prepare
-  static const int64_t PREPARE_NOTIFY_BIT = 1UL << 5;
-  static const int64_t FORCE_ABORT_BIT = 1UL << 6;
-  static const int64_t TRANSFER_BLOCKING_BIT = 1UL << 7;
-private:
-  int64_t flag_;
+  struct BitFlag
+  {
+    unsigned int info_log_submitted_ : 1;
+    unsigned int gts_waiting_ : 1;
+    unsigned int state_log_submitting_ : 1;
+    unsigned int state_log_submitted_ : 1;
+    unsigned int prepare_notify_ : 1;
+    unsigned int force_abort_ : 1;
+    unsigned int transfer_blocking_ : 1;
+
+    void reset()
+    {
+      info_log_submitted_ = 0;
+      gts_waiting_ = 0;
+      state_log_submitting_ = 0;
+      state_log_submitted_ = 0;
+      prepare_notify_ = 0;
+      force_abort_ = 0;
+      transfer_blocking_ = 0;
+    }
+
+    bool is_valid() const
+    {
+      return info_log_submitted_ > 0 || gts_waiting_ > 0 || state_log_submitted_ > 0
+          || state_log_submitting_ > 0 || prepare_notify_ > 0 || force_abort_ > 0
+          || transfer_blocking_ > 0;
+    }
+
+    BitFlag() { reset(); }
+  } flag_;
 };
 
 class Ob2PCPrepareState
@@ -1761,7 +1641,7 @@ private:
 
 enum class PartCtxSource
 {
-  UNKOWN = 0,
+  UNKNOWN = 0,
   MVCC_WRITE = 1,
   REGISTER_MDS = 2,
   REPLAY = 3,
@@ -1770,9 +1650,24 @@ enum class PartCtxSource
   TRANSFER_RECOVER = 6,
 };
 
+static const char * to_str_ctx_source(const PartCtxSource & ctx_src)
+{
+  const char * str = "INVALID";
+  switch(ctx_src)
+  {
+    TRX_ENUM_CASE_TO_STR(PartCtxSource, UNKNOWN);
+    TRX_ENUM_CASE_TO_STR(PartCtxSource, MVCC_WRITE);
+    TRX_ENUM_CASE_TO_STR(PartCtxSource, REGISTER_MDS);
+    TRX_ENUM_CASE_TO_STR(PartCtxSource, REPLAY);
+    TRX_ENUM_CASE_TO_STR(PartCtxSource, RECOVER);
+    TRX_ENUM_CASE_TO_STR(PartCtxSource, TRANSFER);
+    TRX_ENUM_CASE_TO_STR(PartCtxSource, TRANSFER_RECOVER);
+  }
+  return str;
+}
+
 bool is_transfer_ctx(PartCtxSource ctx_source);
 
-const char *to_str(PartCtxSource src);
 
 enum class RetainCause : int16_t
 {
@@ -1834,6 +1729,8 @@ private:
                           const ObTxCommitParts &commit_parts);
 
 public:
+  DECLARE_ON_DEMAND_TO_STRING
+
   DECLARE_TO_STRING {
 //    const_cast<ObIArray<uint64_t>>(checksum_).set_max_print_count(512);
 //    const_cast<ObIArray<share::SCN>>(checksum_scn_).set_max_print_count(512);
@@ -1872,7 +1769,7 @@ public:
                K_(exec_epoch),
                K_(serial_final_scn),
                K_(serial_final_seq_no),
-               K_(dli_batch_set));
+               K(dli_batch_set_.size()));
     return pos;
   }
   ObTxState state_;
@@ -1928,31 +1825,17 @@ struct ObMulSourceDataNotifyArg
   share::SCN scn_; // the log ts of current notify type
   // in case of abort transaction, trans_version_ is invalid
   share::SCN trans_version_;
-  bool for_replay_;
   NotifyType notify_type_;
-
+  bool for_replay_;
   bool redo_submitted_;
   bool redo_synced_;
-
   // force kill trans without abort scn
   bool is_force_kill_;
-
   bool is_incomplete_replay_;
 
   ObMulSourceDataNotifyArg() { reset(); }
 
-  void reset()
-  {
-    tx_id_.reset();
-    scn_.reset();
-    trans_version_.reset();
-    for_replay_ = false;
-    notify_type_ = NotifyType::ON_ABORT;
-    redo_submitted_ = false;
-    redo_synced_ = false;
-    is_force_kill_ = false;
-    is_incomplete_replay_ = false;
-  }
+  void reset();
 
   TO_STRING_KV(K_(tx_id),
                K_(scn),

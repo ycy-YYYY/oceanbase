@@ -300,17 +300,17 @@ public:
         v.retry_type_ = RETRY_TYPE_NONE;
       }
       v.no_more_test_ = true;
-    } else if (is_load_local(v)) {
-      v.client_ret_ = err;
-      v.retry_type_ = RETRY_TYPE_NONE;
-      v.no_more_test_ = true;
-    } else if (is_direct_load(v)) {
+    } else if (is_direct_load(v) && !is_load_local(v)) {
       if (is_direct_load_retry_err(err)) {
         try_packet_retry(v);
       } else {
         v.client_ret_ = err;
         v.retry_type_ = RETRY_TYPE_NONE;
       }
+      v.no_more_test_ = true;
+    } else if (stmt::T_LOAD_DATA == v.result_.get_stmt_type()) {
+      v.client_ret_ = err;
+      v.retry_type_ = RETRY_TYPE_NONE;
       v.no_more_test_ = true;
     }
   }
@@ -1192,6 +1192,7 @@ void ObQueryRetryCtrl::test_and_save_retry_state(const ObGlobalContext &gctx,
   retry_func func = nullptr;
   ObSQLSessionInfo *session = result.get_exec_context().get_my_session();
   if (OB_ISNULL(session)) {
+    // ignore ret
     // this is possible. #issue/43953721
     LOG_WARN("session is null in exec_context. maybe OOM. don't retry", K(err));
   } else if (OB_FAIL(get_func(err, is_inner_sql, func))) {
@@ -1242,7 +1243,14 @@ void ObQueryRetryCtrl::test_and_save_retry_state(const ObGlobalContext &gctx,
     retry_err_code_ = client_ret;
   }
   if (RETRY_TYPE_NONE != retry_type_) {
-    result.set_close_fail_callback([this](const int err, int &client_ret)-> void { this->on_close_resultset_fail_(err, client_ret); });
+    struct CloseFailFunctor {
+      ObQueryRetryCtrl* retry_ctl_;
+      CloseFailFunctor(ObQueryRetryCtrl* retry_ctl): retry_ctl_(retry_ctl) {}
+      void operator()(const int err, int &client_ret) {
+        retry_ctl_->on_close_resultset_fail_(err, client_ret);
+      }
+    } callback_functor(this);
+    result.set_close_fail_callback(callback_functor);
   }
 }
 

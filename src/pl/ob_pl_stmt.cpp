@@ -884,7 +884,12 @@ int ObPLRoutineTable::set_routine_info(int64_t routine_idx, ObPLRoutineInfo *rou
 {
   int ret = OB_SUCCESS;
   CK (routine_idx >= 0 && routine_idx < get_count());
-  CK (OB_ISNULL(routine_infos_.at(routine_idx)));
+  if (OB_SUCC(ret) && OB_NOT_NULL(routine_infos_.at(routine_idx))) {
+    ret = OB_ERR_ATTR_FUNC_CONFLICT;
+    LOG_USER_ERROR(OB_ERR_ATTR_FUNC_CONFLICT,
+                   routine_infos_.at(routine_idx)->get_name().length(),
+                   routine_infos_.at(routine_idx)->get_name().ptr());
+  }
   OX (routine_infos_.at(routine_idx) = routine_info);
   OZ (routine_info->set_idx(routine_idx));
   return ret;
@@ -894,7 +899,12 @@ int ObPLRoutineTable::set_routine_ast(int64_t routine_idx, ObPLFunctionAST *rout
 {
   int ret = OB_SUCCESS;
   CK (routine_idx >= 0 && routine_idx < get_count());
-  CK (OB_ISNULL(routine_asts_.at(routine_idx)));
+  if (OB_SUCC(ret) && OB_NOT_NULL(routine_asts_.at(routine_idx))) {
+    ret = OB_ERR_ATTR_FUNC_CONFLICT;
+    LOG_USER_ERROR(OB_ERR_ATTR_FUNC_CONFLICT,
+                   routine_asts_.at(routine_idx)->get_name().length(),
+                   routine_asts_.at(routine_idx)->get_name().ptr());
+  }
   OX (routine_asts_.at(routine_idx) = routine_ast);
   return ret;
 }
@@ -1462,7 +1472,7 @@ int ObPLExternalNS::resolve_synonym(uint64_t object_db_id,
                   schema::ObSchemaGetterGuard::ALL_NON_HIDDEN_TYPES, object_id))
       || object_id == OB_INVALID_ID) {
     if (OB_FAIL(schema_guard.get_package_id(tenant_id, object_db_id, object_name,
-                                            PACKAGE_TYPE, compatible_mode, object_id))
+                                            share::schema::PACKAGE_TYPE, compatible_mode, object_id))
         || OB_INVALID_ID == object_id) {
       if (OB_FAIL(schema_guard.get_udt_id(
                   tenant_id, object_db_id, OB_INVALID_ID/*package_id*/, object_name, object_id))
@@ -1993,7 +2003,7 @@ int ObPLExternalNS::resolve_external_type_by_name(const ObString &db_name, const
     if (OB_SUCC(ret) && !package_name.empty()) {
       // search package
       if (OB_FAIL(resolve_ctx_.schema_guard_.get_package_info(tenant_id, db_id, package_name,
-                                                              PACKAGE_TYPE, compatible_mode,
+                                                              share::schema::PACKAGE_TYPE, compatible_mode,
                                                               package_info))) {
          LOG_WARN("get package id failed", K(ret));
       }
@@ -2010,7 +2020,7 @@ int ObPLExternalNS::resolve_external_type_by_name(const ObString &db_name, const
         // try system package
         if (db_name.empty() || 0 == db_name.case_compare(OB_SYS_DATABASE_NAME)) {
           if (OB_FAIL(resolve_ctx_.schema_guard_.get_package_info(OB_SYS_TENANT_ID, OB_SYS_DATABASE_ID,
-              package_name, PACKAGE_TYPE, compatible_mode, package_info))) {
+              package_name, share::schema::PACKAGE_TYPE, compatible_mode, package_info))) {
             LOG_WARN("get package id failed", K(ret));
           }
         }
@@ -2217,9 +2227,9 @@ int ObPLExternalNS::resolve_external_routine(const ObString &db_name,
         LOG_WARN("add dependency object failed", "package_id", schema_routine_info->get_package_id(), K(ret));
       } else if (synonym_checker.has_synonym()) {
         if (OB_FAIL(ObResolverUtils::add_dependency_synonym_object(&resolve_ctx_.schema_guard_,
-                                                                        &resolve_ctx_.session_info_,
-                                                                        synonym_checker,
-                                                                        *get_dependency_table()))) {
+                                                                   &resolve_ctx_.session_info_,
+                                                                   synonym_checker,
+                                                                   *get_dependency_table()))) {
           LOG_WARN("add dependency synonym failed", K(ret));
         }
       }
@@ -2406,7 +2416,7 @@ int ObPLBlockNS::find_sub_attr_by_name(const ObUserDefinedType &user_type,
         } else {
           SET_ACCESS_AA(IDX_COLLECTION_PLACEHOLD, data_type);
         }
-        if (OB_SUCC(ret) && access_ident.params_.count() > 1) {
+        if (OB_SUCC(ret) && access_ident.params_.count() != 1) {
           ret = OB_ERR_CALL_WRONG_ARG;
           LOG_WARN("call collection method with wrong parameter",
                     K(ret), K(access_ident.params_), K(attr_name));
@@ -2763,17 +2773,18 @@ int ObPLBlockNS::resolve_symbol(const ObString &var_name,
         OZ (get_routine_info(routines.at(i), routine));
         CK (OB_NOT_NULL(routine));
         if (OB_SUCC(ret) && ObCharset::case_compat_mode_equal(routine->get_routine_name(), var_name)) {
-          if (get_block_type() != BLOCK_ROUTINE // subprogram is not member function, distingish with block type
-              && routine->is_udt_routine() && !routine->is_udt_cons() && !routine->is_udt_static_routine()) {
-            // only care about member routine without prefix.
-            type = ObPLExternalNS::UDT_MEMBER_ROUTINE;
-            var_idx = routine->get_routine_id();
-            parent_id = routine->get_package_id();
+          if (get_block_type() != BLOCK_ROUTINE) { // subprogram is not member function, distingish with block type
+            if (routine->is_udt_routine() && !routine->is_udt_cons() && !routine->is_udt_static_routine()) {
+              // only care about member routine without prefix.
+              type = ObPLExternalNS::UDT_MEMBER_ROUTINE;
+            } else {
+              type = ObPLExternalNS::INTERNAL_PROC;
+            }
           } else {
-            type = ObPLExternalNS::INVALID_VAR;
-            var_idx = routine->get_routine_id();
-            parent_id = routine->get_package_id();
+            type = ObPLExternalNS::NESTED_PROC;
           }
+          var_idx = routine->get_routine_id();
+          parent_id = routine->get_package_id();
         }
       }
     }
@@ -3536,12 +3547,12 @@ int ObPLBlockNS::get_cursor_by_name(const ObExprResolveContext &ctx,
       OX (cursor = NULL);
       OZ (resolve_ctx.schema_guard_.get_database_id(tenant_id, db_name, database_id));
       OZ (resolve_ctx.schema_guard_.get_package_info(
-          tenant_id, database_id, package_name, PACKAGE_TYPE, compatible_mode, package_info));
+          tenant_id, database_id, package_name, share::schema::PACKAGE_TYPE, compatible_mode, package_info));
       if (OB_SUCC(ret)
           && OB_ISNULL(package_info) && db_name.case_compare(OB_SYS_DATABASE_NAME)) {
         OZ (resolve_ctx.schema_guard_.get_package_info(
           OB_SYS_TENANT_ID, OB_SYS_DATABASE_ID,
-          package_name, PACKAGE_TYPE, compatible_mode, package_info));
+          package_name, share::schema::PACKAGE_TYPE, compatible_mode, package_info));
       }
       if (OB_SUCC(ret) && OB_ISNULL(package_info)) {
         ret = OB_ERR_PACKAGE_DOSE_NOT_EXIST;

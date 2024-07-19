@@ -702,6 +702,30 @@ void ObLogReplayService::free_replay_task_log_buf(ObLogReplayTask *task)
   }
 }
 
+int ObLogReplayService::has_fatal_error(const ObLSID &ls_id,
+                                        bool &bool_ret)
+{
+  int ret = OB_SUCCESS;
+  ObReplayStatus *replay_status = NULL;
+  ObReplayStatusGuard guard;
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    CLOG_LOG(WARN, "replay service not init", K(ret));
+  } else if (OB_FAIL(get_replay_status_(ls_id, guard))) {
+    CLOG_LOG(WARN, "guard get replay status failed", K(ret), K(ls_id));
+  } else if (NULL == (replay_status = guard.get_replay_status())) {
+    ret = OB_ERR_UNEXPECTED;
+    CLOG_LOG(WARN, "replay status is not exist", K(ret), K(ls_id));
+  } else if (replay_status->try_rdlock()){
+    bool_ret  = replay_status->has_fatal_error();
+    replay_status->unlock();
+  } else {
+    ret = OB_EAGAIN;
+    CLOG_LOG(WARN, "try_rdlock failed", K(ret), K(ls_id));
+  }
+  return ret;
+}
+
 void ObLogReplayService::free_replay_log_buf_(ObLogReplayBuffer *&replay_log_buf)
 {
   allocator_->free_replay_log_buf(replay_log_buf);
@@ -752,6 +776,7 @@ share::SCN ObLogReplayService::inner_get_replayable_point_() const
     rootserver::ObTenantInfoLoader *tenant_info_loader = MTL(rootserver::ObTenantInfoLoader*);
     share::SCN recovery_until_scn;
     if (OB_ISNULL(tenant_info_loader)) {
+      ret = OB_ERR_UNEXPECTED;
       CLOG_LOG(WARN, "ObTenantInfoLoader is NULL", K(ret));
     } else if (OB_FAIL(tenant_info_loader->get_recovery_until_scn(recovery_until_scn))) {
       if (REACH_TIME_INTERVAL(5 * 1000 * 1000)) {
@@ -858,6 +883,7 @@ void ObLogReplayService::process_replay_ret_code_(const int ret_code,
                                  replay_task.replay_hint_, false, cur_ts, ret_code);
       LOG_DBA_ERROR(OB_LOG_REPLAY_ERROR, "msg", "replay task encountered fatal error", "ret", ret_code,
                     K(replay_status), K(replay_task));
+      LOG_DBA_ERROR_V2(OB_LOG_REPLAY_FAIL, ret_code, "replay task encountered fatal error");
     } else {/*do nothing*/}
 
     if (OB_SUCCESS == task_queue.get_err_info_ret_code()) {
@@ -1314,6 +1340,7 @@ int ObLogReplayService::handle_replay_task_(ObReplayServiceReplayTask *task_queu
           ret = OB_ERR_UNEXPECTED;
           CLOG_LOG(ERROR, "do statistics replay cost failed", KPC(replay_task), K(ret));
         } else if (OB_ISNULL(link_to_destroy = task_queue->pop())) {
+          ret = OB_ERR_UNEXPECTED;
           CLOG_LOG(ERROR, "failed to pop task after replay", KPC(replay_task), K(ret));
           //It's impossible to get to this branch. Use on_replay_error to defend it.
           on_replay_error_(*replay_task, ret);

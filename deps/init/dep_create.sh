@@ -52,6 +52,7 @@ function get_os_release() {
   if [[ "${OS_ARCH}x" == "x86_64x" ]]; then
     case "$ID" in
       alinux)
+        version_ge "3.0" && compat_centos9 && return
         version_ge "2.1903" && compat_centos7 && return
         ;;
       alios)
@@ -81,6 +82,9 @@ function get_os_release() {
         ;;
       fedora)
         version_ge "33" && compat_centos7 && return
+        ;;
+      kylin)
+        version_ge "V10" && compat_centos8 && return
         ;;
       openEuler)
         version_ge "22" && compat_centos9 && return
@@ -123,6 +127,9 @@ function get_os_release() {
       debian)
         version_ge "12" && compat_centos9 && return
         version_ge "9" && compat_centos7 && return
+        ;;
+      kylin)
+        version_ge "V10" && compat_centos8 && return
         ;;
       openEuler)
         version_ge "22" && compat_centos9 && return

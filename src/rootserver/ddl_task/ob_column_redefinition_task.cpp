@@ -198,8 +198,8 @@ int ObColumnRedefinitionTask::copy_table_indexes()
     int64_t active_task_cnt = 0;
     // check if has rebuild index
     if (has_rebuild_index_) {
-    } else if (OB_FAIL(ObDDLTaskRecordOperator::get_create_index_task_cnt(GCTX.root_service_->get_sql_proxy(), tenant_id_, target_object_id_, active_task_cnt))) {
-      LOG_WARN("failed to check index task cnt", K(ret));
+    } else if (OB_FAIL(ObDDLTaskRecordOperator::get_create_index_or_mlog_task_cnt(GCTX.root_service_->get_sql_proxy(), tenant_id_, target_object_id_, active_task_cnt))) {
+      LOG_WARN("failed to check index or mlog task cnt", K(ret));
     } else if (active_task_cnt >= MAX_ACTIVE_TASK_CNT) {
       ret = OB_EAGAIN;
     } else {
@@ -273,7 +273,7 @@ int ObColumnRedefinitionTask::copy_table_indexes()
             } else {
               create_index_arg.index_type_ = index_schema->get_index_type();
               ObCreateDDLTaskParam param(tenant_id_,
-                                         ObDDLType::DDL_CREATE_INDEX,
+                                         ((DATA_VERSION_4_2_2_0 <= data_format_version_ && data_format_version_ < DATA_VERSION_4_3_0_0) || data_format_version_ >= DATA_VERSION_4_3_2_0) && index_schema->is_storage_local_index_table() && index_schema->is_partitioned_table() ? ObDDLType::DDL_CREATE_PARTITIONED_LOCAL_INDEX : ObDDLType::DDL_CREATE_INDEX,
                                          table_schema,
                                          index_schema,
                                          0/*object_id*/,
@@ -728,7 +728,8 @@ int ObColumnRedefinitionTask::collect_longops_stat(ObLongopsValue &value)
       } else if (OB_FAIL(databuff_printf(stat_info_.message_,
                                   MAX_LONG_OPS_MESSAGE_LENGTH,
                                   pos,
-                                  "STATUS: REPLICA BUILD, ROW_SCANNED: %ld, ROW_INSERTED: %ld",
+                                  "STATUS: REPLICA BUILD, PARALLELISM: %ld, ROW_SCANNED: %ld, ROW_INSERTED: %ld",
+                                  ObDDLUtil::get_real_parallelism(parallelism_, false/*is mv refresh*/),
                                   row_scanned,
                                   row_inserted))) {
         LOG_WARN("failed to print", K(ret));

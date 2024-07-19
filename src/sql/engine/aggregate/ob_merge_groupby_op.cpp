@@ -37,7 +37,9 @@ OB_SERIALIZE_MEMBER((ObMergeGroupBySpec, ObGroupBySpec),
                     sort_exprs_,
                     sort_collations_,
                     sort_cmp_funcs_,
-                    enable_encode_sort_
+                    enable_encode_sort_,
+                    est_rows_per_group_,
+                    enable_hash_base_distinct_
 );
 
 DEF_TO_STRING(ObMergeGroupBySpec)
@@ -270,7 +272,7 @@ int ObMergeGroupByOp::init()
     }
     LOG_DEBUG("debug distinct exprs", K(ret), K(MY_SPEC.distinct_exprs_.count()));
   }
-  if (OB_SUCC(ret) && aggr_processor_.has_distinct()) {
+  if (OB_SUCC(ret) && aggr_processor_.has_extra()) {
     // set group_batch_factor_ to 1 avoid out of memory error
     group_batch_factor_ = 1;
   }

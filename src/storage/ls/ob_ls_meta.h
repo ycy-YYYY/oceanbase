@@ -29,6 +29,7 @@
 #include "storage/ls/ob_ls_saved_info.h"
 #include "share/scn.h"
 #include "storage/high_availability/ob_ls_transfer_info.h"
+#include "storage/mview/ob_major_mv_merge_info.h"
 
 namespace oceanbase
 {
@@ -164,7 +165,8 @@ public:
 private:
   int check_can_update_();
 public:
-  mutable common::ObLatch lock_;
+  mutable common::ObLatch rw_lock_;     // only for atomic read/write in memory.
+  mutable common::ObLatch update_lock_; // only one process can update ls meta. both for write slog and memory
   uint64_t tenant_id_;
   share::ObLSID ls_id_;
 
@@ -201,6 +203,7 @@ private:
   share::SCN transfer_scn_;
   ObLSRebuildInfo rebuild_info_;
   ObLSTransferMetaInfo transfer_meta_info_; //transfer_dml_ctrl_42x # placeholder
+  ObMajorMVMergeInfo major_mv_merge_info_;
 };
 
 }  // namespace storage

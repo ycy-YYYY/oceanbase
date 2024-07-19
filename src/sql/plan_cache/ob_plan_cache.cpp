@@ -276,7 +276,7 @@ struct ObGetTableIdOp
     } else if (OB_ISNULL(plan = dynamic_cast<ObPhysicalPlan *>(entry.second))) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("unexpected null plan", K(ret), K(plan));
-    } else if (plan->get_base_table_version(table_id_, version)) {
+    } else if (OB_FAIL(plan->get_base_table_version(table_id_, version))) {
       LOG_WARN("failed to get base table version", K(ret));
     } else if (version > 0) {
       plan->set_is_expired(true);
@@ -1092,6 +1092,7 @@ int ObPlanCache::get_plan_cache(ObILibCacheCtx &ctx,
   }
   // check the returned error code and whether the plan has expired
   if (OB_FAIL(check_after_get_plan(ret, ctx, guard.cache_obj_))) {
+    // overwrite ret, ret used in check_after_get_plan
     SQL_PC_LOG(TRACE, "failed to check after get plan", K(ret));
   }
   if (OB_FAIL(ret) && OB_NOT_NULL(guard.cache_obj_)) {
@@ -2046,28 +2047,44 @@ int ObPlanCache::deal_add_ps_plan_result(int add_plan_ret,
                                          const ObILibCacheObject &cache_object)
 {
   int ret = add_plan_ret;
-  if (OB_SQL_PC_PLAN_DUPLICATE == ret) {
-    ret = OB_SUCCESS;
-    LOG_TRACE("this plan has been added by others, need not add again", K(cache_object));
-  } else if (OB_REACH_MEMORY_LIMIT == ret || OB_SQL_PC_PLAN_SIZE_LIMIT == ret) {
-    if (REACH_TIME_INTERVAL(1000000)) { //1s, 当内存达到上限时, 该日志打印会比较频繁, 所以以1s为间隔打印
-      ObTruncatedString trunc_sql(pc_ctx.raw_sql_);
-      LOG_INFO("can't add plan to plan cache",
-               K(ret), K(cache_object.get_mem_size()), K(trunc_sql),
-               K(get_mem_used()));
-    }
-    ret = OB_SUCCESS;
-  } else if (is_not_supported_err(ret)) {
-    ret = OB_SUCCESS;
-    LOG_TRACE("plan cache don't support add this kind of plan now",  K(cache_object));
-  } else if (OB_FAIL(ret)) {
-    if (OB_REACH_MAX_CONCURRENT_NUM != ret) { //如果是达到限流上限, 则将错误码抛出去
-      ret = OB_SUCCESS; //add plan出错, 覆盖错误码, 确保因plan cache失败不影响正常执行路径
-      LOG_WARN("Failed to add plan to ObPlanCache", K(ret));
+
+  if (pc_ctx.sql_ctx_.is_batch_params_execute()) {
+    // for batch_dml optimization, only can cover the error OB_SQL_PC_PLAN_DUPLICATE
+    // others error occur during add plan to plan_cache, we must stop batch_dml optimization
+    if (OB_SQL_PC_PLAN_DUPLICATE == ret) {
+      ret = OB_SUCCESS;
+      LOG_TRACE("this plan has been added by others, need not add again", K(cache_object));
+    } else if (OB_FAIL(ret)) {
+      ret = OB_BATCHED_MULTI_STMT_ROLLBACK;
+      LOG_WARN("some unexpected error occured, change ret_code to 5787", K(ret));
+    } else {
+      pc_ctx.sql_ctx_.self_add_plan_ = true;
+      LOG_TRACE("Successed to add batch plan to ObPlanCache", K(cache_object));
     }
   } else {
-    pc_ctx.sql_ctx_.self_add_plan_ = true;
-    LOG_TRACE("Succeed to add plan to ObPlanCache", K(cache_object));
+    if (OB_SQL_PC_PLAN_DUPLICATE == ret) {
+      ret = OB_SUCCESS;
+      LOG_TRACE("this plan has been added by others, need not add again", K(cache_object));
+    } else if (OB_REACH_MEMORY_LIMIT == ret || OB_SQL_PC_PLAN_SIZE_LIMIT == ret) {
+      if (REACH_TIME_INTERVAL(1000000)) { //1s, 当内存达到上限时, 该日志打印会比较频繁, 所以以1s为间隔打印
+        ObTruncatedString trunc_sql(pc_ctx.raw_sql_);
+        LOG_INFO("can't add plan to plan cache",
+                 K(ret), K(cache_object.get_mem_size()), K(trunc_sql),
+                 K(get_mem_used()));
+      }
+      ret = OB_SUCCESS;
+    } else if (is_not_supported_err(ret)) {
+      ret = OB_SUCCESS;
+      LOG_TRACE("plan cache don't support add this kind of plan now",  K(cache_object));
+    } else if (OB_FAIL(ret)) {
+      if (OB_REACH_MAX_CONCURRENT_NUM != ret) { //如果是达到限流上限, 则将错误码抛出去
+        ret = OB_SUCCESS; //add plan出错, 覆盖错误码, 确保因plan cache失败不影响正常执行路径
+        LOG_WARN("Failed to add plan to ObPlanCache", K(ret));
+      }
+    } else {
+      pc_ctx.sql_ctx_.self_add_plan_ = true;
+      LOG_TRACE("Succeed to add plan to ObPlanCache", K(cache_object));
+    }
   }
 
   return ret;
@@ -2322,6 +2339,7 @@ OB_INLINE int ObPlanCache::construct_plan_cache_key(ObSQLSessionInfo &session,
   // if `use_rich_format()` is used as part of key, added plan's key will be `false + other_info`.
   pc_key.use_rich_vector_format_ = session.initial_use_rich_format();
   pc_key.config_use_rich_format_ = session.config_use_rich_format();
+  pc_key.sys_var_config_hash_val_ = session.get_sys_var_config_hash_val();
   pc_key.is_weak_read_ = is_weak;
   return ret;
 }
@@ -2709,6 +2727,7 @@ void ObPlanCacheEliminationTask::run_free_cache_obj_task()
   int64_t safe_timestamp = INT64_MAX;
   if (observer::ObGlobalReqTimeService::get_instance()
                          .get_global_safe_timestamp(safe_timestamp)) {
+    // ignore ret
     SQL_PC_LOG(ERROR, "failed to get global safe timestamp", K(ret));
   } else if (OB_FAIL(plan_cache_->dump_deleted_objs<DUMP_ALL>(deleted_objs, safe_timestamp))) {
     SQL_PC_LOG(WARN, "failed to traverse hashmap", K(ret));
@@ -2718,6 +2737,7 @@ void ObPlanCacheEliminationTask::run_free_cache_obj_task()
       tot_mem_used += deleted_objs.at(k).mem_used_;
     } // end for
     if (tot_mem_used >= ((plan_cache_->get_mem_limit() / 100) * 30)) {
+      // ignore ret
       LOG_ERROR("Cache Object Memory Leaked Much!!!", K(tot_mem_used),
                 K(plan_cache_->get_mem_limit()), K(deleted_objs), K(safe_timestamp));
     } else if (deleted_objs.count() > 0) {

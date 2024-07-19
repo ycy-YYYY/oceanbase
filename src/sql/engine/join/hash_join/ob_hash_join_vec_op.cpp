@@ -789,7 +789,7 @@ int ObHashJoinVecOp::reuse_for_next_chunk()
     LOG_WARN("failed to calc basic info", K(ret));
   } else {
     // reuse buckets
-    OZ(cur_join_table_->build_prepare(profile_.get_row_count(), profile_.get_bucket_size()));
+    OZ(cur_join_table_->build_prepare(jt_ctx_, profile_.get_row_count(), profile_.get_bucket_size()));
     if (OB_FAIL(ret)) {
     } else if (OB_FAIL(right_part_->rescan())) {
       LOG_WARN("failed to rescan right", K(ret));
@@ -1269,7 +1269,7 @@ int ObHashJoinVecOp::create_partition(bool is_left, int64_t part_id, ObHJPartiti
                               (tmp_batch_round << 32) + part_id, is_left, part))) {
     LOG_WARN("fail to get partition", K(ret), K(part_level_), K(part_id), K(is_left));
   } else if (OB_FAIL(part->init(is_left ? left_->get_spec().output_ : right_->get_spec().output_,
-                                MY_SPEC.max_batch_size_))) {
+                                MY_SPEC.max_batch_size_, MY_SPEC.compress_type_))) {
     LOG_WARN("fail to init batch", K(ret), K(part_level_), K(part_id), K(is_left));
   } else {
     part->get_row_store().set_dir_id(sql_mem_processor_.get_dir_id());
@@ -2031,8 +2031,8 @@ int ObHashJoinVecOp::prepare_hash_table()
     LOG_DEBUG("debug build hash table", K(need_build_hash_table),
               K(build_ht_thread_ptr), K(reinterpret_cast<uint64_t>(this)));
   }
-  if (need_build_hash_table) {
-    if (OB_FAIL(cur_join_table_->build_prepare(profile_.get_row_count(), profile_.get_bucket_size()))) {
+  if (OB_SUCC(ret) && need_build_hash_table) {
+    if (OB_FAIL(cur_join_table_->build_prepare(jt_ctx_, profile_.get_row_count(), profile_.get_bucket_size()))) {
       LOG_WARN("trace failed to  prepare hash table",
                K(profile_.get_expect_size()), K(profile_.get_bucket_size()), K(profile_.get_row_count()),
                K(get_mem_used()), K(sql_mem_processor_.get_mem_bound()), K(cur_dumped_partition_));
@@ -2552,6 +2552,7 @@ int ObHashJoinVecOp::probe()
 int ObHashJoinVecOp::probe_batch_output()
 {
   int ret = OB_SUCCESS;
+  clear_evaluated_flag();
   if (INNER_JOIN == MY_SPEC.join_type_) {
     ret = inner_join_output();
   } else if (LEFT_SEMI_JOIN == MY_SPEC.join_type_) {

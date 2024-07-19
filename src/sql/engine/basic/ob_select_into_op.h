@@ -66,7 +66,9 @@ public:
       is_single_(true),
       max_file_size_(DEFAULT_MAX_FILE_SIZE),
       escaped_cht_(),
-      parallel_(1)
+      parallel_(1),
+      file_partition_expr_(NULL),
+      buffer_size_(DEFAULT_BUFFER_SIZE)
   {
     cs_type_ = ObCharset::get_system_collation();
   }
@@ -74,9 +76,10 @@ public:
   ObItemType into_type_;
   common::ObFixedArray<common::ObString, common::ObIAllocator> user_vars_;
   common::ObObj outfile_name_;
-  common::ObObj field_str_;
+  common::ObObj field_str_; // FARM COMPAT WHITELIST FOR filed_str_: renamed
   common::ObObj line_str_;
-  common::ObObj closed_cht_;
+  // 431以下版本select into无法并行执行, 不会序列化算子, 修改closed_cht_类型不会导致升级兼容性问题
+  common::ObObj closed_cht_; // FARM COMPAT WHITELIST FOR closed_cht_: change type
   bool is_optional_;
   common::ObFixedArray<ObExpr*, common::ObIAllocator> select_exprs_;
   bool is_single_;
@@ -84,7 +87,10 @@ public:
   common::ObObj escaped_cht_;
   common::ObCollationType cs_type_;
   int64_t parallel_;
+  sql::ObExpr* file_partition_expr_;
+  int64_t buffer_size_;
   static const int64_t DEFAULT_MAX_FILE_SIZE = 256LL * 1024 * 1024;
+  static const int64_t DEFAULT_BUFFER_SIZE = 1LL * 1024 * 1024;
 };
 
 class ObSelectIntoOp : public ObOperator
@@ -110,6 +116,7 @@ public:
       has_escape_(false),
       has_lob_(false),
       has_json_(false),
+      is_file_opened_(false),
       print_params_(),
       escape_printer_()
   {
@@ -119,7 +126,8 @@ public:
   struct ObEscapePrinter
   {
     ObEscapePrinter():
-      need_enclose_(false), do_encode_(false), do_escape_(false), print_hex_(false) {}
+      need_enclose_(false), do_encode_(false), do_escape_(false), print_hex_(false),
+      ignore_convert_failed_(false) {}
     int operator() (const ObString &src_str, const ob_wc_t &unicode_value) {
       int ret = OB_SUCCESS;
       ObString dst_str = src_str;
@@ -129,6 +137,9 @@ public:
         ret = ObCharset::wc_mb(coll_type_, unicode_value, tmp_buf, ObCharset::MAX_MB_LEN, result_len);
         if (OB_SUCC(ret)) {
           dst_str = ObString(result_len, tmp_buf);
+        } else if (ret == OB_ERR_INCORRECT_STRING_VALUE && ignore_convert_failed_) {
+          dst_str = convert_replacer_;
+          ret = OB_SUCCESS;
         }
       }
       if (OB_FAIL(ret) || !do_escape_ || print_hex_) {
@@ -155,11 +166,13 @@ public:
     ObString zero_;
     ObString field_terminator_;
     ObString line_terminator_;
+    ObString convert_replacer_;
     ObCollationType coll_type_;
     bool need_enclose_;
     bool do_encode_;
     bool do_escape_;
     bool print_hex_;
+    bool ignore_convert_failed_;
     char *buf_;
     int64_t buf_len_;
     int64_t pos_;
@@ -239,6 +252,7 @@ public:
     write_bytes_ = 0;
     split_file_id_ = 0;
     data_writer_.init(NULL, 0);
+    is_file_opened_ = false;
   }
 
 private:
@@ -268,7 +282,9 @@ private:
   int write_lob_to_file(const ObObj &obj, const ObExpr &expr, const ObDatum &datum);
   int try_split_file();
   int into_varlist();
-  int open_file(bool delay_create = false);
+  int open_file();
+  int calc_next_file_path();
+  int calc_first_file_path(ObString &path);
   int split_file();
   void close_file();
   std::function<int(const char *, int64_t)> get_flush_function();
@@ -297,6 +313,7 @@ private:
   bool has_escape_;
   bool has_lob_;
   bool has_json_;
+  bool is_file_opened_;
   common::ObObjPrintParams print_params_;
   ObEscapePrinter escape_printer_;
 };

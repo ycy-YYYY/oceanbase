@@ -398,10 +398,15 @@ int ObTenantNodeBalancer::check_new_tenant(
         LOG_WARN("fail to create new tenant", K(ret), K(tenant_id));
       }
     }
-  } else {
+  }
+
+  if (OB_SUCC(ret)) {
+    if (OB_ISNULL(tenant)) {
+      ret = omt_->get_tenant(tenant_id, tenant);
+    }
     int64_t extra_memory = 0;
     if (is_sys_tenant(tenant_id)) {
-      if (tenant->is_hidden() && OB_FAIL(omt_->convert_hidden_to_real_sys_tenant(unit, abs_timeout_us))) {
+      if (OB_SUCC(ret) && tenant->is_hidden() && OB_FAIL(omt_->convert_hidden_to_real_sys_tenant(unit, abs_timeout_us))) {
         LOG_WARN("fail to create real sys tenant", K(unit));
       }
       extra_memory = GMEMCONF.get_extra_memory();
@@ -415,6 +420,7 @@ int ObTenantNodeBalancer::check_new_tenant(
       LOG_ERROR("fail to update tenant memory", K(ret), K(tenant_id));
     }
   }
+
   if (OB_SUCC(ret) && !is_virtual_tenant_id(tenant_id)) {
     if (OB_FAIL(omt_->modify_tenant_io(tenant_id, unit.config_))) {
       LOG_WARN("modify tenant io config failed", K(ret), K(tenant_id), K(unit.config_));
@@ -661,6 +667,8 @@ int ObTenantNodeBalancer::update_tenant_memory(const obrpc::ObTenantMemoryArg &t
     LOG_WARN("failed to update tenant memory", K(ret), K(tenant_id), K(memory_size));
   } else if (OB_FAIL(omt_->update_tenant_freezer_mem_limit(tenant_id, unit.config_.memory_size(), allowed_mem_limit))) {
     LOG_WARN("set_tenant_freezer_mem_limit failed", K(ret), K(tenant_id));
+  } else if (OB_FAIL(omt_->update_tenant_decode_resource(tenant_id))) {
+    LOG_WARN("update_tenant_decode_resource failed", K(ret), K(tenant_id));
   } else {
     refresh_interval_ = refresh_interval * 1000L * 1000L;
     LOG_INFO("succ to admin update tenant memory", K(tenant_id), K(memory_size));

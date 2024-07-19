@@ -437,11 +437,9 @@ int ObPxCoordOp::try_clear_p2p_dh_info()
   int ret = OB_SUCCESS;
 
 #ifdef ERRSIM
-  ObSQLSessionInfo *session = ctx_.get_my_session();
-  int64_t query_timeout = 0;
-  session->get_query_timeout(query_timeout);
-  if (OB_FAIL(OB_E(EventTable::EN_PX_NOT_ERASE_P2P_DH_MSG) OB_SUCCESS)) {
-    LOG_WARN("qc not clear p2p dh info by design", K(ret), K(query_timeout));
+  int ecode = EventTable::EN_PX_NOT_ERASE_P2P_DH_MSG;
+  if (OB_SUCCESS != ecode && OB_SUCC(ret)) {
+    LOG_WARN("qc not clear p2p dh info by design", K(ret));
     return OB_SUCCESS;
   }
 #endif
@@ -514,9 +512,11 @@ int ObPxCoordOp::inner_close()
   ObSQLSessionInfo *session = ctx_.get_my_session();
   int64_t query_timeout = 0;
   session->get_query_timeout(query_timeout);
-  if (OB_FAIL(OB_E(EventTable::EN_PX_QC_EARLY_TERMINATE, query_timeout) OB_SUCCESS)) {
-    LOG_WARN("qc not interrupt qc by design", K(ret), K(query_timeout));
+  int ecode = EVENT_CALL(EventTable::EN_PX_QC_EARLY_TERMINATE, query_timeout);
+  if (OB_SUCCESS != ecode && OB_SUCC(ret)) {
+    LOG_WARN("qc not interrupt qc by design", K(ecode), K(query_timeout));
     should_terminate_running_dfos = false;
+    ret = ecode;
   }
 #endif
 
@@ -630,6 +630,7 @@ int ObPxCoordOp::destroy_all_channel()
    * release root task channel here.
    * */
   if (OB_FAIL(ObPxChannelUtil::unlink_ch_set(task_ch_set_, &dfc_, true))) {
+    // overwrite ret
     LOG_WARN("unlink channel failed", K(ret));
   }
 
@@ -681,7 +682,8 @@ int ObPxCoordOp::wait_all_running_dfos_exit()
     dtl::ObDtlPacketEmptyProc<ObInitChannelPieceMsg> init_channel_piece_msg_proc;
     dtl::ObDtlPacketEmptyProc<ObReportingWFPieceMsg> reporting_wf_piece_msg_proc;
     dtl::ObDtlPacketEmptyProc<ObOptStatsGatherPieceMsg> opt_stats_gather_piece_msg_proc;
-
+    dtl::ObDtlPacketEmptyProc<SPWinFuncPXPieceMsg> sp_winfunc_px_piece_msg_proc;
+    dtl::ObDtlPacketEmptyProc<RDWinFuncPXPieceMsg> rd_winfunc_px_piece_msg_proc;
     // 这个注册会替换掉旧的proc.
     (void)msg_loop_.clear_all_proc();
     (void)msg_loop_
@@ -696,7 +698,9 @@ int ObPxCoordOp::wait_all_running_dfos_exit()
       .register_processor(rd_wf_piece_msg_proc)
       .register_processor(init_channel_piece_msg_proc)
       .register_processor(reporting_wf_piece_msg_proc)
-      .register_processor(opt_stats_gather_piece_msg_proc);
+      .register_processor(opt_stats_gather_piece_msg_proc)
+      .register_processor(sp_winfunc_px_piece_msg_proc)
+      .register_processor(rd_winfunc_px_piece_msg_proc);
     loop.ignore_interrupt();
 
     ObPxControlChannelProc control_channels;
@@ -757,6 +761,8 @@ int ObPxCoordOp::wait_all_running_dfos_exit()
           case ObDtlMsgType::DH_INIT_CHANNEL_PIECE_MSG:
           case ObDtlMsgType::DH_SECOND_STAGE_REPORTING_WF_PIECE_MSG:
           case ObDtlMsgType::DH_OPT_STATS_GATHER_PIECE_MSG:
+          case ObDtlMsgType::DH_SP_WINFUNC_PX_PIECE_MSG:
+          case ObDtlMsgType::DH_RD_WINFUNC_PX_PIECE_MSG:
             break;
           default:
             ret = OB_ERR_UNEXPECTED;
@@ -1046,11 +1052,9 @@ int ObPxCoordOp::erase_dtl_interm_result()
 {
   int ret = OB_SUCCESS;
 #ifdef ERRSIM
-  ObSQLSessionInfo *session = ctx_.get_my_session();
-  int64_t query_timeout = 0;
-  session->get_query_timeout(query_timeout);
-  if (OB_FAIL(OB_E(EventTable::EN_PX_SINGLE_DFO_NOT_ERASE_DTL_INTERM_RESULT) OB_SUCCESS)) {
-    LOG_WARN("ObPxCoordOp not erase_dtl_interm_result by design", K(ret), K(query_timeout));
+int ecode = EventTable::EN_PX_SINGLE_DFO_NOT_ERASE_DTL_INTERM_RESULT;
+  if (OB_SUCCESS != ecode && OB_SUCC(ret)) {
+    LOG_WARN("ObPxCoordOp not erase_dtl_interm_result by design", K(ret));
     return OB_SUCCESS;
   }
 #endif

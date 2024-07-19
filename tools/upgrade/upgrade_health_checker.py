@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+from __future__ import print_function
 import sys
 import os
 import time
@@ -14,9 +15,9 @@ class UpgradeParams:
   log_filename = 'upgrade_cluster_health_checker.log'
 
 class PasswordMaskingFormatter(logging.Formatter):
-    def format(self, record):
-        s = super(PasswordMaskingFormatter, self).format(record)
-        return re.sub(r'password=\".*?\"', 'password=\"******\"', s)
+  def format(self, record):
+    s = super(PasswordMaskingFormatter, self).format(record)
+    return re.sub(r'password="(?:[^"\\]|\\.)*"', 'password="******"', s)
 
 #### --------------start : my_error.py --------------
 class MyError(Exception):
@@ -37,12 +38,12 @@ class QueryCursor:
       if True == print_when_succ:
         logging.info('succeed to execute sql: %s, rowcount = %d', sql, rowcount)
       return rowcount
-    except mysql.connector.Error, e:
+    except mysql.connector.Error as e:
       logging.exception('mysql connector error, fail to execute sql: %s', sql)
-      raise e
-    except Exception, e:
+      raise
+    except Exception as e:
       logging.exception('normal error, fail to execute sql: %s', sql)
-      raise e
+      raise
   def exec_query(self, sql, print_when_succ = True):
     try:
       self.__cursor.execute(sql)
@@ -51,12 +52,12 @@ class QueryCursor:
       if True == print_when_succ:
         logging.info('succeed to execute query: %s, rowcount = %d', sql, rowcount)
       return (self.__cursor.description, results)
-    except mysql.connector.Error, e:
+    except mysql.connector.Error as e:
       logging.exception('mysql connector error, fail to execute sql: %s', sql)
-      raise e
-    except Exception, e:
+      raise
+    except Exception as e:
       logging.exception('normal error, fail to execute sql: %s', sql)
-      raise e
+      raise
 #### ---------------end----------------------
 
 #### --------------start :  opt.py --------------
@@ -196,10 +197,10 @@ def parse_options(argv):
 def deal_with_local_opt(opt):
   if 'help' == opt.get_long_name():
     global help_str
-    print help_str
+    print(help_str)
   elif 'version' == opt.get_long_name():
     global version_str
-    print version_str
+    print(version_str)
 
 def deal_with_local_opts():
   global g_opts
@@ -263,11 +264,8 @@ def get_opt_zone():
 
 #### --------------start :  do_upgrade_pre.py--------------
 def config_logging_module(log_filenamme):
-  logging.basicConfig(level=logging.INFO,\
-      format='[%(asctime)s] %(levelname)s %(filename)s:%(lineno)d %(message)s',\
-      datefmt='%Y-%m-%d %H:%M:%S',\
-      filename=log_filenamme,\
-      filemode='w')
+  logger = logging.getLogger('')
+  logger.setLevel(logging.INFO)
   # 定义日志打印格式
   formatter = PasswordMaskingFormatter('[%(asctime)s] %(levelname)s %(filename)s:%(lineno)d %(message)s', '%Y-%m-%d %H:%M:%S')
   #######################################
@@ -303,9 +301,9 @@ def fetch_tenant_ids(query_cur):
     for r in results:
       tenant_id_list.append(r[0])
     return tenant_id_list
-  except Exception, e:
+  except Exception as e:
     logging.exception('fail to fetch distinct tenant ids')
-    raise e
+    raise
 
 def set_default_timeout_by_tenant(query_cur, timeout, timeout_per_tenant, min_timeout):
   if timeout > 0:
@@ -388,8 +386,8 @@ def check_until_timeout(query_cur, sql, value, timeout):
 
     times -= 1
     if times == -1:
-      logging.warn("""check {0} job timeout""".format(job_name))
-      raise e
+      logging.warn("""result not expected, sql: '{0}', expected: '{1}', current: '{2}'""".format(sql, value, results[0][0]))
+      raise MyError("""result not expected, sql: '{0}', expected: '{1}', current: '{2}'""".format(sql, value, results[0][0]))
     time.sleep(10)
 
 # 开始健康检查
@@ -412,18 +410,18 @@ def do_check(my_host, my_port, my_user, my_passwd, upgrade_params, timeout, need
       check_server_version_by_zone(query_cur, zone)
       if True == need_check_major_status:
         check_major_merge(query_cur, timeout)
-    except Exception, e:
+    except Exception as e:
       logging.exception('run error')
-      raise e
+      raise
     finally:
       cur.close()
       conn.close()
-  except mysql.connector.Error, e:
+  except mysql.connector.Error as e:
     logging.exception('connection error')
-    raise e
-  except Exception, e:
+    raise
+  except Exception as e:
     logging.exception('normal error')
-    raise e
+    raise
 
 if __name__ == '__main__':
   upgrade_params = UpgradeParams()
@@ -445,12 +443,12 @@ if __name__ == '__main__':
       timeout = int(get_opt_timeout())
       zone = get_opt_zone()
       logging.info('parameters from cmd: host=\"%s\", port=%s, user=\"%s\", password=\"%s\", log-file=\"%s\", timeout=%s, zone=\"%s\"', \
-          host, port, user, password, log_filename, timeout, zone)
+          host, port, user, password.replace('"', '\\"'), log_filename, timeout, zone)
       do_check(host, port, user, password, upgrade_params, timeout, False, zone) # need_check_major_status = False
-    except mysql.connector.Error, e:
+    except mysql.connector.Error as e:
       logging.exception('mysql connctor error')
-      raise e
-    except Exception, e:
+      raise
+    except Exception as e:
       logging.exception('normal error')
-      raise e
+      raise
 

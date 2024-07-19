@@ -18,6 +18,7 @@
 #include "observer/table_load/ob_table_load_struct.h"
 #include "share/table/ob_table_load_array.h"
 #include "share/table/ob_table_load_define.h"
+#include "share/table/ob_table_load_dml_stat.h"
 #include "share/table/ob_table_load_sql_statistics.h"
 #include "sql/session/ob_sql_session_mgr.h"
 #include "storage/direct_load/ob_direct_load_struct.h"
@@ -169,7 +170,10 @@ public:
                K_(write_session_count),
                K_(exe_mode),
                "method", storage::ObDirectLoadMethod::get_type_string(method_),
-               "insert_mode", storage::ObDirectLoadInsertMode::get_type_string(insert_mode_));
+               "insert_mode", storage::ObDirectLoadInsertMode::get_type_string(insert_mode_),
+               "load_mode", storage::ObDirectLoadMode::get_type_string(load_mode_),
+               K_(compressor_type),
+               K_(online_sample_percent));
 
 public:
   uint64_t table_id_;
@@ -189,6 +193,9 @@ public:
   ObTableLoadExeMode exe_mode_;
   storage::ObDirectLoadMethod::Type method_;
   storage::ObDirectLoadInsertMode::Type insert_mode_;
+  storage::ObDirectLoadMode::Type load_mode_;
+  ObCompressorType compressor_type_;
+  double online_sample_percent_;
 };
 
 class ObDirectLoadControlConfirmBeginArg final
@@ -250,11 +257,15 @@ class ObDirectLoadControlCommitRes final
 
 public:
   ObDirectLoadControlCommitRes() {}
-  TO_STRING_KV(K_(result_info), K_(sql_statistics))
+  TO_STRING_KV(K_(result_info),
+               K_(sql_statistics),
+               K_(trans_result),
+               K_(dml_stats));
 public:
   table::ObTableLoadResultInfo result_info_;
   table::ObTableLoadSqlStatistics sql_statistics_;
   transaction::ObTxExecResult trans_result_;
+  table::ObTableLoadDmlStat dml_stats_;
 };
 
 class ObDirectLoadControlAbortArg final

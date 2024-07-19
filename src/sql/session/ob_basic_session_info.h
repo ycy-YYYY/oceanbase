@@ -26,6 +26,7 @@
 #include "lib/timezone/ob_timezone_info.h"
 #include "lib/ash/ob_active_session_guard.h"
 #include "rpc/ob_sql_request_operator.h"
+#include "share/ob_compatibility_control.h"
 #include "share/ob_debug_sync.h"
 #include "share/schema/ob_schema_struct.h"
 #include "share/schema/ob_schema_getter_guard.h"
@@ -550,6 +551,8 @@ public:
     is_result_accurate = sys_vars_cache_.get_is_result_accurate();
     return common::OB_SUCCESS;
   }
+  common::ObIArray<uint64_t>& get_enable_role_ids() { return enable_role_ids_; }
+  const common::ObIArray<uint64_t>& get_enable_role_ids() const { return enable_role_ids_; }
   int get_show_ddl_in_compat_mode(bool &show_ddl_in_compat_mode) const;
   int get_sql_quote_show_create(bool &sql_quote_show_create) const;
   common::ObConsistencyLevel get_consistency_level() const { return consistency_level_; };
@@ -709,6 +712,8 @@ public:
   int get_influence_plan_sys_var(ObSysVarInPC &sys_vars) const;
   const common::ObString &get_sys_var_in_pc_str() const { return sys_var_in_pc_str_; }
   const common::ObString &get_config_in_pc_str() const { return config_in_pc_str_; }
+  uint64_t get_sys_var_config_hash_val() const { return sys_var_config_hash_val_; }
+  void eval_sys_var_config_hash_val();
   int gen_sys_var_in_pc_str();
   int gen_configs_in_pc_str();
   uint32_t get_sessid() const { return sessid_; }
@@ -757,8 +762,11 @@ public:
   int set_user(const common::ObString &user_name, const common::ObString &host_name, const uint64_t user_id);
   inline void set_proxy_user_id(const uint64_t proxy_user_id) { proxy_user_id_ = proxy_user_id; }
   int set_real_client_ip_and_port(const common::ObString &client_ip, int32_t client_addr_port);
+  int set_proxy_user(const common::ObString &user_name, const common::ObString &host_name, const uint64_t user_id);
   const common::ObString &get_user_name() const { return thread_data_.user_name_;}
   const common::ObString &get_host_name() const { return thread_data_.host_name_;}
+  const common::ObString &get_proxy_user_name() const { return thread_data_.proxy_user_name_;}
+  const common::ObString &get_proxy_host_name() const { return thread_data_.proxy_host_name_;}
   const common::ObString &get_client_ip() const { return thread_data_.client_ip_;}
   const common::ObString &get_user_at_host() const { return thread_data_.user_at_host_name_;}
   const common::ObString &get_user_at_client_ip() const { return thread_data_.user_at_client_ip_;}
@@ -1352,6 +1360,7 @@ public:
 
   bool has_explicit_start_trans() const { return tx_desc_ != NULL && tx_desc_->is_explicit(); }
   bool is_in_transaction() const { return tx_desc_ != NULL && tx_desc_->is_in_tx(); }
+  bool has_active_autocommit_trans(transaction::ObTransID &trans_id);
   virtual bool is_txn_free_route_temp() const { return false; }
   bool get_in_transaction() const { return is_in_transaction(); }
   uint64_t get_trans_flags() const { return trans_flags_.get_flags(); }
@@ -1398,6 +1407,7 @@ public:
   inline void set_feedback_proxy_info_support(const bool is_feedback_proxy_info_support) { is_feedback_proxy_info_support_ = is_feedback_proxy_info_support; }
   inline bool is_feedback_proxy_info_support() { return is_feedback_proxy_info_support_; }
   int replace_new_session_label(uint64_t policy_id, const share::ObLabelSeSessionLabel &new_session_label);
+  int set_enable_role_ids(const ObIArray<uint64_t>& role_ids);
   int load_default_sys_variable(common::ObIAllocator &allocator, int64_t var_idx);
 
   int set_session_temp_table_used(const bool is_used);
@@ -1406,6 +1416,11 @@ public:
   common::ActiveSessionStat &get_ash_stat() {  return ash_stat_; }
   void update_tenant_config_version(int64_t v) { cached_tenant_config_version_ = v; };
   static int check_optimizer_features_enable_valid(const ObObj &val);
+  int get_compatibility_control(share::ObCompatType &compat_type) const;
+  int get_compatibility_version(uint64_t &compat_version) const;
+  int get_security_version(uint64_t &security_version) const;
+  int check_feature_enable(const share::ObCompatFeatureType feature_type, bool &is_enable) const;
+  void trace_all_sys_vars() const;
 protected:
   int process_session_variable(share::ObSysVarClassType var, const common::ObObj &value,
                                const bool check_timezone_valid = true,
@@ -1665,7 +1680,10 @@ public:
         runtime_filter_max_in_num_(0),
         runtime_bloom_filter_max_size_(INT_MAX32),
         enable_rich_vector_format_(false),
-        ncharacter_set_connection_(ObCharsetType::CHARSET_INVALID)
+        ncharacter_set_connection_(ObCharsetType::CHARSET_INVALID),
+        compat_type_(share::ObCompatType::COMPAT_MYSQL57),
+        compat_version_(0),
+        enable_sql_plan_monitor_(false)
     {
       for (int64_t i = 0; i < ObNLSFormatEnum::NLS_MAX; ++i) {
         MEMSET(nls_formats_buf_[i], 0, MAX_NLS_FORMAT_STR_LEN);
@@ -1728,6 +1746,9 @@ public:
       enable_rich_vector_format_ = false;
       ncharacter_set_connection_ = ObCharsetType::CHARSET_INVALID;
       default_lob_inrow_threshold_ = OB_DEFAULT_LOB_INROW_THRESHOLD;
+      compat_type_ = share::ObCompatType::COMPAT_MYSQL57;
+      compat_version_ = 0;
+      enable_sql_plan_monitor_ = false;
     }
 
     inline bool operator==(const SysVarsCacheData &other) const {
@@ -1775,7 +1796,9 @@ public:
             ob_max_read_stale_time_ == other.ob_max_read_stale_time_  &&
             enable_rich_vector_format_ == other.enable_rich_vector_format_ &&
             ncharacter_set_connection_ == other.ncharacter_set_connection_ &&
-            default_lob_inrow_threshold_ == other.default_lob_inrow_threshold_;
+            default_lob_inrow_threshold_ == other.default_lob_inrow_threshold_ &&
+            compat_type_ == other.compat_type_ &&
+            compat_version_ == other.compat_version_;
       bool equal2 = true;
       for (int64_t i = 0; i < ObNLSFormatEnum::NLS_MAX; ++i) {
         if (nls_formats_[i] != other.nls_formats_[i]) {
@@ -1955,6 +1978,10 @@ public:
     int64_t runtime_bloom_filter_max_size_;
     bool enable_rich_vector_format_;
     ObCharsetType ncharacter_set_connection_;
+    share::ObCompatType compat_type_;
+    uint64_t compat_version_;
+    // No use. Placeholder.
+    bool enable_sql_plan_monitor_;
   private:
     char nls_formats_buf_[ObNLSFormatEnum::NLS_MAX][MAX_NLS_FORMAT_STR_LEN];
   };
@@ -2070,6 +2097,9 @@ private:
     DEF_SYS_VAR_CACHE_FUNCS(bool, enable_rich_vector_format);
     DEF_SYS_VAR_CACHE_FUNCS(ObCharsetType, ncharacter_set_connection);
     DEF_SYS_VAR_CACHE_FUNCS(int64_t, default_lob_inrow_threshold);
+    DEF_SYS_VAR_CACHE_FUNCS(share::ObCompatType, compat_type);
+    DEF_SYS_VAR_CACHE_FUNCS(uint64_t, compat_version);
+    DEF_SYS_VAR_CACHE_FUNCS(bool, enable_sql_plan_monitor);
     void set_autocommit_info(bool inc_value)
     {
       inc_data_.autocommit_ = inc_value;
@@ -2141,6 +2171,9 @@ private:
         bool inc_ncharacter_set_connection_:1;
         bool inc_default_lob_inrow_threshold_:1;
         bool inc_ob_enable_pl_cache_:1;
+        bool inc_compat_type_:1;
+        bool inc_compat_version_:1;
+        bool inc_enable_sql_plan_monitor_:1;
       };
     };
   };
@@ -2391,6 +2424,9 @@ private:
   ForceRichFormatStatus force_rich_vector_format_;
   // just used to plan cache key
   bool config_use_rich_format_;
+
+  common::ObSEArray<uint64_t, 4> enable_role_ids_;
+  uint64_t sys_var_config_hash_val_;
 };
 
 
@@ -2566,6 +2602,7 @@ public:
     COLLATION_CONNECTION,
     COLLATION_DATABASE,
     PLSQL_CCFLAGS,
+    PLSQL_OPTIMIZE_LEVEL,
     MAX_ENV,
   };
 
@@ -2575,6 +2612,7 @@ public:
     share::SYS_VAR_COLLATION_CONNECTION,
     share::SYS_VAR_COLLATION_DATABASE,
     share::SYS_VAR_PLSQL_CCFLAGS,
+    share::SYS_VAR_PLSQL_OPTIMIZE_LEVEL,
     share::SYS_VAR_INVALID
   };
 
@@ -2583,7 +2621,9 @@ public:
     charset_client_(CS_TYPE_INVALID),
     collation_connection_(CS_TYPE_INVALID),
     collation_database_(CS_TYPE_INVALID),
-    plsql_ccflags_() {}
+    plsql_ccflags_(),
+    plsql_optimize_level_(2)  // default PLSQL_OPTIMIZE_LEVEL = 2
+  { }
 
   virtual ~ObExecEnv() {}
 
@@ -2591,7 +2631,8 @@ public:
                K_(charset_client),
                K_(collation_connection),
                K_(collation_database),
-               K_(plsql_ccflags));
+               K_(plsql_ccflags),
+               K_(plsql_optimize_level));
 
   void reset();
 
@@ -2616,12 +2657,16 @@ public:
 
   void set_plsql_ccflags(ObString &plsql_ccflags) { plsql_ccflags_ = plsql_ccflags; }
 
+  int64_t get_plsql_optimize_level() { return plsql_optimize_level_; }
+  void set_plsql_optimize_level(int64_t level) { plsql_optimize_level_ = plsql_optimize_level_; }
+
 private:
   ObSQLMode sql_mode_;
   ObCollationType charset_client_;
   ObCollationType collation_connection_;
   ObCollationType collation_database_;
   ObString plsql_ccflags_;
+  int64_t plsql_optimize_level_;
 };
 
 

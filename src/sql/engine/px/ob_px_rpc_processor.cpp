@@ -39,6 +39,8 @@ int ObInitSqcP::init()
     LOG_WARN("unexpected sqc handler", K(ret));
   } else if (OB_FAIL(sqc_handler->init())) {
     LOG_WARN("Failed to init sqc handler", K(ret));
+    sqc_handler->reset();
+    op_reclaim_free(sqc_handler);
   } else {
     arg_.sqc_handler_ = sqc_handler;
     arg_.sqc_handler_->reset_reference_count(); //设置sqc_handler的引用计数为1.
@@ -106,8 +108,10 @@ int ObInitSqcP::process()
   }
 
 #ifdef ERRSIM
-  if (OB_FAIL(OB_E(EventTable::EN_PX_SQC_INIT_PROCESS_FAILED) OB_SUCCESS)) {
-    LOG_WARN("match sqc execute errism", K(ret));
+  int ecode = EventTable::EN_PX_SQC_INIT_PROCESS_FAILED;
+  if (OB_SUCCESS != ecode && OB_SUCC(ret)) {
+    LOG_WARN("match sqc execute errism", K(ecode));
+    ret = ecode;
   }
 #endif
 
@@ -361,6 +365,8 @@ int ObInitFastSqcP::init()
     LOG_WARN("unexpected sqc handler", K(ret));
   } else if (OB_FAIL(sqc_handler->init())) {
     LOG_WARN("Failed to init sqc handler", K(ret));
+    sqc_handler->reset();
+    op_reclaim_free(sqc_handler);
   } else {
     arg_.sqc_handler_ = sqc_handler;
     arg_.sqc_handler_->reset_reference_count(); //设置sqc_handler的引用计数为1.
@@ -486,6 +492,13 @@ void ObFastInitSqcCB::on_timeout()
   interrupt_qc(ret);
 }
 
+void ObFastInitSqcCB::log_warn_sqc_fail(int ret)
+{
+  // Do not change the follow log about px_obdiag_sqc_addr, becacue it will use in obdiag tool
+  LOG_WARN("init fast sqc cb async interrupt qc", K_(trace_id), K(timeout_ts_), K(interrupt_id_),
+           K(ret), "px_obdiag_sqc_addr", addr_);
+}
+
 int ObFastInitSqcCB::process()
 {
   //
@@ -494,8 +507,7 @@ int ObFastInitSqcCB::process()
     int64_t cur_timestamp = ::oceanbase::common::ObTimeUtility::current_time();
     if (timeout_ts_ - cur_timestamp > 0) {
       interrupt_qc(ret);
-      LOG_WARN("init fast sqc cb async interrupt qc", K_(trace_id),
-               K(addr_), K(timeout_ts_), K(interrupt_id_), K(ret));
+      log_warn_sqc_fail(ret);
     } else {
       LOG_WARN("init fast sqc cb async timeout", K_(trace_id),
                K(addr_), K(timeout_ts_), K(cur_timestamp), K(ret));

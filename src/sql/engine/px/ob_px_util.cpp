@@ -48,7 +48,7 @@ case ERR_CODE: {                                                \
   break;                                                        \
 }                                                               \
 
-OB_SERIALIZE_MEMBER(ObExprExtraSerializeInfo, *current_time_, *last_trace_id_);
+OB_SERIALIZE_MEMBER(ObExprExtraSerializeInfo, *current_time_, *last_trace_id_, *mview_ids_, *last_refresh_scns_);
 
 // 物理分布策略：对于叶子节点，dfo 分布一般直接按照数据分布来
 // Note：如果 dfo 中有两个及以上的 scan，仅仅考虑第一个。并且，要求其余 scan
@@ -111,7 +111,7 @@ int ObPXServerAddrUtil::sort_and_collect_local_file_distribution(
     auto addrcmp = [](const ObExternalFileInfo &l, const ObExternalFileInfo &r) -> bool {
       return l.file_addr_ < r.file_addr_;
     };
-    std::sort(files.get_data(), files.get_data() + files.count(), addrcmp);
+    lib::ob_sort(files.get_data(), files.get_data() + files.count(), addrcmp);
   }
   for (int64_t i = 0; OB_SUCC(ret) && i < files.count(); i++) {
     ObAddr &cur_addr = files.at(i).file_addr_;
@@ -1249,7 +1249,7 @@ int ObPXServerAddrUtil::reorder_all_partitions(int64_t table_location_key,
     if (OB_SUCC(ret)) {
       try {
         if (!is_virtual_table(ref_table_id)) {
-          std::sort(&dst_locations.at(0),
+          lib::ob_sort(&dst_locations.at(0),
                     &dst_locations.at(0) + dst_locations.count(),
                     ObPXTabletOrderIndexCmp(asc, &tablet_order_map));
         }
@@ -1360,7 +1360,7 @@ int ObPXServerAddrUtil::split_parallel_into_task(const int64_t parallel,
     }
     // 排序，执行时间长的排在前面
     auto compare_fun_long_time_first = [](ObPxSqcTaskCountMeta a, ObPxSqcTaskCountMeta b) -> bool { return a.time_ > b.time_; };
-    std::sort(sqc_task_metas.begin(),
+    lib::ob_sort(sqc_task_metas.begin(),
               sqc_task_metas.end(),
               compare_fun_long_time_first);
     /// 把剩下的线程安排出去
@@ -1664,6 +1664,8 @@ int ObPxTreeSerializer::serialize_expr_frame_info(char *buf,
   ObPhysicalPlanCtx *plan_ctx = ctx.get_physical_plan_ctx();
   expr_info.current_time_ = &plan_ctx->get_cur_time();
   expr_info.last_trace_id_ = &plan_ctx->get_last_trace_id();
+  expr_info.mview_ids_ = &plan_ctx->get_mview_ids();
+  expr_info.last_refresh_scns_ = &plan_ctx->get_last_refresh_scns();
   // rt exprs
   ObExpr::get_serialize_array() = &exprs;
 
@@ -1830,6 +1832,8 @@ int ObPxTreeSerializer::deserialize_expr_frame_info(const char *buf,
   ObPhysicalPlanCtx *plan_ctx = ctx.get_physical_plan_ctx();
   expr_info.current_time_ = &plan_ctx->get_cur_time();
   expr_info.last_trace_id_ = &plan_ctx->get_last_trace_id();
+  expr_info.mview_ids_ = &plan_ctx->get_mview_ids();
+  expr_info.last_refresh_scns_ = &plan_ctx->get_last_refresh_scns();
   if (OB_FAIL(expr_info.deserialize(buf, data_len, pos))) {
     LOG_WARN("fail to deserialize expr extra info", K(ret));
   } else if (OB_FAIL(serialization::decode_i32(buf, data_len, pos, &expr_cnt))) {
@@ -1960,6 +1964,8 @@ int64_t ObPxTreeSerializer::get_serialize_expr_frame_info_size(
   ObPhysicalPlanCtx *plan_ctx = ctx.get_physical_plan_ctx();
   expr_info.current_time_ = &plan_ctx->get_cur_time();
   expr_info.last_trace_id_ = &plan_ctx->get_last_trace_id();
+  expr_info.mview_ids_ = &plan_ctx->get_mview_ids();
+  expr_info.last_refresh_scns_ = &plan_ctx->get_last_refresh_scns();
   ObIArray<ObExpr> &exprs = expr_frame_info.rt_exprs_;
   int32_t expr_cnt = expr_frame_info.is_mark_serialize()
       ? expr_frame_info.ser_expr_marks_.count()
@@ -2206,6 +2212,7 @@ int64_t ObPxTreeSerializer::get_tree_serialize_size(ObOpSpec &root, bool is_full
   for (int32_t i = 0; OB_SUCC(ret) && i < child_cnt; ++i) {
     ObOpSpec *child_op = root.get_child(i);
     if (OB_ISNULL(child_op)) {
+      // ignore ret
       // 这里无法抛出错误，不过在serialize阶段会再次检测是否有null child。
       // 所以是安全的
       LOG_ERROR("null child op", K(i), K(root.get_child_cnt()), K(root.get_type()));
@@ -2727,7 +2734,7 @@ int ObPxAffinityByRandom::do_random(bool use_partition_info, uint64_t tenant_id)
       // So we sort partitions by partition_idx and generate a relative_idx which starts from zero.
       // Then calculate hash value with the relative_idx
       auto part_idx_compare_fun = [](TabletHashValue a, TabletHashValue b) -> bool { return a.tablet_idx_ > b.tablet_idx_; };
-      std::sort(tablet_hash_values_.begin(),
+      lib::ob_sort(tablet_hash_values_.begin(),
                 tablet_hash_values_.end(),
                 part_idx_compare_fun);
       int64_t relative_idx = 0;
@@ -2740,7 +2747,7 @@ int ObPxAffinityByRandom::do_random(bool use_partition_info, uint64_t tenant_id)
 
     // 先打乱所有的序
     auto compare_fun = [](TabletHashValue a, TabletHashValue b) -> bool { return a.hash_value_ > b.hash_value_; };
-    std::sort(tablet_hash_values_.begin(),
+    lib::ob_sort(tablet_hash_values_.begin(),
               tablet_hash_values_.end(),
               compare_fun);
     LOG_TRACE("after sort partition_hash_values randomly", K(tablet_hash_values_), K(this), K(order_partitions_));
@@ -2773,12 +2780,12 @@ int ObPxAffinityByRandom::do_random(bool use_partition_info, uint64_t tenant_id)
     // 保持序
     if (asc_order) {
       auto compare_fun_order_by_part_asc = [](TabletHashValue a, TabletHashValue b) -> bool { return a.tablet_idx_ < b.tablet_idx_; };
-      std::sort(tablet_hash_values_.begin(),
+      lib::ob_sort(tablet_hash_values_.begin(),
                 tablet_hash_values_.end(),
                 compare_fun_order_by_part_asc);
     } else {
       auto compare_fun_order_by_part_desc = [](TabletHashValue a, TabletHashValue b) -> bool { return a.tablet_idx_ > b.tablet_idx_; };
-      std::sort(tablet_hash_values_.begin(),
+      lib::ob_sort(tablet_hash_values_.begin(),
                 tablet_hash_values_.end(),
                 compare_fun_order_by_part_desc);
     }
@@ -3497,6 +3504,7 @@ int ObSlaveMapUtil::build_ppwj_ch_mn_map(ObExecContext &ctx, ObDfo &parent, ObDf
         if (OB_FAIL(ret)) {
           // pass
         } else if (OB_FAIL(idx_map.get_refactored(location.tablet_id_.id(), tablet_idx))) {
+          ret = OB_HASH_NOT_EXIST == ret ? OB_SCHEMA_ERROR : ret;
           LOG_WARN("fail to get tablet idx", K(ret));
         } else if (OB_FAIL(ObPxAffinityByRandom::get_tablet_info(location.tablet_id_.id(),
                                                                  sqc.get_partitions_info(),

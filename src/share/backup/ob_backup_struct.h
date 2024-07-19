@@ -352,7 +352,7 @@ const char *const OB_BACKUP_DECRYPTION_PASSWD_ARRAY_SESSION_STR = "__ob_backup_d
 const char *const OB_RESTORE_SOURCE_NAME_SESSION_STR = "__ob_restore_source_name__";
 const char *const OB_RESTORE_PREVIEW_TENANT_ID_SESSION_STR = "__ob_restore_preview_tenant_id__";
 const char *const OB_RESTORE_PREVIEW_BACKUP_DEST_SESSION_STR = "__ob_restore_preview_backup_dest__";
-const char *const OB_RESTORE_PREVIEW_SCN_SESSION_STR = "__ob_restore_preview_timestamp__";
+const char *const OB_RESTORE_PREVIEW_SCN_SESSION_STR = "__ob_restore_preview_scn__";
 const char *const OB_RESTORE_PREVIEW_TIMESTAMP_SESSION_STR = "__ob_restore_preview_timestamp__";
 const char *const OB_RESTORE_PREVIEW_BACKUP_CLUSTER_NAME_SESSION_STR = "__ob_restore_preview_backup_cluster_name__";
 const char *const OB_RESTORE_PREVIEW_BACKUP_CLUSTER_ID_SESSION_STR = "__ob_restore_preview_backup_cluster_id__";
@@ -880,7 +880,7 @@ struct ObNonFrozenBackupPieceInfo final
   DECLARE_TO_STRING;
 };
 
-class ObBackupStorageInfo final : public common::ObObjectStorageInfo
+class ObBackupStorageInfo : public common::ObObjectStorageInfo
 {
 public:
   using common::ObObjectStorageInfo::set;
@@ -1093,6 +1093,10 @@ struct ObBackupDataType final
 {
   OB_UNIS_VERSION(1);
 public:
+  // TODO(yanfeng): change this comment when quick_restore branch merge
+  // backup sys: ls inner tablet, the granularity of success is log stream level
+  // backup minor: mini/minor/ddl/mds sstable, the granularity of success is tablet level
+  // backup major: major sstable, the granularity of success is macro block level
   enum BackupDataType
   {
     BACKUP_SYS = 0,

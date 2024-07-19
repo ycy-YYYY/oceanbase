@@ -203,7 +203,8 @@ int get_user_tenant(ObRequest &req, char *user_name_buf, char *tenant_name_buf)
       // not from LB, do nothing
     } else if (!tenant_name.empty()) {
       ret = OB_ERR_UNEXPECTED;
-      LOG_DBA_WARN(OB_INVALID_CONFIG, "msg", "connect from LB, but tenant_name is not empty");
+      LOG_DBA_WARN_V2(OB_SERVER_TENANT_NAME_NOT_EMPTY, OB_INVALID_CONFIG,
+                  "The connections from the load balancer cannot have tenant names.");
     } else {
       const int64_t endpoint_tenant_mapping_buf_len = STRLEN(GCONF._endpoint_tenant_mapping.str());
       endpoint_tenant_mapping_buf =
@@ -226,10 +227,20 @@ int get_user_tenant(ObRequest &req, char *user_name_buf, char *tenant_name_buf)
     }
   }
 
-  MEMCPY(user_name_buf, user_name.ptr(), user_name.length());
-  user_name_buf[user_name.length()] = '\0';
-  MEMCPY(tenant_name_buf, tenant_name.ptr(), tenant_name.length());
-  tenant_name_buf[tenant_name.length()] = '\0';
+  if (OB_FAIL(ret)) {
+    // do nothing
+  } else if (user_name.length() > OB_MAX_USER_NAME_LENGTH) {
+    ret = OB_WRONG_USER_NAME_LENGTH;
+    LOG_WARN("username is too long", K(ret));
+  } else if (tenant_name.length() > OB_MAX_TENANT_NAME_LENGTH) {
+    ret = OB_INVALID_TENANT_NAME;
+    LOG_WARN("tenant name is too long", K(ret));
+  } else {
+    MEMCPY(user_name_buf, user_name.ptr(), user_name.length());
+    user_name_buf[user_name.length()] = '\0';
+    MEMCPY(tenant_name_buf, tenant_name.ptr(), tenant_name.length());
+    tenant_name_buf[tenant_name.length()] = '\0';
+  }
 
   if (OB_NOT_NULL(endpoint_tenant_mapping_buf)) {
     ob_free(endpoint_tenant_mapping_buf);
@@ -270,7 +281,11 @@ int dispatch_req(const uint64_t tenant_id, ObRequest &req, QueueThread *global_m
       } else if (!mysql_queue->queue_.push(&req, MAX_QUEUE_LEN)) {  // MAX_QUEUE_LEN = 10000;
         ret = OB_QUEUE_OVERFLOW;
         EVENT_INC(MYSQL_DELIVER_FAIL);
-        LOG_ERROR("deliver request fail", K(ret), K(tenant_id), K(req));
+        LOG_ERROR("deliver mysql login request fail", K(ret), K(tenant_id), K(req));
+        LOG_DBA_ERROR_V2(OB_TENANT_REQUEST_QUEUE_FULL, ret,
+                "tenant: ", tenant_id, " mysql login request queue is full. ",
+                " [suggestion] check T", tenant_id, "_MysqlQueueTh thread stack to see which"
+                " procedure is taking too long or is blocked.");
       } else {
         LOG_INFO("succeed to dispatch to tenant mysql queue", K(tenant_id));
       }
@@ -662,8 +677,8 @@ int ObSrvDeliver::deliver_mysql_request(ObRequest &req)
           LOG_ERROR("deliver request fail", K(req));
         }
       } else if (OB_NOT_NULL(mysql_queue_)) {
-        char user_name_buf[OB_MAX_USER_NAME_LENGTH] = "";
-        char tenant_name_buf[OB_MAX_TENANT_NAME_LENGTH] = "";
+        char user_name_buf[OB_MAX_USER_NAME_BUF_LENGTH] = "";
+        char tenant_name_buf[OB_MAX_TENANT_NAME_LENGTH + 1] = "";
         uint64_t tenant_id = OB_INVALID_TENANT_ID;
         if (OB_FAIL(get_user_tenant(req, user_name_buf, tenant_name_buf))) {
           LOG_WARN("fail to get username and tenant name", K(ret), K(req));
@@ -732,11 +747,16 @@ int ObSrvDeliver::deliver_mysql_request(ObRequest &req)
         LOG_WARN("tenant is stopped", K(ret), K(tenant->id()));
       } else if (OB_FAIL(tenant->recv_request(req))) {
         EVENT_INC(MYSQL_DELIVER_FAIL);
-        LOG_ERROR("deliver request fail", K(req), K(*tenant));
+        LOG_ERROR("deliver request fail", K(req), K(ret), K(*tenant));
+        if (OB_SIZE_OVERFLOW == ret) {
+          LOG_DBA_ERROR_V2(OB_TENANT_REQUEST_QUEUE_FULL, ret,
+            "deliver mysql request to tenant: ", tenant->id(), " queue failed, the queue is full. ",
+            "[suggestion] check T", tenant->id(), "_L0_G0 thread stack to see which "
+            "procedure is taking too long or is blocked or check __all_virtual_thread view.");
+        }
       }
     }
   }
-
   return ret;
 }
 
@@ -749,6 +769,14 @@ int ObSrvDeliver::repost(void* p)
 int ObSrvDeliver::deliver(rpc::ObRequest &req)
 {
   int ret = OB_SUCCESS;
+  RequestLockWaitStat::RequestStat req_stat = req.lock_wait_node_.request_stat_.state_;
+  if (OB_UNLIKELY(req_stat == RequestLockWaitStat::RequestStat::INQUEUE)) {
+#ifdef OB_BUILD_PACKAGE // serious env, just WARN
+    LOG_WARN("deliver rpc request in unexpected state", KP(&req), K(req_stat));
+#else
+    LOG_WARN("deliver rpc request in unexpected state", KP(&req), K(req_stat), K(lbt()));
+#endif
+  }
   LOG_DEBUG("deliver ob_request:", K(req));
   if (ObRequest::OB_RPC == req.get_type()) {
     if (OB_FAIL(deliver_rpc_request(req))) {

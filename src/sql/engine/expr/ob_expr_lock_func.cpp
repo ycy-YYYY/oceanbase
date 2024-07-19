@@ -104,7 +104,9 @@ bool ObExprLockFunc::proxy_is_support(const ObExecContext &exec_ctx)
   if (OB_ISNULL(session)) {
     LOG_ERROR_RET(OB_INVALID_ARGUMENT, "session is null!");
   } else {
-    is_support = (session->is_feedback_proxy_info_support() && session->is_client_sessid_support()) || !session->is_obproxy_mode();
+    is_support = ((session->is_feedback_proxy_info_support() && session->is_client_sessid_support())
+                  || !session->is_obproxy_mode())
+                 && session->get_client_sessid() != INVALID_SESSID;
     if (!is_support) {
       LOG_WARN_RET(OB_NOT_SUPPORTED,
                    "proxy is not support this feature",
@@ -275,10 +277,7 @@ int ObExprIsFreeLock::is_free_lock(const ObExpr &expr,
   int ret = OB_SUCCESS;
 
   ObDatum *lock_name = NULL;
-  if (!proxy_is_support(ctx.exec_ctx_)) {
-    ret = OB_NOT_SUPPORTED;
-    LOG_WARN("obproxy is not support mysql lock function", K(ret));
-  } else if (OB_FAIL(expr.eval_param_value(ctx, lock_name))) {
+  if (OB_FAIL(expr.eval_param_value(ctx, lock_name))) {
     LOG_WARN("calc param failed", K(ret));
   } else if (lock_name->is_null()) {
     // TODO: yichang.yyf use the error code of mysql ER_USER_LOCK_WRONG_NAME or ER_USER_LOCK_OVERLONG_NAME;
@@ -344,10 +343,7 @@ int ObExprIsUsedLock::is_used_lock(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &
   uint32_t sess_id = 0;
   ObDatum *lock_name = NULL;
 
-  if (!proxy_is_support(ctx.exec_ctx_)) {
-    ret = OB_NOT_SUPPORTED;
-    LOG_WARN("obproxy is not support mysql lock function", K(ret));
-  } else if (OB_FAIL(expr.eval_param_value(ctx, lock_name))) {
+  if (OB_FAIL(expr.eval_param_value(ctx, lock_name))) {
     LOG_WARN("calc param failed", K(ret));
   } else if (lock_name->is_null()) {
     // TODO: yichang.yyf use the error code of mysql ER_USER_LOCK_WRONG_NAME or ER_USER_LOCK_OVERLONG_NAME;
@@ -412,6 +408,8 @@ int ObExprReleaseLock::release_lock(const ObExpr &expr, ObEvalCtx &ctx, ObDatum 
   int ret = OB_SUCCESS;
 
   ObDatum *lock_name = NULL;
+  int64_t release_cnt = ObLockFuncExecutor::INVALID_RELEASE_CNT;
+
   if (!proxy_is_support(ctx.exec_ctx_)) {
     ret = OB_NOT_SUPPORTED;
     LOG_WARN("obproxy is not support mysql lock function", K(ret));
@@ -429,24 +427,19 @@ int ObExprReleaseLock::release_lock(const ObExpr &expr, ObEvalCtx &ctx, ObDatum 
       ret = OB_INVALID_ARGUMENT;
       LOG_WARN("invalid argument, lock name should not be null", K(ret));
     } else if (OB_FAIL(executor.execute(ctx.exec_ctx_,
-                                        lock_name_str))) {
+                                        lock_name_str,
+                                        release_cnt))) {
       LOG_WARN("release lock failed", K(ret), K(lock_name_str));
     }
   }
 
-  // 1 release success
   if (OB_SUCC(ret)) {
-    result.set_int(1);
-  } else if (OB_EMPTY_RESULT == ret) {
-    // 2 there is no lock
-    ret = OB_SUCCESS;
-    result.set_null();
-  } else if (OB_OBJ_LOCK_NOT_EXIST == ret) {
-    // 3 the lock is not belong to current client session
-    ret = OB_SUCCESS;
-    result.set_int(0);
+    if (release_cnt < 0) {
+      result.set_null();
+    } else {
+      result.set_int(release_cnt);
+    }
   } else {
-    // 4 some thing error.
     result.set_null();
   }
 
@@ -487,11 +480,14 @@ int ObExprReleaseAllLocks::release_all_locks(const ObExpr &expr,
   } else {
     ret = executor.execute(ctx.exec_ctx_, release_cnt);
   }
-  // 1. release all locks success.
+
   if (OB_SUCC(ret)) {
-    result.set_int(release_cnt);
+    if (release_cnt < 0) {
+      result.set_null();
+    } else {
+      result.set_int(release_cnt);
+    }
   } else {
-    // 2. some thing error.
     result.set_null();
   }
   return ret;

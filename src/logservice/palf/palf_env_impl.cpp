@@ -278,6 +278,7 @@ int PalfEnvImpl::init(
     tenant_id_ = tenant_id;
     is_inited_ = true;
     is_running_ = true;
+    enable_log_cache_ = options.enable_log_cache_;
     PALF_LOG(INFO, "PalfEnvImpl init success", K(ret), K(self_), KPC(this));
   }
   if (OB_FAIL(ret) && OB_INIT_TWICE != ret) {
@@ -770,20 +771,20 @@ int PalfEnvImpl::try_recycle_blocks()
         const int64_t log_disk_usage_limit_size = disk_opts_for_stopping_writing.log_disk_usage_limit_size_;
         const int64_t log_disk_warn_percent = disk_opts_for_stopping_writing.log_disk_utilization_threshold_;
         const int64_t log_disk_limit_percent = disk_opts_for_stopping_writing.log_disk_utilization_limit_threshold_;
-        LOG_DBA_ERROR(OB_LOG_OUTOF_DISK_SPACE, "msg", "log disk space is almost full", "ret", tmp_ret,
-            "total_size(MB)", log_disk_usage_limit_size/MB,
-            "used_size(MB)", total_used_size_byte/MB,
-            "used_percent(%)", (total_used_size_byte*100) / (log_disk_usage_limit_size+1),
-            "warn_size(MB)", (log_disk_usage_limit_size*log_disk_warn_percent)/100/MB,
-            "warn_percent(%)", log_disk_warn_percent,
-            "limit_size(MB)", (log_disk_usage_limit_size*log_disk_limit_percent)/100/MB,
-            "limit_percent(%)", log_disk_limit_percent,
-            "total_unrecyclable_size_byte(MB)", total_unrecyclable_size_byte/MB,
-            "maximum_used_size(MB)", maximum_used_size/MB,
-            "maximum_log_stream", palf_id,
-            "oldest_log_stream", oldest_palf_id,
-            "oldest_scn", oldest_scn,
-            "in_shrinking", in_shrinking);
+        LOG_DBA_ERROR_V2(OB_LOG_DISK_SPACE_ALMOST_FULL, tmp_ret, "msg", "log disk space is almost full",
+            ", total_size(MB)=", log_disk_usage_limit_size/MB,
+            ", used_size(MB)=", total_used_size_byte/MB,
+            ", used_percent(%)=", (total_used_size_byte*100) / (log_disk_usage_limit_size+1),
+            ", warn_size(MB)=", (log_disk_usage_limit_size*log_disk_warn_percent)/100/MB,
+            ", warn_percent(%)=", log_disk_warn_percent,
+            ", limit_size(MB)=", (log_disk_usage_limit_size*log_disk_limit_percent)/100/MB,
+            ", limit_percent(%)=", log_disk_limit_percent,
+            ", total_unrecyclable_size_byte(MB)=", total_unrecyclable_size_byte/MB,
+            ", maximum_used_size(MB)=", maximum_used_size/MB,
+            ", maximum_log_stream=", palf_id,
+            ", oldest_log_stream=", oldest_palf_id,
+            ", oldest_scn=", oldest_scn,
+            ", in_shrinking=", in_shrinking);
       }
     } else {
        if (REACH_TIME_INTERVAL(2 * 1000 * 1000L)) {
@@ -848,12 +849,13 @@ PalfEnvImpl::RemoveStaleIncompletePalfFunctor::RemoveStaleIncompletePalfFunctor(
 int PalfEnvImpl::RemoveStaleIncompletePalfFunctor::func(const dirent *entry)
 {
   int ret = OB_SUCCESS;
+  char *saveptr = NULL;
   char file_name[OB_MAX_FILE_NAME_LENGTH] = {'\0'};
   const char *d_name = entry->d_name;
   MEMCPY(file_name, d_name, strlen(d_name));
-  char *tmp = strtok(file_name, "_");
+  char *tmp = strtok_r(file_name, "_", &saveptr);
   char *timestamp_str = NULL;
-  if (NULL == tmp || NULL == (timestamp_str = strtok(NULL, "_"))) {
+  if (NULL == tmp || NULL == (timestamp_str = strtok_r(NULL, "_", &saveptr))) {
     ret = OB_ERR_UNEXPECTED;
     PALF_LOG(WARN, "unexpected format", K(ret), K(tmp), K(file_name));
   } else {
@@ -1343,14 +1345,14 @@ void PalfEnvImpl::period_calc_disk_usage()
       constexpr int64_t INTERVAL = 1*1000*1000;
       if (palf_reach_time_interval(INTERVAL, disk_not_enough_print_interval_in_loop_thread_)) {
         int tmp_ret = OB_LOG_OUTOF_DISK_SPACE;
-        LOG_DBA_ERROR(OB_LOG_OUTOF_DISK_SPACE, "msg", "log disk space is almost full", "ret", tmp_ret,
-            "total_size(MB)", log_disk_usage_limit_size/MB,
-            "used_size(MB)", used_size_byte/MB,
-            "used_percent(%)", (used_size_byte*100) / (log_disk_usage_limit_size + 1),
-            "warn_size(MB)", warn_siz/MB,
-            "warn_percent(%)", log_disk_warn_percent,
-            "limit_size(MB)", usable_disk_limit_size_to_stop_writing/MB,
-            "limit_percent(%)", log_disk_limit_percent);
+        LOG_DBA_ERROR_V2(OB_LOG_DISK_SPACE_ALMOST_FULL, tmp_ret, "msg", "log disk space is almost full",
+            ", total_size(MB)=", log_disk_usage_limit_size/MB,
+            ", used_size(MB)=", used_size_byte/MB,
+            ", used_percent(%)=", (used_size_byte*100) / (log_disk_usage_limit_size + 1),
+            ", warn_size(MB)=", warn_siz/MB,
+            ", warn_percent(%)=", log_disk_warn_percent,
+            ", limit_size(MB)=", usable_disk_limit_size_to_stop_writing/MB,
+            ", limit_percent(%)=", log_disk_limit_percent);
         }
       }
   }

@@ -60,7 +60,7 @@ int ObInnerTableSchema::v_ob_locks_schema(ObTableSchema &table_schema)
   table_schema.set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
 
   if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_view_definition(R"__(     SELECT SVR_IP,     SVR_PORT,     TENANT_ID,     TRANS_ID,     TYPE,     ID1,     ID2,     LMODE,     REQUEST,     CTIME,     BLOCK     FROM oceanbase.GV$OB_LOCKS     WHERE SVR_IP = HOST_IP() AND SVR_PORT = RPC_PORT() )__"))) {
+    if (OB_FAIL(table_schema.set_view_definition(R"__(     SELECT SVR_IP,     SVR_PORT,     TENANT_ID,     TRANS_ID,     SESSION_ID,     TYPE,     ID1,     ID2,     ID3,     LMODE,     REQUEST,     CTIME,     BLOCK     FROM oceanbase.GV$OB_LOCKS     WHERE SVR_IP = HOST_IP() AND SVR_PORT = RPC_PORT() )__"))) {
       LOG_ERROR("fail to set view_definition", K(ret));
     }
   }
@@ -260,7 +260,7 @@ int ObInnerTableSchema::dba_ob_balance_jobs_schema(ObTableSchema &table_schema)
   table_schema.set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
 
   if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_view_definition(R"__(   SELECT JOB_ID,          GMT_CREATE AS CREATE_TIME,          GMT_MODIFIED AS MODIFY_TIME,          BALANCE_STRATEGY_NAME AS BALANCE_STRATEGY,          JOB_TYPE,          TARGET_UNIT_NUM,          TARGET_PRIMARY_ZONE_NUM,          STATUS,          COMMENT   FROM OCEANBASE.__ALL_BALANCE_JOB   )__"))) {
+    if (OB_FAIL(table_schema.set_view_definition(R"__(   SELECT JOB_ID,          GMT_CREATE AS CREATE_TIME,          GMT_MODIFIED AS MODIFY_TIME,          BALANCE_STRATEGY_NAME AS BALANCE_STRATEGY,          JOB_TYPE,          TARGET_UNIT_NUM,          TARGET_PRIMARY_ZONE_NUM,          STATUS,          COMMENT,          MAX_END_TIME   FROM OCEANBASE.__ALL_BALANCE_JOB   )__"))) {
       LOG_ERROR("fail to set view_definition", K(ret));
     }
   }
@@ -310,7 +310,7 @@ int ObInnerTableSchema::cdb_ob_balance_jobs_schema(ObTableSchema &table_schema)
   table_schema.set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
 
   if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_view_definition(R"__(   SELECT TENANT_ID,          JOB_ID,          GMT_CREATE AS CREATE_TIME,          GMT_MODIFIED AS MODIFY_TIME,          BALANCE_STRATEGY_NAME AS BALANCE_STRATEGY,          JOB_TYPE,          TARGET_UNIT_NUM,          TARGET_PRIMARY_ZONE_NUM,          STATUS,          COMMENT   FROM OCEANBASE.__ALL_VIRTUAL_BALANCE_JOB   )__"))) {
+    if (OB_FAIL(table_schema.set_view_definition(R"__(   SELECT TENANT_ID,          JOB_ID,          GMT_CREATE AS CREATE_TIME,          GMT_MODIFIED AS MODIFY_TIME,          BALANCE_STRATEGY_NAME AS BALANCE_STRATEGY,          JOB_TYPE,          TARGET_UNIT_NUM,          TARGET_PRIMARY_ZONE_NUM,          STATUS,          COMMENT,          MAX_END_TIME   FROM OCEANBASE.__ALL_VIRTUAL_BALANCE_JOB   )__"))) {
       LOG_ERROR("fail to set view_definition", K(ret));
     }
   }
@@ -360,7 +360,7 @@ int ObInnerTableSchema::dba_ob_balance_job_history_schema(ObTableSchema &table_s
   table_schema.set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
 
   if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_view_definition(R"__(   SELECT JOB_ID,          CREATE_TIME,          FINISH_TIME,          BALANCE_STRATEGY_NAME AS BALANCE_STRATEGY,          JOB_TYPE,          TARGET_UNIT_NUM,          TARGET_PRIMARY_ZONE_NUM,          STATUS,          COMMENT   FROM OCEANBASE.__ALL_BALANCE_JOB_HISTORY   )__"))) {
+    if (OB_FAIL(table_schema.set_view_definition(R"__(   SELECT JOB_ID,          CREATE_TIME,          FINISH_TIME,          BALANCE_STRATEGY_NAME AS BALANCE_STRATEGY,          JOB_TYPE,          TARGET_UNIT_NUM,          TARGET_PRIMARY_ZONE_NUM,          STATUS,          COMMENT,          MAX_END_TIME   FROM OCEANBASE.__ALL_BALANCE_JOB_HISTORY   )__"))) {
       LOG_ERROR("fail to set view_definition", K(ret));
     }
   }
@@ -410,7 +410,7 @@ int ObInnerTableSchema::cdb_ob_balance_job_history_schema(ObTableSchema &table_s
   table_schema.set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
 
   if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_view_definition(R"__(   SELECT TENANT_ID,          JOB_ID,          CREATE_TIME,          FINISH_TIME,          BALANCE_STRATEGY_NAME AS BALANCE_STRATEGY,          JOB_TYPE,          TARGET_UNIT_NUM,          TARGET_PRIMARY_ZONE_NUM,          STATUS,          COMMENT   FROM OCEANBASE.__ALL_VIRTUAL_BALANCE_JOB_HISTORY   )__"))) {
+    if (OB_FAIL(table_schema.set_view_definition(R"__(   SELECT TENANT_ID,          JOB_ID,          CREATE_TIME,          FINISH_TIME,          BALANCE_STRATEGY_NAME AS BALANCE_STRATEGY,          JOB_TYPE,          TARGET_UNIT_NUM,          TARGET_PRIMARY_ZONE_NUM,          STATUS,          COMMENT,          MAX_END_TIME   FROM OCEANBASE.__ALL_VIRTUAL_BALANCE_JOB_HISTORY   )__"))) {
       LOG_ERROR("fail to set view_definition", K(ret));
     }
   }
@@ -460,7 +460,7 @@ int ObInnerTableSchema::dba_ob_balance_tasks_schema(ObTableSchema &table_schema)
   table_schema.set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
 
   if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_view_definition(R"__(   SELECT TASK_ID,          GMT_CREATE AS CREATE_TIME,          GMT_MODIFIED AS MODIFY_TIME,          TASK_TYPE,          SRC_LS,          DEST_LS,          PART_LIST,          FINISHED_PART_LIST,          PART_COUNT,          FINISHED_PART_COUNT,          LS_GROUP_ID,          STATUS,          PARENT_LIST,          CHILD_LIST,          CURRENT_TRANSFER_TASK_ID,          JOB_ID,          COMMENT   FROM OCEANBASE.__ALL_BALANCE_TASK   )__"))) {
+    if (OB_FAIL(table_schema.set_view_definition(R"__(   SELECT TASK_ID,          GMT_CREATE AS CREATE_TIME,          GMT_MODIFIED AS MODIFY_TIME,          TASK_TYPE,          SRC_LS,          DEST_LS,          PART_LIST,          FINISHED_PART_LIST,          PART_COUNT,          FINISHED_PART_COUNT,          LS_GROUP_ID,          STATUS,          PARENT_LIST,          CHILD_LIST,          CURRENT_TRANSFER_TASK_ID,          JOB_ID,          COMMENT,          BALANCE_STRATEGY   FROM OCEANBASE.__ALL_BALANCE_TASK   )__"))) {
       LOG_ERROR("fail to set view_definition", K(ret));
     }
   }
@@ -510,7 +510,7 @@ int ObInnerTableSchema::cdb_ob_balance_tasks_schema(ObTableSchema &table_schema)
   table_schema.set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
 
   if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_view_definition(R"__(   SELECT TENANT_ID,          TASK_ID,          GMT_CREATE AS CREATE_TIME,          GMT_MODIFIED AS MODIFY_TIME,          TASK_TYPE,          SRC_LS,          DEST_LS,          PART_LIST,          FINISHED_PART_LIST,          PART_COUNT,          FINISHED_PART_COUNT,          LS_GROUP_ID,          STATUS,          PARENT_LIST,          CHILD_LIST,          CURRENT_TRANSFER_TASK_ID,          JOB_ID,          COMMENT   FROM OCEANBASE.__ALL_VIRTUAL_BALANCE_TASK   )__"))) {
+    if (OB_FAIL(table_schema.set_view_definition(R"__(   SELECT TENANT_ID,          TASK_ID,          GMT_CREATE AS CREATE_TIME,          GMT_MODIFIED AS MODIFY_TIME,          TASK_TYPE,          SRC_LS,          DEST_LS,          PART_LIST,          FINISHED_PART_LIST,          PART_COUNT,          FINISHED_PART_COUNT,          LS_GROUP_ID,          STATUS,          PARENT_LIST,          CHILD_LIST,          CURRENT_TRANSFER_TASK_ID,          JOB_ID,          COMMENT,          BALANCE_STRATEGY   FROM OCEANBASE.__ALL_VIRTUAL_BALANCE_TASK   )__"))) {
       LOG_ERROR("fail to set view_definition", K(ret));
     }
   }
@@ -560,7 +560,7 @@ int ObInnerTableSchema::dba_ob_balance_task_history_schema(ObTableSchema &table_
   table_schema.set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
 
   if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_view_definition(R"__(   SELECT TASK_ID,          CREATE_TIME,          FINISH_TIME,          TASK_TYPE,          SRC_LS,          DEST_LS,          PART_LIST,          FINISHED_PART_LIST,          PART_COUNT,          FINISHED_PART_COUNT,          LS_GROUP_ID,          STATUS,          PARENT_LIST,          CHILD_LIST,          CURRENT_TRANSFER_TASK_ID,          JOB_ID,          COMMENT   FROM OCEANBASE.__ALL_BALANCE_TASK_HISTORY   )__"))) {
+    if (OB_FAIL(table_schema.set_view_definition(R"__(   SELECT TASK_ID,          CREATE_TIME,          FINISH_TIME,          TASK_TYPE,          SRC_LS,          DEST_LS,          PART_LIST,          FINISHED_PART_LIST,          PART_COUNT,          FINISHED_PART_COUNT,          LS_GROUP_ID,          STATUS,          PARENT_LIST,          CHILD_LIST,          CURRENT_TRANSFER_TASK_ID,          JOB_ID,          COMMENT,          BALANCE_STRATEGY   FROM OCEANBASE.__ALL_BALANCE_TASK_HISTORY   )__"))) {
       LOG_ERROR("fail to set view_definition", K(ret));
     }
   }
@@ -610,7 +610,7 @@ int ObInnerTableSchema::cdb_ob_balance_task_history_schema(ObTableSchema &table_
   table_schema.set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
 
   if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_view_definition(R"__(   SELECT TENANT_ID,          TASK_ID,          CREATE_TIME,          FINISH_TIME,          TASK_TYPE,          SRC_LS,          DEST_LS,          PART_LIST,          FINISHED_PART_LIST,          PART_COUNT,          FINISHED_PART_COUNT,          LS_GROUP_ID,          STATUS,          PARENT_LIST,          CHILD_LIST,          CURRENT_TRANSFER_TASK_ID,          JOB_ID,          COMMENT   FROM OCEANBASE.__ALL_VIRTUAL_BALANCE_TASK_HISTORY   )__"))) {
+    if (OB_FAIL(table_schema.set_view_definition(R"__(   SELECT TENANT_ID,          TASK_ID,          CREATE_TIME,          FINISH_TIME,          TASK_TYPE,          SRC_LS,          DEST_LS,          PART_LIST,          FINISHED_PART_LIST,          PART_COUNT,          FINISHED_PART_COUNT,          LS_GROUP_ID,          STATUS,          PARENT_LIST,          CHILD_LIST,          CURRENT_TRANSFER_TASK_ID,          JOB_ID,          COMMENT,          BALANCE_STRATEGY   FROM OCEANBASE.__ALL_VIRTUAL_BALANCE_TASK_HISTORY   )__"))) {
       LOG_ERROR("fail to set view_definition", K(ret));
     }
   }
@@ -860,7 +860,7 @@ int ObInnerTableSchema::dba_ob_external_table_files_schema(ObTableSchema &table_
   table_schema.set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
 
   if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_view_definition(R"__(     SELECT       B.TABLE_NAME AS TABLE_NAME,       C.DATABASE_NAME AS TABLE_SCHEMA,       'P0' AS PARTITION_NAME,       A.FILE_URL AS FILE_URL,       A.FILE_SIZE AS FILE_SIZE     FROM        OCEANBASE.__ALL_EXTERNAL_TABLE_FILE A        INNER JOIN OCEANBASE.__ALL_TABLE B ON A.TABLE_ID = B.TABLE_ID AND B.TENANT_ID = 0        INNER JOIN OCEANBASE.__ALL_DATABASE C ON B.DATABASE_ID = C.DATABASE_ID AND C.TENANT_ID = 0     WHERE B.TABLE_TYPE = 14 AND (A.DELETE_VERSION = 9223372036854775807 OR A.DELETE_VERSION < A.CREATE_VERSION)     AND B.TABLE_MODE >> 12 & 15 in (0,1) )__"))) {
+    if (OB_FAIL(table_schema.set_view_definition(R"__(     SELECT       B.TABLE_NAME AS TABLE_NAME,       C.DATABASE_NAME AS TABLE_SCHEMA,       P.PART_NAME AS PARTITION_NAME,       A.FILE_URL AS FILE_URL,       A.FILE_SIZE AS FILE_SIZE     FROM        OCEANBASE.__ALL_EXTERNAL_TABLE_FILE A        INNER JOIN OCEANBASE.__ALL_TABLE B ON A.TABLE_ID = B.TABLE_ID AND B.TENANT_ID = 0        INNER JOIN OCEANBASE.__ALL_DATABASE C ON B.DATABASE_ID = C.DATABASE_ID AND C.TENANT_ID = 0        LEFT JOIN OCEANBASE.__ALL_PART P ON A.PART_ID = P.PART_ID AND P.TENANT_ID = 0     WHERE B.TABLE_TYPE = 14 AND (A.DELETE_VERSION = 9223372036854775807 OR A.DELETE_VERSION < A.CREATE_VERSION)     AND B.TABLE_MODE >> 12 & 15 in (0,1) )__"))) {
       LOG_ERROR("fail to set view_definition", K(ret));
     }
   }
@@ -910,7 +910,7 @@ int ObInnerTableSchema::all_ob_external_table_files_schema(ObTableSchema &table_
   table_schema.set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
 
   if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_view_definition(R"__(     SELECT       B.TABLE_NAME AS TABLE_NAME,       C.DATABASE_NAME AS TABLE_SCHEMA,       'P0' AS PARTITION_NAME,       A.FILE_URL AS FILE_URL,       A.FILE_SIZE AS FILE_SIZE     FROM        OCEANBASE.__ALL_EXTERNAL_TABLE_FILE A        INNER JOIN OCEANBASE.__ALL_TABLE B ON A.TABLE_ID = B.TABLE_ID AND B.TENANT_ID = 0        INNER JOIN OCEANBASE.__ALL_DATABASE C ON B.DATABASE_ID = C.DATABASE_ID AND C.TENANT_ID = 0     WHERE  B.TABLE_TYPE = 14           AND B.TABLE_MODE >> 12 & 15 in (0,1)           AND 0 = sys_privilege_check('table_acc', EFFECTIVE_TENANT_ID(), C.DATABASE_NAME, B.TABLE_NAME)           AND (A.DELETE_VERSION = 9223372036854775807 OR A.DELETE_VERSION < A.CREATE_VERSION) )__"))) {
+    if (OB_FAIL(table_schema.set_view_definition(R"__(     SELECT       B.TABLE_NAME AS TABLE_NAME,       C.DATABASE_NAME AS TABLE_SCHEMA,       P.PART_NAME AS PARTITION_NAME,       A.FILE_URL AS FILE_URL,       A.FILE_SIZE AS FILE_SIZE     FROM        OCEANBASE.__ALL_EXTERNAL_TABLE_FILE A        INNER JOIN OCEANBASE.__ALL_TABLE B ON A.TABLE_ID = B.TABLE_ID AND B.TENANT_ID = 0        INNER JOIN OCEANBASE.__ALL_DATABASE C ON B.DATABASE_ID = C.DATABASE_ID AND C.TENANT_ID = 0        LEFT JOIN OCEANBASE.__ALL_PART P ON A.PART_ID = P.PART_ID AND P.TENANT_ID = 0     WHERE  B.TABLE_TYPE = 14           AND B.TABLE_MODE >> 12 & 15 in (0,1)           AND 0 = sys_privilege_check('table_acc', EFFECTIVE_TENANT_ID(), C.DATABASE_NAME, B.TABLE_NAME)           AND (A.DELETE_VERSION = 9223372036854775807 OR A.DELETE_VERSION < A.CREATE_VERSION) )__"))) {
       LOG_ERROR("fail to set view_definition", K(ret));
     }
   }
@@ -1260,7 +1260,7 @@ int ObInnerTableSchema::cdb_ob_external_table_files_schema(ObTableSchema &table_
   table_schema.set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
 
   if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_view_definition(R"__(     SELECT       A.TENANT_ID AS TENANT_ID,       B.TABLE_NAME AS TABLE_NAME,       C.DATABASE_NAME AS TABLE_SCHEMA,       'P0' AS PARTITION_NAME,       A.FILE_URL AS FILE_URL,       A.FILE_SIZE AS FILE_SIZE     FROM        OCEANBASE.__ALL_VIRTUAL_EXTERNAL_TABLE_FILE A        INNER JOIN OCEANBASE.__ALL_VIRTUAL_TABLE B ON A.TABLE_ID = B.TABLE_ID AND A.TENANT_ID=B.TENANT_ID AND B.TABLE_MODE >> 12 & 15 in (0,1)        INNER JOIN OCEANBASE.__ALL_VIRTUAL_DATABASE C ON B.DATABASE_ID = C.DATABASE_ID AND B.TENANT_ID=C.TENANT_ID     WHERE B.TABLE_TYPE = 14 AND (A.DELETE_VERSION = 9223372036854775807 OR A.DELETE_VERSION < A.CREATE_VERSION) )__"))) {
+    if (OB_FAIL(table_schema.set_view_definition(R"__(     SELECT       A.TENANT_ID AS TENANT_ID,       B.TABLE_NAME AS TABLE_NAME,       C.DATABASE_NAME AS TABLE_SCHEMA,       P.PART_NAME AS PARTITION_NAME,       A.FILE_URL AS FILE_URL,       A.FILE_SIZE AS FILE_SIZE     FROM        OCEANBASE.__ALL_VIRTUAL_EXTERNAL_TABLE_FILE A        INNER JOIN OCEANBASE.__ALL_VIRTUAL_TABLE B ON A.TABLE_ID = B.TABLE_ID AND A.TENANT_ID=B.TENANT_ID AND B.TABLE_MODE >> 12 & 15 in (0,1)        INNER JOIN OCEANBASE.__ALL_VIRTUAL_DATABASE C ON B.DATABASE_ID = C.DATABASE_ID AND B.TENANT_ID=C.TENANT_ID        LEFT JOIN OCEANBASE.__ALL_VIRTUAL_PART P ON A.PART_ID = P.PART_ID AND C.TENANT_ID = P.TENANT_ID     WHERE B.TABLE_TYPE = 14 AND (A.DELETE_VERSION = 9223372036854775807 OR A.DELETE_VERSION < A.CREATE_VERSION) )__"))) {
       LOG_ERROR("fail to set view_definition", K(ret));
     }
   }

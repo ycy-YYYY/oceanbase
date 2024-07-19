@@ -697,42 +697,6 @@ bool is_transfer_ctx(PartCtxSource ctx_source)
   return PartCtxSource::TRANSFER == ctx_source || PartCtxSource::TRANSFER_RECOVER == ctx_source;
 }
 
-const char *to_str(PartCtxSource src)
-{
-  const char *str = "INVALID";
-  switch (src) {
-  case PartCtxSource::UNKOWN: {
-    str = "UNKOWN";
-    break;
-  }
-  case PartCtxSource::MVCC_WRITE: {
-    str = "MVCC_WRITE";
-    break;
-  }
-  case PartCtxSource::REGISTER_MDS: {
-    str = "REGISTER_MDS";
-    break;
-  }
-  case PartCtxSource::REPLAY: {
-    str = "REPLAY";
-    break;
-  }
-  case PartCtxSource::RECOVER: {
-    str = "RECOVER";
-    break;
-  }
-  case PartCtxSource::TRANSFER: {
-    str = "TRANSFER";
-    break;
-  }
-  case PartCtxSource::TRANSFER_RECOVER: {
-    str = "TRANSFER_RECOVER";
-    break;
-  }
-  }
-  return str;
-}
-
 void ObTxExecInfo::reset()
 {
   state_ = ObTxState::INIT;
@@ -975,6 +939,19 @@ OB_SERIALIZE_MEMBER(ObTxExecInfo,
                     dli_batch_set_  // FARM COMPAT WHITELIST
                     );
 
+void ObMulSourceDataNotifyArg::reset()
+{
+  tx_id_.reset();
+  scn_.reset();
+  trans_version_.reset();
+  for_replay_ = false;
+  notify_type_ = NotifyType::ON_ABORT;
+  redo_submitted_ = false;
+  redo_synced_ = false;
+  is_force_kill_ = false;
+  is_incomplete_replay_ = false;
+}
+
 bool ObMulSourceDataNotifyArg::is_redo_submitted() const { return redo_submitted_; }
 
 bool ObMulSourceDataNotifyArg::is_redo_confirmed() const
@@ -1024,6 +1001,9 @@ int RollbackMaskSet::merge_part(const share::ObLSID add_ls_id, const int64_t exe
     for (int64_t i = 0; i < rollback_parts_->count(); i++) {
       if (rollback_parts_->at(i).ls_id_ == add_ls_id) {
         is_exist = true;
+        if (OB_FAIL(mask_set_.unmask(rollback_parts_->at(i)))) {
+          TRANS_LOG(WARN, "unmask fail", KR(ret), K(add_ls_id));
+        }
         break;
       }
     }

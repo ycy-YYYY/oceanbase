@@ -16,6 +16,7 @@
 
 using namespace oceanbase::share;
 using namespace oceanbase::common;
+using namespace oceanbase::lib;
 
 namespace oceanbase
 {
@@ -326,6 +327,10 @@ void ObTableApiSessPool::destroy()
   loop all session node to retire.
   - nodes which have not been visited for more than 5 minutes will be retired.
   - move retired node to retired list.
+  - why do I need to check whether the node is empty ？
+    -- after a node is created, the session may be initialized in init_sess_info() for
+    -- more than SESS_RETIRE_TIME (unit migration scenario).
+    -- If the node is deleted during this time, it will be used after free.
 */
 int ObTableApiSessPool::retire_session_node()
 {
@@ -340,7 +345,7 @@ int ObTableApiSessPool::retire_session_node()
     const int64_t N = arr.count();
     for (int64_t i = 0; OB_SUCC(ret) && i < N; ++i) {
       const ObTableApiSessForeachOp::ObTableApiSessKV &kv = arr.at(i);
-      if (cur_time - kv.node_->get_last_active_ts() >= SESS_RETIRE_TIME) {
+      if (cur_time - kv.node_->get_last_active_ts() >= SESS_RETIRE_TIME && !kv.node_->is_empty()) {
         ObTableApiSessNode *del_node = nullptr;
         if (OB_FAIL(key_node_map_.erase_refactored(kv.key_, &del_node))) {
           if (OB_HASH_NOT_EXIST != ret) {
@@ -512,8 +517,11 @@ int ObTableApiSessPool::create_node_safe(ObTableApiCredential &credential, ObTab
     LOG_WARN("fail to alloc mem for ObTableApiSessNode", K(ret), K(sizeof(ObTableApiSessNode)));
   } else {
     tmp_node = new (buf) ObTableApiSessNode(credential);
-    tmp_node->last_active_ts_ = ObTimeUtility::current_time();
-    node = tmp_node;
+    if (OB_FAIL(tmp_node->init())) {
+      LOG_WARN("fail to init session node", K(ret));
+    } else {
+      node = tmp_node;
+    }
   }
 
   return ret;
@@ -643,6 +651,30 @@ void ObTableApiSessNodeVal::give_back_to_free_list()
   }
 }
 
+int ObTableApiSessNode::init()
+{
+  int ret = OB_SUCCESS;
+
+  if (!is_inited_) {
+    MemoryContext tmp_mem_ctx = nullptr;
+    ContextParam param;
+    param.set_mem_attr(MTL_ID(), "TbSessNod", ObCtxIds::DEFAULT_CTX_ID)
+        .set_properties(lib::ALLOC_THREAD_SAFE);
+    if (OB_FAIL(ROOT_CONTEXT->CREATE_CONTEXT(tmp_mem_ctx, param))) {
+      LOG_WARN("fail to create mem context", K(ret));
+    } else if (OB_ISNULL(tmp_mem_ctx)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected null mem context ", K(ret));
+    } else {
+      mem_ctx_ = tmp_mem_ctx;
+      last_active_ts_ = ObTimeUtility::fast_current_time();
+      is_inited_ = true;
+    }
+  }
+
+  return ret;
+}
+
 void ObTableApiSessNode::destroy()
 {
   int ret = OB_SUCCESS;
@@ -653,34 +685,45 @@ void ObTableApiSessNode::destroy()
     ObTableApiSessNodeVal *rm_sess = free_list.remove(sess);
     if (OB_NOT_NULL(rm_sess)) {
       rm_sess->destroy();
+      if (OB_NOT_NULL(mem_ctx_)) {
+        mem_ctx_->free(rm_sess);
+      }
     }
   }
   DLIST_FOREACH_REMOVESAFE(sess, used_list) {
     ObTableApiSessNodeVal *rm_sess = used_list.remove(sess);
     if (OB_NOT_NULL(rm_sess)) {
       rm_sess->destroy();
+      if (OB_NOT_NULL(mem_ctx_)) {
+        mem_ctx_->free(rm_sess);
+      }
     }
   }
-  ObLockGuard<ObSpinLock> alloc_guard(allocator_lock_); // lock allocator_
-  allocator_.reset();
+  if (OB_NOT_NULL(mem_ctx_)) {
+    DESTROY_CONTEXT(mem_ctx_);
+  }
 }
 
 int ObTableApiSessNode::remove_unused_sess()
 {
   int ret = OB_SUCCESS;
 
-  ObDList<ObTableApiSessNodeVal> &free_list = sess_lists_.free_list_;
-  if (free_list.is_empty()) {
-    // do nothing
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("session node is not inited", K(ret));
   } else {
-    ObLockGuard<ObSpinLock> guard(sess_lists_.lock_);
-    DLIST_FOREACH_REMOVESAFE(sess, free_list) {
-      ObTableApiSessNodeVal *rm_sess = free_list.remove(sess);
-      if (OB_NOT_NULL(rm_sess)) {
-        rm_sess->~ObTableApiSessNodeVal();
-        ObLockGuard<ObSpinLock> alloc_guard(allocator_lock_); // lock allocator_
-        allocator_.free(rm_sess);
-        rm_sess = nullptr;
+    ObDList<ObTableApiSessNodeVal> &free_list = sess_lists_.free_list_;
+    if (free_list.is_empty()) {
+      // do nothing
+    } else {
+      ObLockGuard<ObSpinLock> guard(sess_lists_.lock_);
+      DLIST_FOREACH_REMOVESAFE(sess, free_list) {
+        ObTableApiSessNodeVal *rm_sess = free_list.remove(sess);
+        if (OB_NOT_NULL(rm_sess) && OB_NOT_NULL(mem_ctx_)) {
+          rm_sess->~ObTableApiSessNodeVal();
+          mem_ctx_->free(rm_sess);
+          rm_sess = nullptr;
+        }
       }
     }
   }
@@ -696,19 +739,25 @@ int ObTableApiSessNode::remove_unused_sess()
 int ObTableApiSessNode::get_sess_node_val(ObTableApiSessNodeVal *&val)
 {
   int ret = OB_SUCCESS;
-  ObTableApiSessNodeVal *tmp_val = nullptr;
-  ObDList<ObTableApiSessNodeVal> &free_list = sess_lists_.free_list_;
-  ObDList<ObTableApiSessNodeVal> &used_list = sess_lists_.used_list_;
 
-  ObLockGuard<ObSpinLock> guard(sess_lists_.lock_);
-  if (!free_list.is_empty()) {
-    tmp_val = free_list.remove_first();
-    // move to used list
-    if (false == (used_list.add_last(tmp_val))) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("fail to add sess val to used list", K(ret), K(*tmp_val));
-    } else {
-      val = tmp_val;
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("session node is not inited", K(ret));
+  } else {
+    ObTableApiSessNodeVal *tmp_val = nullptr;
+    ObDList<ObTableApiSessNodeVal> &free_list = sess_lists_.free_list_;
+    ObDList<ObTableApiSessNodeVal> &used_list = sess_lists_.used_list_;
+
+    ObLockGuard<ObSpinLock> guard(sess_lists_.lock_);
+    if (!free_list.is_empty()) {
+      tmp_val = free_list.remove_first();
+      // move to used list
+      if (false == (used_list.add_last(tmp_val))) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("fail to add sess val to used list", K(ret), K(*tmp_val));
+      } else {
+        val = tmp_val;
+      }
     }
   }
 
@@ -724,30 +773,41 @@ int ObTableApiSessNode::get_sess_node_val(ObTableApiSessNodeVal *&val)
 int ObTableApiSessNode::extend_and_get_sess_val(ObTableApiSessGuard &guard)
 {
   int ret = OB_SUCCESS;
-  ObLockGuard<ObSpinLock> alloc_guard(allocator_lock_); // lock allocator_
-  void *buf = nullptr;
 
-  if (OB_ISNULL(buf = allocator_.alloc(sizeof(ObTableApiSessNodeVal)))) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-    LOG_WARN("fail to alloc mem for ObTableApiSessNodeVal", K(ret), K(sizeof(ObTableApiSessNodeVal)));
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("session node is not inited", K(ret));
+  } else if (OB_ISNULL(mem_ctx_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("memory context is null", K(ret));
   } else {
-    ObTableApiSessNodeVal *val = new (buf) ObTableApiSessNodeVal(this, credential_.tenant_id_);
-    if (OB_FAIL(val->init_sess_info())) {
-      LOG_WARN("fail to init sess info", K(ret), K(*val));
+    ObTableApiSessNodeVal *val = nullptr;
+    void *buf = nullptr;
+    ObMemAttr attr(MTL_ID(), "TbSessNodVal", ObCtxIds::DEFAULT_CTX_ID);
+    if (OB_ISNULL(buf = mem_ctx_->allocf(sizeof(ObTableApiSessNodeVal), attr))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("fail to alloc mem for ObTableApiSessNodeVal", K(ret), K(sizeof(ObTableApiSessNodeVal)));
     } else {
-      ObLockGuard<ObSpinLock> lock_guard(sess_lists_.lock_);
-      if (false == (sess_lists_.used_list_.add_last(val))) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("fail to add sess val to list", K(ret), K(*val));
+      val = new (buf) ObTableApiSessNodeVal(this, credential_.tenant_id_);
+      if (OB_FAIL(val->init_sess_info())) {
+        LOG_WARN("fail to init sess info", K(ret), K(*val));
       } else {
-        guard.sess_node_val_ = val;
+        ObLockGuard<ObSpinLock> lock_guard(sess_lists_.lock_);
+        if (false == (sess_lists_.used_list_.add_last(val))) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("fail to add sess val to list", K(ret), K(*val));
+        } else {
+          guard.sess_node_val_ = val;
+        }
       }
     }
-  }
 
-  if (OB_FAIL(ret) && OB_NOT_NULL(buf)) {
-    allocator_.free(buf);
-    buf = nullptr;
+    if (OB_FAIL(ret) && OB_NOT_NULL(val)) {
+      val->~ObTableApiSessNodeVal();
+      mem_ctx_->free(val);
+      val = nullptr;
+      buf = nullptr;
+    }
   }
 
   return ret;

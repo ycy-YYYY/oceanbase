@@ -291,8 +291,22 @@ int ObCreateViewResolver::resolve(const ParseNode &parse_tree)
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("get unexpected null", K(ret), K(view_table_resolver.get_select_stmt()));
       } else if (OB_ISNULL(select_stmt->get_real_stmt())) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("failed to get real stmt", K(ret), K(*select_stmt));
+        if (!resolve_succ) {
+          //if the first child stmt of set query resolve failed, real stmt is null
+          ObArray<SelectItem> select_items;
+          if (!column_list.empty() && OB_FAIL(add_undefined_column_infos(
+                                                          session_info_->get_effective_tenant_id(),
+                                                          select_items,
+                                                          table_schema,
+                                                          column_list))) {
+            if (OB_FAIL(try_add_error_info(ret, create_arg.error_info_))) {
+              LOG_WARN("failed to add error info to for force view", K(ret));
+            }
+          }
+        } else {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("failed to get real stmt", K(ret), KPC(select_stmt));
+        }
       } else if (OB_FAIL(check_view_columns(*select_stmt,
                                             view_columns_node,
                                             create_arg.error_info_,
@@ -307,7 +321,8 @@ int ObCreateViewResolver::resolve(const ParseNode &parse_tree)
                                              *allocator_,
                                              *session_info_,
                                              column_list,
-                                             comment_list))) {
+                                             comment_list,
+                                             params_.is_from_create_mview_))) {
         LOG_WARN("failed to add column infos", K(ret));
       } else if ((!resolve_succ || add_undefined_columns)
                   && is_force_view && lib::is_oracle_mode()
@@ -318,6 +333,8 @@ int ObCreateViewResolver::resolve(const ParseNode &parse_tree)
                                                             table_schema,
                                                             column_list))) {
         LOG_WARN("failed to add undefined column infos", K(ret));
+      }
+      if (OB_FAIL(ret)) {
       } else if (OB_FAIL(collect_dependency_infos(params_.query_ctx_, create_arg))) {
         LOG_WARN("failed to collect dependency infos", K(ret));
       } else if (is_force_view && (!resolve_succ || add_undefined_columns)
@@ -369,7 +386,7 @@ int ObCreateViewResolver::resolve(const ParseNode &parse_tree)
           // In mysql mode, only support create view as ... with check option in syntax.
           // In oracle mode, support create view v as (select * from (select * from t with check option))
           // so we have to check in oracle mode even if check_option of view_schema is NONE.
-          if ((with_check_option || lib::is_oracle_mode())
+          if ((with_check_option || lib::is_oracle_mode()) && !(select_stmt == NULL && !resolve_succ)
               && OB_FAIL(ObResolverUtils::view_with_check_option_allowed(select_stmt,
                                                                           with_check_option))) {
             LOG_WARN("view with check option not allowed", K(ret));
@@ -441,6 +458,7 @@ int ObCreateViewResolver::resolve(const ParseNode &parse_tree)
 
     // 权限添加需要拿到完整stmt信息，慎重调整本段代码位置
     if (OB_SUCC(ret) && !(is_sync_ddl_user && session_info_->is_inner())
+        && !(select_stmt == NULL && !resolve_succ)
         && OB_FAIL(check_privilege_needed(*stmt, *select_stmt, is_force_view))) {
       LOG_WARN("fail to check privilege needed", K(ret));
     }
@@ -744,7 +762,7 @@ int ObCreateViewResolver::get_sel_priv_tables_in_subquery(const ObSelectStmt *se
           if (OB_ISNULL(child_stmts.at(i))) {
             ret = OB_ERR_UNEXPECTED;
             LOG_WARN("child stmt is NULL", K(ret));
-          } else if (SMART_CALL(get_sel_priv_tables_in_subquery(child_stmts.at(i), select_tables))) {
+          } else if (OB_FAIL(SMART_CALL(get_sel_priv_tables_in_subquery(child_stmts.at(i), select_tables)))) {
             LOG_WARN("failed to get need privs in child stmt", K(ret));
           }
         }
@@ -810,7 +828,7 @@ int ObCreateViewResolver::get_need_priv_tables(ObSelectStmt &root_stmt,
         if (OB_ISNULL(child_stmts.at(i))) {
           ret = OB_ERR_UNEXPECTED;
           LOG_WARN("child stmt is NULL", K(ret));
-        } else if (SMART_CALL(get_sel_priv_tables_in_subquery(child_stmts.at(i), select_tables))) {
+        } else if (OB_FAIL(SMART_CALL(get_sel_priv_tables_in_subquery(child_stmts.at(i), select_tables)))) {
           LOG_WARN("failed to get need privs in child stmt", K(ret));
         }
       }
@@ -1521,7 +1539,12 @@ int ObCreateViewResolver::try_add_undefined_column_infos(const uint64_t tenant_i
   int ret = OB_SUCCESS;
   bool add_undefined_columns = false;
   ObArray<SelectItem> select_items;
-  if (has_resolved_field_list) {
+  if (OB_ISNULL(select_stmt_node)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("parse node is null", K(ret));
+  } else if (select_stmt_node->children_[PARSE_SELECT_SET] != NULL && column_list.empty()) {
+    // do nothing
+  } else if (has_resolved_field_list) {
     if (OB_FAIL(add_undefined_column_infos(tenant_id,
                                            select_stmt.get_select_items(),
                                            table_schema,
@@ -1630,7 +1653,8 @@ int ObCreateViewResolver::add_column_infos(const uint64_t tenant_id,
                                            ObIAllocator &alloc,
                                            ObSQLSessionInfo &session_info,
                                            const ObIArray<ObString> &column_list,
-                                           const ObIArray<ObString> &comment_list)
+                                           const ObIArray<ObString> &comment_list,
+                                           bool is_from_create_mview /* =false */)
 {
   int ret = OB_SUCCESS;
   ObIArray<SelectItem> &select_items = select_stmt.get_select_items();
@@ -1672,7 +1696,8 @@ int ObCreateViewResolver::add_column_infos(const uint64_t tenant_id,
       } else if (OB_FAIL(fill_column_meta_infos(*expr,
                                                 table_schema.get_charset_type(),
                                                 table_schema.get_table_id(),
-                                                column))) {
+                                                column,
+                                                is_from_create_mview))) {
         LOG_WARN("failed to fill column meta infos", K(ret), K(column));
       } else if (lib::is_mysql_mode() &&
                  OB_FAIL(resolve_column_default_value(&select_stmt, select_item, column, alloc, session_info))) {
@@ -1691,7 +1716,8 @@ int ObCreateViewResolver::add_column_infos(const uint64_t tenant_id,
 int ObCreateViewResolver::fill_column_meta_infos(const ObRawExpr &expr,
                                                  const ObCharsetType charset_type,
                                                  const uint64_t table_id,
-                                                 ObColumnSchemaV2 &column)
+                                                 ObColumnSchemaV2 &column,
+                                                 bool is_from_create_mview /* =false */)
 {
   int ret = OB_SUCCESS;
   ObObjMeta column_meta = expr.get_result_type().get_obj_meta();
@@ -1706,7 +1732,13 @@ int ObCreateViewResolver::fill_column_meta_infos(const ObRawExpr &expr,
   column.set_collation_type(expr.get_collation_type());
   column.set_accuracy(expr.get_accuracy());
   column.set_zero_fill(expr.get_result_type().has_result_flag(ZEROFILL_FLAG));
-  column.set_nullable(expr.get_result_type().is_not_null_for_read() ? false : true);
+  if (is_from_create_mview) {
+    // bug fix for
+    // mview should not set not null
+    column.set_nullable(true);
+  } else {
+    column.set_nullable(expr.get_result_type().is_not_null_for_read() ? false : true);
+  }
   if (OB_FAIL(ret)) {
   } else if (column.is_enum_or_set() && OB_FAIL(column.set_extended_type_info(expr.get_enum_set_values()))) {
     LOG_WARN("set enum or set info failed", K(ret), K(expr));

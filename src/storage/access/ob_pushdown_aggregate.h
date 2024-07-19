@@ -256,7 +256,7 @@ public:
       const ObTableAccessContext &context,
       const int32_t col_offset,
       blocksstable::ObIMicroBlockReader *reader,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_count);
   virtual int eval_index_info(const blocksstable::ObMicroIndexInfo &index_info, const bool is_cg = false);
   // For group by pushdown
@@ -277,6 +277,7 @@ public:
   virtual bool finished() const { return false; }
   virtual int reserve_group_by_buf(const int64_t size);
   virtual int output_extra_group_by_result(const int64_t start, const int64_t count);
+  virtual int pad_column_in_group_by(const int64_t row_cap, common::ObIAllocator &allocator);
   virtual int reserve_bitmap(const int64_t count);
   OB_INLINE ObPDAggType get_type() const { return agg_type_; }
   OB_INLINE bool is_min_agg() const { return agg_type_ == PD_MIN; }
@@ -297,7 +298,7 @@ public:
 protected:
   static const int64_t DEFAULT_DATUM_OFFSET = -1;
   int fill_default_if_need(blocksstable::ObStorageDatum &datum);
-  int pad_column_if_need(blocksstable::ObStorageDatum &datum);
+  int pad_column_if_need(blocksstable::ObStorageDatum &datum, common::ObIAllocator &padding_allocator, bool alloc_need_reuse = true);
   int deep_copy_datum(const blocksstable::ObStorageDatum &src, common::ObIAllocator &tmp_alloc);
   int read_agg_datum(const blocksstable::ObMicroIndexInfo &index_info, const bool is_cg);
   void clear_group_by_info();
@@ -325,6 +326,7 @@ protected:
   ObBitmap *bitmap_;
   int64_t group_by_result_cnt_;
   bool is_assigned_to_group_by_processor_;
+  common::ObArenaAllocator padding_allocator_;
 private:
   virtual bool can_use_index_info() const { return true; }
   DISALLOW_COPY_AND_ASSIGN(ObAggCell);
@@ -348,7 +350,7 @@ public:
       const ObTableAccessContext &context,
       const int32_t col_offset,
       blocksstable::ObIMicroBlockReader *reader,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_count) override;
   virtual int eval_index_info(const blocksstable::ObMicroIndexInfo &index_info, const bool is_cg = false) override;
   virtual int eval_batch_in_group_by(
@@ -387,6 +389,7 @@ public:
       const int64_t distinct_cnt,
       const bool is_group_by_col = false,
       const bool is_default_datum = false) override;
+  virtual int pad_column_in_group_by(const int64_t row_cap, common::ObIAllocator &allocator) override;
   INHERIT_TO_STRING_KV("ObAggCell", ObAggCell, K_(cmp_fun));
 private:
   virtual bool can_use_index_info() const override
@@ -416,6 +419,7 @@ public:
       const int64_t distinct_cnt,
       const bool is_group_by_col = false,
       const bool is_default_datum = false) override;
+  virtual int pad_column_in_group_by(const int64_t row_cap, common::ObIAllocator &allocator) override;
   INHERIT_TO_STRING_KV("ObAggCell", ObAggCell, K_(cmp_fun));
 private:
   virtual bool can_use_index_info() const override
@@ -485,7 +489,7 @@ public:
       const ObTableAccessContext &context,
       const int32_t col_offset,
       blocksstable::ObIMicroBlockReader *reader,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_count) override;
   virtual int eval_index_info(const blocksstable::ObMicroIndexInfo &index_info, const bool is_cg = false);
   virtual int eval_batch_in_group_by(
@@ -658,7 +662,7 @@ public:
       const ObTableAccessContext &context,
       const int32_t col_offset,
       blocksstable::ObIMicroBlockReader *reader,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_count) override;
   virtual int eval_index_info(const blocksstable::ObMicroIndexInfo &index_info, const bool is_cg = false) override;
   virtual int eval_batch_in_group_by(
@@ -754,6 +758,7 @@ public:
   int copy_output_row(const int64_t batch_idx);
   int copy_output_rows(const int64_t batch_idx);
   int copy_single_output_row(sql::ObEvalCtx &ctx);
+  int pad_column_in_group_by(const int64_t count);
   int collect_result();
   int add_distinct_null_value();
   // for micro with bitmap, should extract distinct values according bitmap
@@ -827,6 +832,7 @@ private:
   int64_t batch_size_;
   int64_t row_capacity_;
   int32_t group_by_col_offset_;
+  const share::schema::ObColumnParam *group_by_col_param_;
   sql::ObExpr *group_by_col_expr_;
   ObAggGroupByDatumBuf *group_by_col_datum_buf_;
   // for micro with bitmap
@@ -845,6 +851,7 @@ private:
   bool is_processing_;
   int64_t projected_cnt_;
   ObPDAggFactory agg_cell_factory_;
+  common::ObArenaAllocator padding_allocator_;
   common::ObIAllocator &allocator_;
   DISALLOW_COPY_AND_ASSIGN(ObGroupByCell);
 };

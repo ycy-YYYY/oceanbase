@@ -47,6 +47,27 @@ using namespace oceanbase::common;
 using namespace oceanbase::common::hash;
 using namespace blocksstable;
 
+const static char * ObTableModeFlagStr[] = {
+    "NORMAL",
+    "QUEUING",
+    "PRIMARY_AUX_VP",
+    "MODERATE",
+    "SUPER",
+    "EXTREME",
+};
+
+const char *table_mode_flag_to_str(const ObTableModeFlag &table_mode)
+{
+  STATIC_ASSERT(static_cast<int64_t>(TABLE_MODE_MAX) == ARRAYSIZEOF(ObTableModeFlagStr), "table mode flag str len is mismatch");
+  const char *str = "";
+  if (is_valid_table_mode_flag(table_mode)) {
+    str = ObTableModeFlagStr[table_mode];
+  } else {
+    str = "invalid_table_mode_flag_type";
+  }
+  return str;
+}
+
 ObColumnIdKey ObGetColumnKey<ObColumnIdKey, ObColumnSchemaV2 *>::operator()(const ObColumnSchemaV2 *column_schema) const
 {
   return ObColumnIdKey(column_schema->get_column_id());
@@ -1905,7 +1926,7 @@ bool ObTableSchema::is_valid() const
                 }
               }
             } else if (ob_is_text_tc(column->get_data_type()) || ob_is_json_tc(column->get_data_type())
-                       || ob_is_geometry_tc(column->get_data_type())) {
+                       || ob_is_geometry_tc(column->get_data_type()) || ob_is_roaringbitmap_tc(column->get_data_type())) {
               ObLength max_length = 0;
               max_length = ObAccuracy::MAX_ACCURACY[column->get_data_type()].get_length();
               if (max_length < column->get_data_length()) {
@@ -2691,6 +2712,93 @@ int ObTableSchema::create_new_idx_name_after_flashback(
   return ret;
 }
 
+int ObTableSchema::get_xml_hidden_column_id(const ObTableSchema *data_table_schema,
+                                            const ObColumnSchemaV2 *data_column_schema,
+                                            int64_t &data_column_id)
+{
+  INIT_SUCC(ret);
+  data_column_id = -1;
+  ObSEArray<ObColumnSchemaV2 *, 1> data_hidden_cols;
+  if (OB_ISNULL(data_table_schema) || OB_ISNULL(data_column_schema)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("table_schem or column schema is null", K(data_table_schema), K(data_column_schema));
+  } else if (OB_FAIL(data_table_schema->get_column_schema_in_same_col_group(data_column_schema->get_column_id(),
+                                                                     data_column_schema->get_udt_set_id(),
+                                                                     data_hidden_cols))) {
+    LOG_WARN("failed to get column schema", K(ret));
+  } else if (data_hidden_cols.count() != 1 ||
+             OB_ISNULL(data_hidden_cols.at(0))) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get data data_hidden_cols count > 1.", K(ret), K(data_hidden_cols.count()));
+  } else {
+    ObColumnSchemaV2* data_hidden_col = data_hidden_cols.at(0);
+    ObTableSchema::const_column_iterator iter = data_table_schema->column_begin();
+    bool has_find = false;
+    for ( ; OB_SUCC(ret) && !has_find && iter != data_table_schema->column_end(); ++iter) {
+      const ObColumnSchemaV2 *column_schema = *iter;
+      if (OB_ISNULL(column_schema)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("Column schema is NULL", K(ret));
+      } else if (!column_schema->is_udt_hidden_column()) {
+        // do nothing
+      } else if (column_schema->get_udt_set_id() == data_hidden_col->get_udt_set_id()) {
+        data_column_id = column_schema->get_column_id();
+        has_find = true;
+      }
+    }
+
+    if (OB_FAIL(ret)) {
+    } else if (!has_find) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("The hidden column corresponding to column in the table was not found.", K(ret), K(*data_table_schema), K(*data_column_schema));
+    }
+  }
+  return ret;
+}
+
+int ObTableSchema::find_xml_hidden_column_index(const ObTableSchema *table_schema,
+                                                const ObColumnSchemaV2 *column_schema,
+                                                const ObArray<ObColDesc> &desc_col_ids,
+                                                int64_t &dst_index_col)
+{
+  INIT_SUCC(ret);
+  dst_index_col = -1;
+  ObSEArray<ObColumnSchemaV2 *, 1> hidden_cols;
+  if (OB_ISNULL(table_schema) || OB_ISNULL(column_schema)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("table_schem or column schema is null", K(table_schema), K(column_schema));
+  } else if (OB_FAIL(table_schema->get_column_schema_in_same_col_group(column_schema->get_column_id(),
+                                                                       column_schema->get_udt_set_id(),
+                                                                       hidden_cols))) {
+    LOG_WARN("failed to get column schema", K(ret));
+  } else if (hidden_cols.count() != 1 || OB_ISNULL(hidden_cols.at(0))) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get data data_hidden_cols count > 1.", K(ret), K(hidden_cols.count()));
+  } else {
+    bool has_find = false;
+    for (int64_t i = 0; OB_SUCC(ret) && !has_find && i < desc_col_ids.count(); i++) {
+      const uint64_t hidden_column_id = desc_col_ids.at(i).col_id_;
+      const ObColumnSchemaV2 *find_hidden_column_schema = table_schema->get_column_schema(hidden_column_id);
+      if (OB_ISNULL(find_hidden_column_schema)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("get hidden col or hidden data column null", K(ret));
+      } else if (!find_hidden_column_schema->is_udt_hidden_column()) {
+        // do nothing
+      } else if (find_hidden_column_schema->get_udt_set_id() == hidden_cols.at(0)->get_udt_set_id()) {
+        dst_index_col = i;
+        has_find = true;
+      }
+    }
+
+    if (OB_FAIL(ret)) {
+    } else if (!has_find) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("The hidden column corresponding to column in the table was not found.", K(ret), K(*table_schema), K(*column_schema));
+    }
+  }
+  return ret;
+}
+
 void ObTableSchema::construct_partition_key_column(
     const ObColumnSchemaV2 &column,
     ObPartitionKeyColumn &partition_key_column)
@@ -2874,6 +2982,19 @@ int ObTableSchema::get_orig_default_row(const common::ObIArray<ObColDesc> &colum
     }
   }
   return ret;
+}
+
+ObColumnSchemaV2* ObTableSchema::get_xml_hidden_column_parent_col_schema(uint64_t column_id, uint64_t udt_set_id) const
+{
+  ObColumnSchemaV2 *res = NULL;
+  for (int64_t i = 0; udt_set_id > 0 && OB_ISNULL(res) && i < column_cnt_; ++i) {
+    ObColumnSchemaV2 *column = column_array_[i];
+    if (OB_ISNULL(column) || !column->is_extend() || column_id == column->get_column_id()) {
+    } else if (udt_set_id == column->get_udt_set_id()) {
+      res = column;
+    }
+  }
+  return res;
 }
 
 ObColumnSchemaV2* ObTableSchema::get_xml_hidden_column_schema(uint64_t column_id, uint64_t udt_set_id) const
@@ -3675,6 +3796,8 @@ int ObTableSchema::convert_column_ids_for_ddl(const ObHashMap<uint64_t, uint64_t
   int ret = OB_SUCCESS;
   if (OB_FAIL(convert_column_udt_set_ids(column_id_map))) {
     LOG_WARN("failed to convert column udt set id", K(ret));
+  } else if (OB_FAIL(convert_geo_generated_col_ids(column_id_map))) {
+    LOG_WARN("failed to convert column id in geo generated columns", K(ret));
   } else if (OB_FAIL(convert_basic_column_ids(column_id_map))) {
     LOG_WARN("failed to convert column id in column array and id hash array", K(ret));
   } else if (OB_FAIL(convert_column_ids_in_generated_columns(column_id_map))) {
@@ -3710,7 +3833,7 @@ int ObTableSchema::sort_column_array_by_column_id()
       }
     }
     if (OB_SUCC(ret)) {
-      std::sort(column_array_, column_array_ + column_cnt_, [](ObColumnSchemaV2 *&lhs, ObColumnSchemaV2 *&rhs) -> bool {
+      lib::ob_sort(column_array_, column_array_ + column_cnt_, [](ObColumnSchemaV2 *&lhs, ObColumnSchemaV2 *&rhs) -> bool {
         return lhs->get_column_id() < rhs->get_column_id();
       });
     }
@@ -5269,7 +5392,7 @@ int ObTableSchema::check_row_length(
         // The full text column in the index only counts the length of one word segment
         row_length += OB_MAX_OBJECT_NAME_LENGTH;
       } else if (ob_is_string_type(col->get_data_type()) || ob_is_json(col->get_data_type())
-                 || ob_is_geometry(col->get_data_type())) {
+                 || ob_is_geometry(col->get_data_type()) || ob_is_roaringbitmap(col->get_data_type())) {
         int64_t length = 0;
         if (OB_FAIL(col->get_byte_length(length, is_oracle_mode, true))) {
           SQL_RESV_LOG(WARN, "fail to get byte length of column", K(ret));
@@ -5429,7 +5552,8 @@ int ObTableSchema::has_lob_column(bool &has_lob, const bool check_large /*= fals
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("Column schema is NULL", K(ret));
     } else if (ob_is_json_tc(column_schema->get_data_type())
-               || ob_is_geometry_tc(column_schema->get_data_type())) {
+               || ob_is_geometry_tc(column_schema->get_data_type())
+               || ob_is_roaringbitmap_tc(column_schema->get_data_type())) {
       has_lob = true; // cannot know whether a json is lob or not from schema
     } else if (check_large) {
       if (ob_is_large_text(column_schema->get_data_type())) {
@@ -6041,6 +6165,33 @@ bool ObTableSchema::has_generated_and_partkey_column() const
     }
   }
   return result;
+}
+
+int ObTableSchema::check_column_has_multivalue_index_depend(
+  const ObColumnSchemaV2 &data_column_schema,
+  bool &has_func_idx_col_deps) const
+{
+  int ret = OB_SUCCESS;
+  has_func_idx_col_deps = false;
+  const uint64_t tenant_id = get_tenant_id();
+
+  if (data_column_schema.has_generated_column_deps()) {
+    for (ObTableSchema::const_column_iterator iter = column_begin();
+        OB_SUCC(ret) && iter != column_end(); iter++) {
+      const ObColumnSchemaV2 *column = *iter;
+      if (OB_ISNULL(column)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected err", K(ret), KPC(this));
+      } else if (column->is_multivalue_generated_column()) {
+        if (column->has_cascaded_column_id(data_column_schema.get_column_id())) {
+          has_func_idx_col_deps = true;
+          break;
+        }
+      }
+    }
+  }
+
+  return ret;
 }
 
 int ObTableSchema::check_functional_index_columns_depend(
@@ -8590,6 +8741,10 @@ int ObTableSchema::add_column_group(const ObColumnGroupSchema &other)
   if (!other.is_valid()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", KR(ret), K(other));
+  } else if (other.get_column_group_type() != ObColumnGroupType::DEFAULT_COLUMN_GROUP
+             && !ObSchemaUtils::can_add_column_group(*this)) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_WARN("only default column group is allowded to add to not user/tmp table", K(ret), K(other), KPC(this));
   } else if (OB_FAIL(do_add_column_group(other))) {
     LOG_WARN("fail to do add column group", KR(ret), K(other));
   }
@@ -8960,6 +9115,31 @@ int ObTableSchema::convert_column_udt_set_ids(const ObHashMap<uint64_t, uint64_t
             }
           }
         }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObTableSchema::convert_geo_generated_col_ids(const ObHashMap<uint64_t, uint64_t> &column_id_map)
+{
+  int ret = OB_SUCCESS;
+  // generate new column udt id
+  for (int64_t i = 0; OB_SUCC(ret) && i < column_cnt_; i++) {
+    ObColumnSchemaV2 *column = column_array_[i];
+    if (OB_ISNULL(column)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("invalid column schema", K(ret));
+    } else if (column->is_spatial_generated_column()) {
+      uint64_t new_column_id = 0;
+      uint64_t old_geo_column_id = column->get_geo_col_id();
+      if (OB_FAIL(column_id_map.get_refactored(old_geo_column_id, new_column_id))) {
+        LOG_WARN("failed to get column id", K(ret), K(new_column_id));
+      } else if (OB_UNLIKELY(new_column_id < OB_APP_MIN_COLUMN_ID)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("new column id too small", K(ret), K(new_column_id));
+      } else {
+        column->set_geo_col_id(new_column_id);
       }
     }
   }

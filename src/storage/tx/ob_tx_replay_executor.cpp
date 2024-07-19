@@ -286,7 +286,7 @@ int ObTxReplayExecutor::try_get_tx_ctx_()
       ret = OB_SUCCESS;
       bool tx_ctx_existed = false;
       common::ObAddr scheduler = log_block_.get_header().get_scheduler();
-      // since 4.3, cluster version in log_block_header
+      // since 4.2.4, cluster version in log_block_header
       const uint64_t cluster_version = log_block_.get_header().get_cluster_version();
       ObTxCreateArg arg(true, /* for_replay */
                         PartCtxSource::REPLAY,
@@ -296,6 +296,7 @@ int ObTxReplayExecutor::try_get_tx_ctx_()
                         log_block_.get_header().get_org_cluster_id(),
                         cluster_version,
                         0, /*session_id*/
+                        0, /*associated_session_id*/
                         scheduler,
                         INT64_MAX,         /*trans_expired_time_*/
                         ls_tx_srv_->get_trans_service());
@@ -314,7 +315,7 @@ int ObTxReplayExecutor::try_get_tx_ctx_()
       } else if (base_header_.need_pre_replay_barrier() && OB_UNLIKELY(ctx_->is_replay_complete_unknown())) {
         // if a pre-barrier log will be replayed
         // the txn can be confirmed to incomplete replayed
-        ret = ctx_->set_replay_incomplete();
+        ret = ctx_->set_replay_incomplete(log_ts_ns_);
       }
     }
   }

@@ -53,13 +53,17 @@ void ObTransferMoveTxParam::reset()
   is_incomplete_replay_ = false;
 }
 
-ObTransferOutTxCtx::ObTransferOutTxCtx()
-    : do_transfer_block_(false),
-      src_ls_id_(),
-      dest_ls_id_(),
-      data_end_scn_(),
-      transfer_scn_(),
-      transfer_epoch_(0) {}
+void ObTransferOutTxParam::reset()
+{
+  except_tx_id_ = 0;
+  data_end_scn_.reset();
+  op_scn_.reset();
+  op_type_ = NotifyType::UNKNOWN;
+  is_replay_ = false;
+  dest_ls_id_.reset();
+  transfer_epoch_ = 0;
+  move_tx_ids_ = nullptr;
+}
 
 void ObTransferOutTxCtx::reset()
 {
@@ -69,6 +73,8 @@ void ObTransferOutTxCtx::reset()
   data_end_scn_.reset();
   transfer_scn_.reset();
   transfer_epoch_ = 0;
+  filter_tx_need_transfer_ = false;
+  move_tx_ids_.reset();
 }
 
 bool ObTransferOutTxCtx::is_valid()
@@ -87,6 +93,8 @@ int ObTransferOutTxCtx::assign(const ObTransferOutTxCtx &other)
   const mds::MdsCtx &mds_ctx = static_cast<const mds::MdsCtx&>(other);
   if (OB_FAIL(MdsCtx::assign(mds_ctx))) {
     LOG_WARN("transfer out tx ctx assign failed", KR(ret), K(other));
+  } else if (OB_FAIL(move_tx_ids_.assign(other.move_tx_ids_))) {
+    LOG_WARN("assign array failed", KR(ret));
   } else {
     do_transfer_block_ = other.do_transfer_block_;
     src_ls_id_ = other.src_ls_id_;
@@ -94,6 +102,7 @@ int ObTransferOutTxCtx::assign(const ObTransferOutTxCtx &other)
     data_end_scn_ = other.data_end_scn_;
     transfer_scn_ = other.transfer_scn_;
     transfer_epoch_ = other.transfer_epoch_;
+    filter_tx_need_transfer_ = other.filter_tx_need_transfer_;
   }
   return ret;
 }
@@ -102,18 +111,23 @@ int ObTransferOutTxCtx::record_transfer_block_op(const share::ObLSID src_ls_id,
                                                  const share::ObLSID dest_ls_id,
                                                  const share::SCN data_end_scn,
                                                  int64_t transfer_epoch,
-                                                 bool is_replay)
+                                                 bool is_replay,
+                                                 bool filter_tx_need_transfer,
+                                                 ObIArray<ObTransID> &move_tx_ids)
 {
   int ret = OB_SUCCESS;
   if (!is_replay && do_transfer_block_) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("ctx do_transfer_block unexpectd", KR(ret), KP(this));
+  } else if (OB_FAIL(move_tx_ids_.assign(move_tx_ids))) {
+    LOG_WARN("assgin array failed", KR(ret));
   } else {
     src_ls_id_ = src_ls_id;
     dest_ls_id_ = dest_ls_id;
     data_end_scn_ = data_end_scn;
     transfer_epoch_ = transfer_epoch;
     do_transfer_block_ = true;
+    filter_tx_need_transfer_ = filter_tx_need_transfer;
   }
   return ret;
 }
@@ -128,26 +142,31 @@ void ObTransferOutTxCtx::on_redo(const share::SCN &redo_scn)
   ObLS *ls = nullptr;
   int64_t active_tx_count = 0;
   int64_t block_tx_count = 0;
+  ObTransferOutTxParam param;
+  param.except_tx_id_ = get_writer().writer_id_;
+  param.data_end_scn_ = data_end_scn_;
+  param.op_scn_ = redo_scn;
+  param.op_type_ = transaction::NotifyType::ON_REDO;
+  param.is_replay_ = false;
+  param.dest_ls_id_ = dest_ls_id_;
+  param.transfer_epoch_ = transfer_epoch_;
+  if (filter_tx_need_transfer_) {
+    param.move_tx_ids_ = &move_tx_ids_;
+  } else {
+    param.move_tx_ids_ = nullptr;
+  }
 
   while (true) {
     int ret = OB_SUCCESS;
     if (!is_valid()) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("transfer out tx ctx invalid state", KR(ret), K(tx_id), KP(this), KPC(this));
-    } else if (OB_FAIL(MTL(ObLSService*)->get_ls(src_ls_id_, ls_handle, ObLSGetMod::STORAGE_MOD))) {
+    } else if (OB_FAIL(MTL(ObLSService*)->get_ls(src_ls_id_, ls_handle, ObLSGetMod::TABLET_MOD))) {
       LOG_WARN("failed to get ls", KR(ret), K(tx_id), KP(this));
     } else if (OB_UNLIKELY(nullptr == (ls = ls_handle.get_ls()))) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("ls should not be NULL", KR(ret), KP(this), KP(ls));
-    } else if (OB_FAIL(ls->transfer_out_tx_op(get_writer().writer_id_,
-                                                           data_end_scn_,
-                                                           redo_scn,
-                                                           transaction::NotifyType::ON_REDO,
-                                                           false,
-                                                           dest_ls_id_,
-                                                           transfer_epoch_,
-                                                           active_tx_count,
-                                                           block_tx_count))) {
+    } else if (!empty_tx() && OB_FAIL(ls->transfer_out_tx_op(param, active_tx_count, block_tx_count))) {
       LOG_WARN("transfer out tx failed", KR(ret), K(tx_id), KP(this));
     }
     if (OB_FAIL(ret)) {
@@ -164,6 +183,19 @@ void ObTransferOutTxCtx::on_commit(const share::SCN &commit_version, const share
   LOG_INFO("transfer_out_tx on_commit", K(commit_version), K(commit_scn), K(tx_id), KP(this), KPC(this));
   int ret = OB_SUCCESS;
   mds::MdsCtx::on_commit(commit_version, commit_scn);
+  ObTransferOutTxParam param;
+  param.except_tx_id_ = get_writer().writer_id_;
+  param.data_end_scn_ = data_end_scn_;
+  param.op_scn_ = commit_scn;
+  param.op_type_ = transaction::NotifyType::ON_COMMIT;
+  param.is_replay_ = false;
+  param.dest_ls_id_ = dest_ls_id_;
+  param.transfer_epoch_ = transfer_epoch_;
+  if (filter_tx_need_transfer_) {
+    param.move_tx_ids_ = &move_tx_ids_;
+  } else {
+    param.move_tx_ids_ = nullptr;
+  }
   while (true) {
     int ret = OB_SUCCESS;
     ObLSHandle ls_handle;
@@ -175,20 +207,12 @@ void ObTransferOutTxCtx::on_commit(const share::SCN &commit_version, const share
     if (!is_valid()) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("transfer out tx ctx invalid state", KR(ret), K(tx_id), KP(this), KPC(this));
-    } else if (OB_FAIL(MTL(ObLSService*)->get_ls(src_ls_id_, ls_handle, ObLSGetMod::STORAGE_MOD))) {
+    } else if (OB_FAIL(MTL(ObLSService*)->get_ls(src_ls_id_, ls_handle, ObLSGetMod::TABLET_MOD))) {
       LOG_WARN("fail to get ls", KR(ret), K(writer_), KP(this));
     } else if (OB_UNLIKELY(nullptr == (ls = ls_handle.get_ls()))) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("ls should not be NULL", KR(ret), KP(this));
-    } else if (OB_FAIL(ls->transfer_out_tx_op(get_writer().writer_id_,
-                                                           data_end_scn_,
-                                                           commit_scn,
-                                                           transaction::NotifyType::ON_COMMIT,
-                                                           false,
-                                                           dest_ls_id_,
-                                                           transfer_epoch_,
-                                                           active_tx_count,
-                                                           op_tx_count))) {
+    } else if (!empty_tx() && OB_FAIL(ls->transfer_out_tx_op(param, active_tx_count, op_tx_count))) {
       LOG_WARN("transfer out tx op failed", KR(ret), K(tx_id), KP(this));
     } else {
       int64_t end_time = ObTimeUtility::current_time();
@@ -211,6 +235,19 @@ void ObTransferOutTxCtx::on_abort(const share::SCN &abort_scn)
   transaction::ObTransID tx_id = writer_.writer_id_;
   LOG_INFO("transfer_out_tx on_abort", K(abort_scn), K(tx_id), KP(this), KPC(this));
   mds::MdsCtx::on_abort(abort_scn);
+  ObTransferOutTxParam param;
+  param.except_tx_id_ = get_writer().writer_id_;
+  param.data_end_scn_ = data_end_scn_;
+  param.op_scn_ = abort_scn;
+  param.op_type_ = transaction::NotifyType::ON_ABORT;
+  param.is_replay_ = false;
+  param.dest_ls_id_ = dest_ls_id_;
+  param.transfer_epoch_ = transfer_epoch_;
+  if (filter_tx_need_transfer_) {
+    param.move_tx_ids_ = &move_tx_ids_;
+  } else {
+    param.move_tx_ids_ = nullptr;
+  }
   if (do_transfer_block_) {
     while (true) {
       int ret = OB_SUCCESS;
@@ -222,20 +259,12 @@ void ObTransferOutTxCtx::on_abort(const share::SCN &abort_scn)
       if (!src_ls_id_.is_valid()) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("transfer out tx ctx invalid state", KR(ret), K(tx_id), KPC(this));
-      } else if (OB_FAIL(MTL(ObLSService*)->get_ls(src_ls_id_, ls_handle, ObLSGetMod::STORAGE_MOD))) {
+      } else if (OB_FAIL(MTL(ObLSService*)->get_ls(src_ls_id_, ls_handle, ObLSGetMod::TABLET_MOD))) {
         LOG_WARN("fail to get ls", KR(ret), K(tx_id), KP(this));
       } else if (OB_UNLIKELY(nullptr == (ls = ls_handle.get_ls()))) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("ls should not be NULL", KR(ret), KP(this));
-      } else if (OB_FAIL(ls->transfer_out_tx_op(get_writer().writer_id_,
-                                                             data_end_scn_,
-                                                             abort_scn,
-                                                             transaction::NotifyType::ON_ABORT,
-                                                             false,
-                                                             dest_ls_id_,
-                                                             transfer_epoch_,
-                                                             active_tx_count,
-                                                             op_tx_count))) {
+      } else if (!empty_tx() && OB_FAIL(ls->transfer_out_tx_op(param, active_tx_count, op_tx_count))) {
         LOG_WARN("transfer out tx op failed", KR(ret), K(tx_id), KP(this));
       }
       if (OB_SUCC(ret)) {
@@ -275,7 +304,7 @@ int ObStartTransferMoveTxHelper::on_register(const char* buf, const int64_t len,
   } else if (!collect_tx_info.is_valid()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("on register collect_tx_info is valid", KR(ret), K(collect_tx_info));
-  } else if (OB_FAIL(MTL(ObLSService*)->get_ls(collect_tx_info.dest_ls_id_, ls_handle, ObLSGetMod::STORAGE_MOD))) {
+  } else if (OB_FAIL(MTL(ObLSService*)->get_ls(collect_tx_info.dest_ls_id_, ls_handle, ObLSGetMod::TABLET_MOD))) {
     LOG_WARN("get ls failed", KR(ret), K(transfer_move_tx_ctx));
   } else if (OB_UNLIKELY(nullptr == (ls = ls_handle.get_ls()))) {
     ret = OB_ERR_UNEXPECTED;
@@ -314,7 +343,7 @@ int ObStartTransferMoveTxHelper::on_register(const char* buf, const int64_t len,
     }
   }
   LOG_INFO("[TRANSFER] TransferMoveTx on_register", KR(ret), K(len), K(tx_id),
-          "tx_count", collect_tx_info.args_.count());
+          "tx_count", collect_tx_info.args_.count(), KP(&transfer_move_tx_ctx), K(collect_tx_info));
   return ret;
 }
 
@@ -362,7 +391,7 @@ int ObStartTransferMoveTxHelper::on_replay(const char* buf, const int64_t len, c
   ObTransferMoveTxCtx &transfer_move_tx_ctx = static_cast<ObTransferMoveTxCtx&>(ctx);
   CollectTxCtxInfo &collect_tx_info = transfer_move_tx_ctx.get_collect_tx_info();
   transaction::ObTransID tx_id = transfer_move_tx_ctx.get_writer().writer_id_;
-  LOG_INFO("TransferMoveTx on_replay", K(tx_id));
+  LOG_INFO("TransferMoveTx on_replay", K(tx_id), KP(&collect_tx_info), K(collect_tx_info));
 
   if (OB_ISNULL(buf) || len < 0) {
     ret = OB_INVALID_ARGUMENT;
@@ -372,7 +401,7 @@ int ObStartTransferMoveTxHelper::on_replay(const char* buf, const int64_t len, c
   } else if (!transfer_move_tx_ctx.get_collect_tx_info().is_valid()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("collect_tx_info is valid", KR(ret));
-  } else if (OB_FAIL(MTL(ObLSService*)->get_ls(collect_tx_info.dest_ls_id_, ls_handle, ObLSGetMod::STORAGE_MOD))) {
+  } else if (OB_FAIL(MTL(ObLSService*)->get_ls(collect_tx_info.dest_ls_id_, ls_handle, ObLSGetMod::TABLET_MOD))) {
     LOG_WARN("get ls failed", KR(ret), K(collect_tx_info));
   } else if (OB_UNLIKELY(nullptr == (ls = ls_handle.get_ls()))) {
     ret = OB_ERR_UNEXPECTED;
@@ -440,7 +469,7 @@ void ObTransferMoveTxCtx::on_redo(const share::SCN &redo_scn)
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("TRANSFER collect_tx_info is invalid", KR(ret), K(collect_tx_info), K(op_scn_), K(writer_), KP(this));
     } else if ((!op_scn_.is_valid() || op_scn_ < redo_scn) && FALSE_IT(op_scn_ = redo_scn)) {
-    } else if (OB_FAIL(MTL(ObLSService*)->get_ls(collect_tx_info.dest_ls_id_, ls_handle, ObLSGetMod::STORAGE_MOD))) {
+    } else if (OB_FAIL(MTL(ObLSService*)->get_ls(collect_tx_info.dest_ls_id_, ls_handle, ObLSGetMod::TABLET_MOD))) {
       LOG_WARN("get ls failed", KR(ret), K(writer_), K(collect_tx_info), KP(this));
     } else if (OB_UNLIKELY(nullptr == (ls = ls_handle.get_ls()))) {
       ret = OB_ERR_UNEXPECTED;
@@ -485,7 +514,7 @@ void ObTransferMoveTxCtx::on_commit(const share::SCN &commit_version, const shar
     if (!collect_tx_info.is_valid() || !op_scn_.is_valid()) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("TRANSFER collect_tx_info is invalid", KR(ret), K(collect_tx_info), K(op_scn_));
-    } else if (OB_FAIL(MTL(ObLSService*)->get_ls(collect_tx_info.dest_ls_id_, ls_handle, ObLSGetMod::STORAGE_MOD))) {
+    } else if (OB_FAIL(MTL(ObLSService*)->get_ls(collect_tx_info.dest_ls_id_, ls_handle, ObLSGetMod::TABLET_MOD))) {
       LOG_WARN("get ls failed", KR(ret), K(collect_tx_info));
     } else if (OB_UNLIKELY(nullptr == (ls = ls_handle.get_ls()))) {
       ret = OB_ERR_UNEXPECTED;
@@ -530,7 +559,7 @@ void ObTransferMoveTxCtx::on_abort(const share::SCN &abort_scn)
     if (!collect_tx_info.is_valid()) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("TRANSFER collect_tx_info is invalid", KR(ret), K(collect_tx_info), K(op_scn_), K(abort_scn));
-    } else if (OB_FAIL(MTL(ObLSService*)->get_ls(collect_tx_info.dest_ls_id_, ls_handle, ObLSGetMod::STORAGE_MOD))) {
+    } else if (OB_FAIL(MTL(ObLSService*)->get_ls(collect_tx_info.dest_ls_id_, ls_handle, ObLSGetMod::TABLET_MOD))) {
       LOG_WARN("get ls failed", KR(ret), K(collect_tx_info));
     } else if (OB_UNLIKELY(nullptr == (ls = ls_handle.get_ls()))) {
       ret = OB_ERR_UNEXPECTED;
@@ -582,7 +611,7 @@ int ObStartTransferDestPrepareHelper::on_register(
   } else if (!info.is_valid()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("transfer_dest_prepare invalid param", KR(ret), K(info));
-  } else if (OB_FAIL(MTL(ObLSService*)->get_ls(info.dest_ls_id_, ls_handle, ObLSGetMod::STORAGE_MOD))) {
+  } else if (OB_FAIL(MTL(ObLSService*)->get_ls(info.dest_ls_id_, ls_handle, ObLSGetMod::TABLET_MOD))) {
     LOG_WARN("get ls failed", KR(ret), K(info));
   } else if (OB_UNLIKELY(nullptr == (ls = ls_handle.get_ls()))) {
     ret = OB_ERR_UNEXPECTED;
@@ -613,7 +642,7 @@ int ObStartTransferDestPrepareHelper::on_replay(
   } else if (!info.is_valid()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("transfer_dest_prepare invalid param", KR(ret), K(info));
-  } else if (OB_FAIL(MTL(ObLSService*)->get_ls(info.dest_ls_id_, ls_handle, ObLSGetMod::STORAGE_MOD))) {
+  } else if (OB_FAIL(MTL(ObLSService*)->get_ls(info.dest_ls_id_, ls_handle, ObLSGetMod::TABLET_MOD))) {
     LOG_WARN("get ls failed", KR(ret), K(info));
   } else if (OB_FAIL(ls_handle.get_ls()->get_transfer_status().update_status(tx_id, info.task_id_, scn,
           NotifyType::ON_REDO, ObTxDataSourceType::TRANSFER_DEST_PREPARE))) {
@@ -668,7 +697,7 @@ void ObTransferDestPrepareTxCtx::on_redo(const share::SCN &redo_scn)
     if (!info.is_valid()) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("transfer dest prepare info is invalid", KR(ret), K(tx_id), KP(this), KPC(this));
-    } else if (OB_FAIL(MTL(ObLSService*)->get_ls(info.dest_ls_id_, ls_handle, ObLSGetMod::STORAGE_MOD))) {
+    } else if (OB_FAIL(MTL(ObLSService*)->get_ls(info.dest_ls_id_, ls_handle, ObLSGetMod::TABLET_MOD))) {
       LOG_WARN("get ls failed", KR(ret), K(tx_id), K(transfer_dest_prepare_info_));
     } else if ((!op_scn_.is_valid() || op_scn_ < redo_scn) && FALSE_IT(op_scn_ = redo_scn)) {
     } else if (OB_FAIL(ls_handle.get_ls()->get_transfer_status().update_status(tx_id, info.task_id_, redo_scn,
@@ -698,7 +727,7 @@ void ObTransferDestPrepareTxCtx::on_commit(const share::SCN &commit_version, con
     if (!info.is_valid()) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("transfer dest prepare info is invalid", KR(ret), K(tx_id), KP(this), KPC(this));
-    } else if (OB_FAIL(MTL(ObLSService*)->get_ls(info.dest_ls_id_, ls_handle, ObLSGetMod::STORAGE_MOD))) {
+    } else if (OB_FAIL(MTL(ObLSService*)->get_ls(info.dest_ls_id_, ls_handle, ObLSGetMod::TABLET_MOD))) {
       LOG_WARN("get ls failed", KR(ret), K(tx_id), K(transfer_dest_prepare_info_));
     } else if (OB_FAIL(ls_handle.get_ls()->get_transfer_status().update_status(tx_id, info.task_id_, commit_scn,
             NotifyType::ON_COMMIT, ObTxDataSourceType::TRANSFER_DEST_PREPARE))) {
@@ -726,7 +755,7 @@ void ObTransferDestPrepareTxCtx::on_abort(const share::SCN &abort_scn)
     if (!info.is_valid()) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("transfer dest prepare info is invalid", KR(ret), K(tx_id), KP(this), KPC(this));
-    } else if (OB_FAIL(MTL(ObLSService*)->get_ls(transfer_dest_prepare_info_.dest_ls_id_, ls_handle, ObLSGetMod::STORAGE_MOD))) {
+    } else if (OB_FAIL(MTL(ObLSService*)->get_ls(transfer_dest_prepare_info_.dest_ls_id_, ls_handle, ObLSGetMod::TABLET_MOD))) {
       LOG_WARN("get ls failed", KR(ret), K(transfer_dest_prepare_info_), K(tx_id));
     } else if (OB_FAIL(ls_handle.get_ls()->get_transfer_status().update_status(tx_id, info.task_id_, abort_scn,
             NotifyType::ON_ABORT, ObTxDataSourceType::TRANSFER_DEST_PREPARE))) {

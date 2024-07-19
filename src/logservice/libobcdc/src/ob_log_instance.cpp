@@ -418,7 +418,9 @@ int ObLogInstance::init_logger_()
     easy_log_level = EASY_LOG_INFO;
     OB_LOGGER.set_max_file_size(MAX_LOG_FILE_SIZE);
     OB_LOGGER.set_max_file_index(max_log_file_count);
-    OB_LOGGER.set_file_name(log_file, disable_redirect_log_, false);
+    if (!OB_LOGGER.is_svr_file_opened()) {
+      OB_LOGGER.set_file_name(log_file, disable_redirect_log_, false);
+    }
     OB_LOGGER.set_log_level("INFO");
     OB_LOGGER.disable_thread_log_level();
     OB_LOGGER.set_enable_log_limit(enable_log_limit);
@@ -441,12 +443,18 @@ int ObLogInstance::init_logger_()
       }
     }
 
+    #ifndef ENABLE_SANITY
+      const char *extra_flags = "";
+    #else
+      const char *extra_flags = "|Sanity";
+    #endif
     _LOG_INFO("====================libobcdc start====================");
     _LOG_INFO("libobcdc %s %s", PACKAGE_VERSION, RELEASEID);
     _LOG_INFO("BUILD_VERSION: %s", build_version());
     _LOG_INFO("BUILD_TIME: %s %s", build_date(), build_time());
-    _LOG_INFO("BUILD_FLAGS: %s", build_flags());
-    _LOG_INFO("Copyright (c) 2022 Ant Group Co., Ltd.");
+    _LOG_INFO("BUILD_FLAGS: %s%s", build_flags(), extra_flags);
+    _LOG_INFO("BUILD_INFO: %s", build_info());
+    _LOG_INFO("Copyright (c) 2024 Ant Group Co., Ltd.");
     _LOG_INFO("======================================================");
     _LOG_INFO("\n");
   }
@@ -458,11 +466,17 @@ int ObLogInstance::init_logger_()
 
 void ObLogInstance::print_version()
 {
+  #ifndef ENABLE_SANITY
+    const char *extra_flags = "";
+  #else
+    const char *extra_flags = "|Sanity";
+  #endif
   MPRINT("libobcdc %s %s", PACKAGE_VERSION, RELEASEID);
   MPRINT("REVISION: %s", build_version());
   MPRINT("BUILD_TIME: %s %s", build_date(), build_time());
-  MPRINT("BUILD_FLAGS: %s\n", build_flags());
-  MPRINT("Copyright (c) 2022 Ant Group Co., Ltd.");
+  MPRINT("BUILD_FLAGS: %s%s\n", build_flags(), extra_flags);
+  MPRINT("BUILD_INFO: %s\n", build_info());
+  MPRINT("Copyright (c) 2024 Ant Group Co., Ltd.");
   MPRINT();
 }
 
@@ -621,6 +635,12 @@ int ObLogInstance::init_common_(uint64_t start_tstamp_ns, ERROR_CALLBACK err_cb)
   if (OB_SUCC(ret)) {
     // After startup, set the log level to prevent schema from printing INFO logs
     OB_LOGGER.set_mod_log_levels(TCONF.log_level.str());
+  }
+
+  if (OB_SUCC(ret)) {
+    const int64_t max_chunk_cache_size = CDC_CFG_MGR.get_max_chunk_cache_size();
+    CHUNK_MGR.set_max_chunk_cache_size(max_chunk_cache_size, true /*use_large_chunk_cache*/);
+    _LOG_INFO("[CHUNK_MGR] set max_chunk_cache_size: %s", SIZE_TO_STR(max_chunk_cache_size));
   }
 
   return ret;
@@ -2801,7 +2821,7 @@ void ObLogInstance::clean_log_()
 
 int64_t ObLogInstance::get_memory_hold_() const
 {
-  return lib::get_memory_used();
+  return lib::get_memory_hold();
 }
 
 int64_t ObLogInstance::get_memory_avail_() const

@@ -211,6 +211,32 @@ typedef struct ObJsonTableDef {
   common::ObSEArray<ObString, 16, common::ModulePageAllocator, true> namespace_arr_;
 } ObJsonTableDef;
 
+struct ObValuesTableDef {
+  ObValuesTableDef() : start_param_idx_(-1), end_param_idx_(-1), column_cnt_(0), row_cnt_(0) , access_type_(ACCESS_EXPR) {}
+  enum TableAccessType {
+    ACCESS_EXPR = 0,  // expr, one by one
+    FOLD_ACCESS_EXPR, // expr, one expr->ObSqlArray
+    ACCESS_PARAM,     // by a continuous space of param_store
+    ACCESS_OBJ,       // ObObj one by one, used for non-parametric
+  };
+  int deep_copy(const ObValuesTableDef &other,
+                ObIRawExprCopier &expr_copier,
+                ObIAllocator* allocator);
+  common::ObArray<ObRawExpr*, common::ModulePageAllocator, true> access_exprs_;
+  int64_t start_param_idx_;
+  int64_t end_param_idx_;
+  common::ObArray<ObObjParam, common::ModulePageAllocator, true> access_objs_;
+  common::ObArray<int64_t, common::ModulePageAllocator, true> column_ndvs_;  // column num distinct
+  common::ObArray<int64_t, common::ModulePageAllocator, true> column_nnvs_;  // column num null
+  int64_t column_cnt_;
+  int64_t row_cnt_;
+  TableAccessType access_type_;
+  common::ObArray<ObExprResType, common::ModulePageAllocator, true> column_types_;
+  virtual TO_STRING_KV(K(column_cnt_), K(row_cnt_), K(access_exprs_), K(start_param_idx_),
+                       K(end_param_idx_), K(access_objs_), K(column_ndvs_), K(column_nnvs_),
+                       K(access_type_), K(column_types_));
+};
+
 struct TableItem
 {
   TableItem()
@@ -240,6 +266,7 @@ struct TableItem
     ddl_table_id_ = common::OB_INVALID_ID;
     json_table_def_ = nullptr;
     table_type_ = MAX_TABLE_TYPE;
+    values_table_def_ = NULL;
   }
 
   virtual TO_STRING_KV(N_TID, table_id_,
@@ -262,7 +289,7 @@ struct TableItem
                K_(is_view_table), K_(part_ids), K_(part_names), K_(cte_type),
                KPC_(function_table_expr),
                K_(flashback_query_type), KPC_(flashback_query_expr), K_(table_type),
-               K(table_values_), K_(exec_params), K_(mview_id), K_(need_expand_rt_mv));
+               K_(exec_params), K_(mview_id), K_(need_expand_rt_mv));
 
   enum TableType
   {
@@ -347,7 +374,9 @@ struct TableItem
 
   ObJsonTableDef* get_json_table_def() { return json_table_def_; }
   int deep_copy_json_table_def(const ObJsonTableDef& jt_def, ObIRawExprCopier &expr_copier, ObIAllocator* allocator);
-
+  int deep_copy_values_table_def(const ObValuesTableDef& table_def,
+                                 ObIRawExprCopier &expr_copier,
+                                 ObIAllocator* allocator);
   virtual bool has_for_update() const { return for_update_; }
   // if real table id, it is valid for all threads,
   // else if generated id, it is unique just during the thread session
@@ -402,7 +431,7 @@ struct TableItem
   // json table
   ObJsonTableDef* json_table_def_;
   // values table
-  common::ObArray<ObRawExpr*, common::ModulePageAllocator, true> table_values_;
+  ObValuesTableDef *values_table_def_;
 };
 
 struct ColumnItem
@@ -533,7 +562,8 @@ struct JoinedTable : public TableItem
     left_table_(NULL),
     right_table_(NULL),
     single_table_ids_(common::OB_MALLOC_NORMAL_BLOCK_SIZE),
-    join_conditions_(common::OB_MALLOC_NORMAL_BLOCK_SIZE)
+    join_conditions_(common::OB_MALLOC_NORMAL_BLOCK_SIZE),
+    is_straight_join_(false)
   {
   }
 
@@ -545,6 +575,7 @@ struct JoinedTable : public TableItem
   bool is_left_join() const { return LEFT_OUTER_JOIN == joined_type_; }
   bool is_right_join() const { return RIGHT_OUTER_JOIN == joined_type_; }
   bool is_full_join() const { return FULL_OUTER_JOIN == joined_type_; }
+  bool is_straight_join() const { return is_inner_join() && is_straight_join_; }
   virtual bool has_for_update() const
   {
     return (left_table_ != NULL &&  left_table_->has_for_update())
@@ -557,13 +588,15 @@ struct JoinedTable : public TableItem
                N_JOIN_TYPE, ob_join_type_str(joined_type_),
                N_LEFT_TABLE, left_table_,
                N_RIGHT_TABLE, right_table_,
-               "join_condition", join_conditions_);
+               "join_condition", join_conditions_,
+               "is_straight_join", is_straight_join_);
 
   ObJoinType joined_type_;
   TableItem *left_table_;
   TableItem *right_table_;
   common::ObSEArray<uint64_t, 16, common::ModulePageAllocator, true> single_table_ids_;
   common::ObSEArray<ObRawExpr*, 16, common::ModulePageAllocator, true> join_conditions_;
+  bool is_straight_join_; // In MySQL mode, mark INNER JOIN as STRAIGHT_JOIN.
 };
 
 class SemiInfo
@@ -696,6 +729,7 @@ public:
   virtual int init_stmt(TableHashAllocator &table_hash_alloc, ObWrapperAllocator &wrapper_alloc) override;
 
   bool is_hierarchical_query() const;
+  int is_hierarchical_for_update(bool &is_hsfu) const;
 
   int replace_relation_exprs(const common::ObIArray<ObRawExpr *> &other_exprs,
                              const common::ObIArray<ObRawExpr *> &new_exprs);
@@ -742,6 +776,7 @@ public:
   int remove_from_item(uint64_t tid, bool *remove_happened = NULL);
   int remove_joined_table_item(const ObIArray<JoinedTable*> &tables);
   int remove_joined_table_item(const JoinedTable *joined_table);
+  int remove_joined_table_item(uint64_t tid, bool *remove_happened = NULL);
 
   TableItem *create_table_item(common::ObIAllocator &allocator);
   int merge_from_items(const ObDMLStmt &stmt);
@@ -909,6 +944,8 @@ public:
   TableItem *get_table_item(int64_t index) { return table_items_.at(index); }
   int remove_table_item(const TableItem *ti);
   int remove_table_item(const ObIArray<TableItem *> &table_items);
+  int remove_table_item(const uint64_t tid, bool *remove_happened = NULL);
+  int remove_table_item(const ObIArray<uint64_t> &tids, bool *remove_happened = NULL);
   int remove_table_info(const TableItem *table);
   int remove_table_info(const ObIArray<TableItem *> &table_items);
   TableItem *get_table_item(const FromItem item);
@@ -923,9 +960,14 @@ public:
   int get_table_rel_ids(const ObIArray<uint64_t> &table_ids, ObSqlBitSet<> &table_set) const;
   int get_table_rel_ids(const uint64_t table_id, ObSqlBitSet<> &table_set) const;
   int get_table_rel_ids(const ObIArray<TableItem*> &tables, ObSqlBitSet<> &table_set) const;
+  int get_table_rel_ids(const uint64_t table_id, ObRelIds &table_set) const;
+  int get_table_rel_ids(const TableItem &target, ObRelIds &table_set) const;
+  int get_table_rel_ids(const ObIArray<TableItem*> &tables, ObRelIds &table_set) const;
   int get_from_tables(ObRelIds &table_set) const;
   int get_from_tables(ObSqlBitSet<> &table_set) const;
   int get_from_tables(common::ObIArray<TableItem*>& from_tables) const;
+  int get_from_tables(common::ObIArray<int64_t>& table_ids) const;
+  int get_from_table(int64_t from_idx, TableItem* &from_table) const;
 
   int add_table_item(const ObSQLSessionInfo *session_info, TableItem *table_item);
   int add_table_item(const ObSQLSessionInfo *session_info, TableItem *table_item, bool &have_same_table_name);
@@ -972,6 +1014,8 @@ public:
   int update_column_item_rel_id();
   common::ObIArray<TableItem*> &get_table_items() { return table_items_; }
   const common::ObIArray<TableItem*> &get_table_items() const { return table_items_; }
+  int get_from_item_rel_ids(int64_t from_idx, ObSqlBitSet<> &rel_ids) const;
+  int get_table_items(common::ObIArray<int64_t> &table_ids) const;
   int get_CTE_table_items(ObIArray<TableItem *> &cte_table_items) const;
   int get_all_CTE_table_items_recursive(ObIArray<TableItem *> &cte_table_items) const;
   const common::ObIArray<uint64_t> &get_nextval_sequence_ids() const { return nextval_sequence_ids_; }
@@ -1141,7 +1185,9 @@ public:
   virtual bool is_returning() const { return false; }
   virtual bool has_instead_of_trigger() const { return false; }
   int has_lob_column(int64_t table_id, bool &has_lob)const;
-  int has_virtual_generated_column(int64_t table_id, bool &has_virtual_col) const;
+  int has_virtual_generated_column(int64_t table_id,
+                                   bool &has_virtual_col,
+                                   bool ignore_fulltext_gen_col = false) const;
 
   struct TempTableInfo {
     TempTableInfo()

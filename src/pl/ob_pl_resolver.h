@@ -593,6 +593,7 @@ public:
                                     const ObIRoutineInfo *&routine_info);
   static int resolve_dblink_routine_with_synonym(ObPLResolveCtx &resolve_ctx,
                                                  const uint64_t pkg_syn_id,
+                                                 const ObString &cur_db_name,
                                                  const ObString &routine_name,
                                                  const common::ObIArray<sql::ObRawExpr *> &expr_params,
                                                  const ObIRoutineInfo *&routine_info);
@@ -644,6 +645,20 @@ private:
                           ObPLDataType &pl_type,
                           ObPLExternTypeInfo *extern_type_info = NULL,
                           bool with_rowid = false);
+  int resolve_dblink_row_type_node(const ParseNode &access_node,
+                                   const ParseNode &dblink_node,
+                                   ObPLDataType &pl_type,
+                                   bool is_row_type);
+  int resolve_dblink_row_type(const ObString &db_name,
+                              const ObString &table_name,
+                              const ObString &col_name,
+                              const ObString &dblink_name,
+                              ObPLDataType &pl_type,
+                              bool is_row_type);
+  int resolve_dblink_row_type_with_synonym(ObPLResolveCtx &resolve_ctx,
+                                           const common::ObIArray<ObObjAccessIdx> &access_idxs,
+                                           ObPLDataType &pl_type,
+                                           bool is_row_type);
   int resolve_dblink_type(const ParseNode *node,
                           ObPLCompileUnitAST &func,
                           ObPLDataType &pl_type);

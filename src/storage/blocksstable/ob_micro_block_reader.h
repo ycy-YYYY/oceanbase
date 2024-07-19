@@ -93,7 +93,7 @@ public:
       const common::ObIArray<int32_t> &cols_projector,
       const common::ObIArray<const share::schema::ObColumnParam *> &col_params,
       const blocksstable::ObDatumRow *default_row,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
       ObDatumRow &row_buf,
       common::ObIArray<ObSqlDatumInfo> &datum_infos,
@@ -102,9 +102,10 @@ public:
       sql::ObEvalCtx &eval_ctx);
   virtual int get_row_count(
       int32_t col,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
       const bool contains_null,
+      const share::schema::ObColumnParam *col_param,
       int64_t &count) override final;
   virtual int64_t get_column_count() const override
   {
@@ -116,14 +117,14 @@ public:
       const ObTableAccessContext &context,
       const int32_t col_offset,
       const share::schema::ObColumnParam &col_param,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
       storage::ObAggDatumBuf &agg_datum_buf,
       storage::ObAggCell &agg_cell) override;
   int get_aggregate_result(
       const ObTableIterParam &iter_param,
       const ObTableAccessContext &context,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
       ObDatumRow &row_buf,
       common::ObIArray<storage::ObAggCell*> &agg_cells);
@@ -164,7 +165,7 @@ public:
       const common::ObIArray<int32_t> &cols_projector,
       const common::ObIArray<const share::schema::ObColumnParam *> &col_params,
       const blocksstable::ObDatumRow *default_row,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t vector_offset,
       const int64_t row_cap,
       ObDatumRow &row_buf,

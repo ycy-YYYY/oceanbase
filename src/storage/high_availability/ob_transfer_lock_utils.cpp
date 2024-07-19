@@ -45,7 +45,7 @@ static int get_ls_handle(const uint64_t tenant_id, const share::ObLSID &ls_id, s
   } else if (OB_ISNULL(ls_service = MTL_WITH_CHECK_TENANT(ObLSService *, tenant_id))) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("log stream service is NULL", K(ret), K(tenant_id));
-  } else if (OB_FAIL(ls_service->get_ls(ls_id, ls_handle, ObLSGetMod::STORAGE_MOD))) {
+  } else if (OB_FAIL(ls_service->get_ls(ls_id, ls_handle, ObLSGetMod::HA_MOD))) {
     LOG_WARN("failed to get log stream", K(ret), K(tenant_id), K(ls_id));
   }
   return ret;
@@ -60,7 +60,7 @@ int ObMemberListLockUtils::batch_lock_ls_member_list(const uint64_t tenant_id, c
   if (OB_FAIL(sorted_ls_list.assign(lock_ls_list))) {
     LOG_WARN("failed to assign ls list", K(ret));
   } else {
-    std::sort(sorted_ls_list.begin(), sorted_ls_list.end());
+    lib::ob_sort(sorted_ls_list.begin(), sorted_ls_list.end());
     for (int64_t i = 0; OB_SUCC(ret) && i < sorted_ls_list.count(); ++i) {
       const share::ObLSID &ls_id = sorted_ls_list.at(i);
       if (OB_FAIL(lock_ls_member_list(tenant_id, ls_id, task_id, member_list, status, group_id, sql_proxy))) {

@@ -441,8 +441,8 @@ int ObInnerSQLConnection::init_result(ObInnerSQLResult &res,
   result_set.get_exec_context().set_sql_ctx(&res.sql_ctx());
   res.sql_ctx().retry_times_ = retry_cnt;
   res.sql_ctx().session_info_ = &get_session();
-  res.sql_ctx().disable_privilege_check_ = OB_SYS_TENANT_ID == res.sql_ctx().session_info_->get_priv_tenant_id()
-                                            ? PRIV_CHECK_FLAG_DISABLE : PRIV_CHECK_FLAG_DISABLE;
+  res.sql_ctx().disable_privilege_check_ = is_check_priv()
+                                            ? PRIV_CHECK_FLAG_NORMAL : PRIV_CHECK_FLAG_DISABLE;
   res.sql_ctx().secondary_namespace_ = secondary_namespace;
   res.sql_ctx().is_prepare_protocol_ = is_prepare_protocol;
   res.sql_ctx().is_prepare_stage_ = is_prepare_stage;
@@ -639,12 +639,10 @@ int ObInnerSQLConnection::process_audit_record(sql::ObResultSet &result_set,
         if (!(sql_ctx.self_add_plan_) && sql_ctx.plan_cache_hit_) {
           plan->update_plan_stat(audit_record,
                                 false, // false mean not first update plan stat
-                                result_set.get_exec_context().get_is_evolution(),
                                 table_row_count_list);
         } else if (sql_ctx.self_add_plan_ && !sql_ctx.plan_cache_hit_) {
           plan->update_plan_stat(audit_record,
                                 true,
-                                result_set.get_exec_context().get_is_evolution(),
                                 table_row_count_list);
         }
       }
@@ -926,7 +924,9 @@ int ObInnerSQLConnection::retry_while_no_tenant_resource(const int64_t cluster_i
   const int64_t max_retry_us = 128 * 1000;
   int64_t retry_us = 2 * 1000;
   bool need_retry = is_in_trans() ? false : true;
-
+  if (get_session().get_ddl_info().is_ddl()) {  // ddl retry in ddl scheduler layer
+    need_retry = false;
+  }
   // timeout related
   int64_t abs_timeout_us = 0;
   int64_t start_time = ObTimeUtility::current_time();
@@ -1126,8 +1126,13 @@ int ObInnerSQLConnection::register_multi_data_source(const uint64_t &tenant_id,
         } else {
           MTL_SWITCH(tenant_id)
           {
-            if (OB_FAIL(MTL(transaction::ObTransService *)
-                            ->register_mds_into_tx(*tx_desc, ls_id, type, buf, buf_len, 0, register_flag))) {
+            if (OB_FAIL(MTL(transaction::ObTransService *)->register_mds_into_tx(*tx_desc,
+                                                                                 ls_id,
+                                                                                 type,
+                                                                                 buf,
+                                                                                 buf_len,
+                                                                                 0,
+                                                                                 register_flag))) {
               LOG_WARN("regiser multi data source failed", K(ret), K(tenant_id), K(type));
             } else if (OB_FAIL(res.close())) {
               LOG_WARN("close result set failed", K(ret), K(tenant_id));

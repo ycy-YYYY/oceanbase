@@ -32,6 +32,7 @@ extern void obsql_mysql_parser_fatal_error(int32_t errcoyyde, yyscan_t yyscanner
 %x in_c_comment
 %x sq
 %x hint_sq
+%x hint_dq
 %x dq
 %x bt
 %x hint_bt
@@ -138,6 +139,21 @@ NULL {
   CHECK_MYSQL_COMMENT(p, yylval->node);
   COPY_STRING(p->input_sql_ + yylloc->first_column - 1, yyleng, yylval->node->raw_text_);
   yylval->node->text_len_ = yyleng;
+  if (IS_FAST_PARAMETERIZE) {
+    STORE_PARAM_NODE();
+  } else {
+    yylval->node->sql_str_off_ = yylloc->first_column - 1;
+    return NULLX;
+  }
+}
+
+\\N {
+  check_value(yylval);
+  ParseResult *p = (ParseResult *)yyextra;
+  malloc_new_node(yylval->node, p->malloc_pool_, T_NULL, 0);
+  COPY_STRING(p->input_sql_ + yylloc->first_column - 1, yyleng, yylval->node->raw_text_);
+  yylval->node->text_len_ = yyleng;
+  yylval->node->value_ = 1;
   if (IS_FAST_PARAMETERIZE) {
     STORE_PARAM_NODE();
   } else {
@@ -1095,6 +1111,8 @@ Timestamp{whitespace}?\"[^\"]*\" {
 <hint>NO_SEMI_TO_INNER { return NO_SEMI_TO_INNER; }
 <hint>COALESCE_SQ  { return COALESCE_SQ; }
 <hint>NO_COALESCE_SQ  { return NO_COALESCE_SQ; }
+<hint>WO_PULLUP { return WO_PULLUP; }
+<hint>WITH_PULLUP { return WITH_PULLUP; }
 <hint>GBY_PUSHDOWN { return GBY_PUSHDOWN; }
 <hint>NO_GBY_PUSHDOWN { return NO_GBY_PUSHDOWN; }
 <hint>USE_HASH_DISTINCT { return USE_HASH_DISTINCT; }
@@ -1144,6 +1162,8 @@ Timestamp{whitespace}?\"[^\"]*\" {
 <hint>NO_AGGR_FIRST_UNNEST { return NO_AGGR_FIRST_UNNEST; }
 <hint>JOIN_FIRST_UNNEST { return JOIN_FIRST_UNNEST; }
 <hint>NO_JOIN_FIRST_UNNEST { return NO_JOIN_FIRST_UNNEST; }
+<hint>COALESCE_AGGR { return COALESCE_AGGR; }
+<hint>NO_COALESCE_AGGR { return NO_COALESCE_AGGR; }
 <hint>OPT_PARAM { return OPT_PARAM; }
 <hint>OB_DDL_SCHEMA_VERSION { return OB_DDL_SCHEMA_VERSION; }
 <hint>DYNAMIC_SAMPLING { return DYNAMIC_SAMPLING; }
@@ -1289,6 +1309,70 @@ Timestamp{whitespace}?\"[^\"]*\" {
 
 <hint_bt><<EOF>>  {
   yyerror(yylloc, yyextra, "unterminated quoted string in hint\n");
+  return PARSER_SYNTAX_ERROR;
+}
+
+<hint>{dquote} {
+  ParseResult *p = (ParseResult *)yyextra;
+  if (!p->is_ignore_token_) {
+    BEGIN(hint_dq);
+    if (IS_FAST_PARAMETERIZE) {
+      COPY_WRITE();
+    } else {
+      check_value(yylval);
+      ParseResult *p = (ParseResult *)yyextra;
+      p->start_col_ = yylloc->first_column;
+      char **tmp_literal = &p->tmp_literal_;
+      if (NULL == *tmp_literal)
+      {
+        *tmp_literal = (char *)parse_malloc(p->input_sql_len_ + 1, p->malloc_pool_);
+        check_malloc(*tmp_literal);
+      }
+      malloc_new_node(yylval->node, p->malloc_pool_, T_IDENT, 0);
+      yylval->node->str_len_ = 0;
+    }
+  }
+}
+
+<hint_dq>{dqcontent} {
+  if (IS_FAST_PARAMETERIZE) {
+    COPY_WRITE();
+  } else {
+    check_value(yylval);
+    memmove(((ParseResult *)yyextra)->tmp_literal_ + yylval->node->str_len_, yytext, yyleng);
+    yylval->node->str_len_ += yyleng;
+  }
+}
+
+<hint_dq>{dqend} {
+  BEGIN(hint);
+  if (IS_FAST_PARAMETERIZE) {
+    COPY_WRITE();
+  } else {
+    ParseResult *p = (ParseResult *)yyextra;
+    check_value(yylval);
+    yylloc->first_column = p->start_col_;
+    char *tmp_literal = p->tmp_literal_;
+    tmp_literal[yylval->node->str_len_] = '\0';
+    yylval->node->raw_text_ = parse_strndup(tmp_literal, yylval->node->str_len_ + 1, p->malloc_pool_);
+    check_malloc(yylval->node->raw_text_);
+    char *dup_value = NULL;
+    char *well_formed_str = replace_invalid_character(p->charset_info_, p->charset_info_oracle_db_, tmp_literal, &(yylval->node->str_len_), p->malloc_pool_, &(p->extra_errno_));
+    check_identifier_convert_result(p->extra_errno_);
+    if (p->is_not_utf8_connection_) {
+      dup_value = parse_str_convert_utf8(p->charset_info_, well_formed_str, p->malloc_pool_, &(yylval->node->str_len_), &(p->extra_errno_));
+      check_identifier_convert_result(p->extra_errno_);
+    } else {
+      dup_value = parse_strndup(well_formed_str, yylval->node->str_len_ + 1, p->malloc_pool_);
+    }
+    check_malloc(dup_value);
+    yylval->node->str_value_ = dup_value;
+    return NAME_OB;
+  }
+}
+
+<hint_dq><<EOF>>  {
+  yyerror(yylloc, yyextra, "unterminated doublequoted string\n");
   return PARSER_SYNTAX_ERROR;
 }
 

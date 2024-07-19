@@ -75,7 +75,7 @@ int ObTxDataMemtableMgr::init(const common::ObTabletID &tablet_id,
   } else if (OB_UNLIKELY(!tablet_id.is_valid()) || OB_ISNULL(freezer) || OB_ISNULL(t3m)) {
     ret = OB_INVALID_ARGUMENT;
     STORAGE_LOG(WARN, "invalid arguments", K(ret), K(tablet_id), KP(freezer), KP(t3m));
-  } else if (OB_FAIL(MTL(ObLSService*)->get_ls(ls_id, ls_handle, ObLSGetMod::STORAGE_MOD))){
+  } else if (OB_FAIL(MTL(ObLSService*)->get_ls(ls_id, ls_handle, ObLSGetMod::TRANS_MOD))){
     STORAGE_LOG(WARN, "Get ls from ls service failed.", KR(ret));
   } else if (OB_ISNULL(tx_table = ls_handle.get_ls()->get_tx_table())) {
     ret = OB_ERR_UNEXPECTED;
@@ -215,18 +215,17 @@ int ObTxDataMemtableMgr::freeze()
   if (IS_NOT_INIT) {
     ret = OB_ERR_UNEXPECTED;
     STORAGE_LOG(WARN, "tx data memtable container is not inited.", KR(ret));
-  } else if (get_memtable_count_() <= 0) {
-    ret = OB_ERR_UNEXPECTED;
-    STORAGE_LOG(ERROR, "there is no tx data memtable.", KR(ret), K(get_memtable_count_()));
   } else {
     MemMgrWLockGuard lock_guard(lock_);
-    if (OB_FAIL(freeze_())) {
+    if (get_memtable_count_() <= 0) {
+      ret = OB_ENTRY_NOT_EXIST;
+      STORAGE_LOG(WARN, "Empty tx data memtable mgr. This ls may offline", KR(ret), K(memtable_head_), K(memtable_tail_));
+    } else if (OB_FAIL(freeze_())) {
       STORAGE_LOG(WARN, "freeze tx data memtable fail.", KR(ret));
     } else {
       // freeze success
     }
   }
-
   return ret;
 }
 

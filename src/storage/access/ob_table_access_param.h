@@ -97,6 +97,10 @@ public:
   {
     return (read_info_ != nullptr) ? &read_info_->get_columns_desc() : nullptr;
   }
+  OB_INLINE const ObColDescIArray *get_rowkey_col_descs() const
+  {
+    return (rowkey_read_info_ != nullptr) ? &rowkey_read_info_->get_columns_desc() : nullptr;
+  }
   OB_INLINE bool read_with_same_schema() const
   {
     return is_same_schema_column_;
@@ -145,6 +149,8 @@ public:
   { pd_storage_flag_.set_use_stmt_iter_pool(true);}
   OB_INLINE bool has_lob_column_out() const
   { return has_lob_column_out_; }
+  OB_INLINE bool is_tablet_spliting() const
+  { return is_tablet_spliting_; }
   bool need_trans_info() const;
   OB_INLINE bool is_use_column_store() const
   { return !(get_read_info()->has_all_column_group()) || pd_storage_flag_.is_use_column_store(); }
@@ -171,6 +177,12 @@ public:
         !pd_storage_flag_.is_group_by_pushdown() &&
         !pd_storage_flag_.is_aggregate_pushdown();
   }
+  OB_INLINE int64_t get_io_read_batch_size() const
+  { return table_scan_opt_.io_read_batch_size_; }
+  OB_INLINE int64_t get_io_read_gap_size() const
+  { return table_scan_opt_.io_read_gap_size_; }
+  OB_INLINE int64_t get_storage_rowsets_size() const
+  { return table_scan_opt_.storage_rowsets_size_; }
   DECLARE_TO_STRING;
 public:
   uint64_t table_id_;
@@ -205,9 +217,15 @@ public:
   bool has_lob_column_out_;
   bool is_for_foreign_check_;
   bool limit_prefetch_;
+  bool is_mds_query_;
   bool is_non_unique_local_index_;
   int64_t ss_rowkey_prefix_cnt_;
   sql::ObStoragePushdownFlag pd_storage_flag_;
+  ObTableScanOption table_scan_opt_;
+  uint64_t auto_split_filter_type_;
+  const sql::ObExpr *auto_split_filter_;
+  sql::ExprFixedArray *auto_split_params_;
+  bool is_tablet_spliting_;
 };
 
 struct ObTableAccessParam
@@ -218,7 +236,10 @@ public:
   void reset();
   OB_INLINE bool is_valid() const { return is_inited_ && iter_param_.is_valid(); }
   // used for query
-  int init(const ObTableScanParam &scan_param, const ObTabletHandle &tablet_handle);
+  int init(
+      const ObTableScanParam &scan_param,
+      const ObTabletHandle *tablet_handle,
+      const ObITableReadInfo *rowkey_read_info = nullptr);
   // used for merge
   int init_merge_param(const uint64_t table_id,
                        const common::ObTabletID &tablet_id,

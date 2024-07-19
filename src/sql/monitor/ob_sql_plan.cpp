@@ -99,7 +99,7 @@ int ObSqlPlan::store_sql_plan(ObLogPlan* log_plan, ObPhysicalPlan* phy_plan)
     LOG_WARN("failed to get sql plan infos", K(ret));
   } else if (OB_FAIL(compress_plan.compress_logical_plan(allocator_, sql_plan_infos))) {
     LOG_WARN("failed to compress logical plan", K(ret));
-  } else if (phy_plan->set_logical_plan(compress_plan)) {
+  } else if (OB_FAIL(phy_plan->set_logical_plan(compress_plan))) {
     LOG_WARN("failed to set logical plan", K(ret));
   }
   if (OB_FAIL(ret)) {
@@ -132,6 +132,7 @@ int ObSqlPlan::store_sql_plan_for_explain(ObExecContext *ctx,
     LOG_WARN("failed to get sql plan infos", K(ret));
   }
   allocate_mem_failed |= OB_ALLOCATE_MEMORY_FAILED == ret;
+  // overwrite ret
   if (OB_FAIL(format_sql_plan(sql_plan_infos,
                               type,
                               option,
@@ -140,6 +141,7 @@ int ObSqlPlan::store_sql_plan_for_explain(ObExecContext *ctx,
   }
   allocate_mem_failed |= OB_ALLOCATE_MEMORY_FAILED == ret;
   if (OB_FAIL(plan_text_to_strings(out_plan_text, plan_strs))) {
+    // overwrite ret
     LOG_WARN("failed to convert plan text to strings", K(ret));
   } else if (OB_FAIL(inner_store_sql_plan_for_explain(ctx,
                                                       plan_table,
@@ -477,6 +479,9 @@ int ObSqlPlan::inner_store_sql_plan_for_explain(ObExecContext *ctx,
       if (OB_SUCCESS == ret) {
         ret = end_ret;
       }
+    }
+    if (OB_NOT_NULL(saved_session)) {
+      saved_session->reset();
     }
   }
   return ret;
@@ -2548,10 +2553,18 @@ const char* ObSqlPlan::get_tree_line(int type)
   int ret = OB_SUCCESS;
   ObCharsetType client_character = ObCharsetType::CHARSET_INVALID;
   ObCharsetType connection_character = ObCharsetType::CHARSET_INVALID;
+  ObCharsetType db_character = ObCharsetType::CHARSET_INVALID;
+  ObCollationType coll_type;
   if (NULL == session_ ||
       OB_FAIL(session_->get_character_set_client(client_character)) ||
-      OB_FAIL(session_->get_character_set_connection(connection_character))) {
+      OB_FAIL(session_->get_character_set_connection(connection_character)) ||
+      OB_FAIL(session_->get_character_set_results(db_character))) {
     return tree_line[type%3];
+  } else if (OB_FALSE_IT(coll_type=session_->get_nls_collation())) {
+  } else if (OB_FALSE_IT(db_character=ObCharset::charset_type_by_coll(coll_type))) {
+  } else if (!(ObCharsetType::CHARSET_BINARY == db_character ||
+            ObCharsetType::CHARSET_UTF8MB4 == db_character)) {
+    return tree_line[3+type%3];
   } else if ((ObCharsetType::CHARSET_BINARY == client_character ||
             ObCharsetType::CHARSET_UTF8MB4 == client_character) &&
             (ObCharsetType::CHARSET_BINARY == connection_character ||

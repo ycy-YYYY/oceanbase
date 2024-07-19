@@ -23,6 +23,9 @@
 #include "share/stat/ob_stat_item.h"
 #include "share/schema/ob_part_mgr_util.h"
 #include "sql/engine/expr/ob_expr_lob_utils.h"
+#include "sql/ob_result_set.h"
+#include "sql/optimizer/ob_opt_selectivity.h"
+#include "share/stat/ob_dbms_stats_preferences.h"
 
 #ifdef OB_BUILD_ORACLE_PL
 #include "pl/sys_package/ob_json_pl_utils.h"
@@ -660,7 +663,10 @@ int ObDbmsStatsUtils::merge_col_stats(const ObTableStatParam &param,
       LOG_WARN("get unexpected null pointer", K(ret));
     } else if (is_part_id_valid(param, col_stat->get_partition_id())) {
       col_stat->set_num_distinct(ObGlobalNdvEval::get_ndv_from_llc(col_stat->get_llc_bitmap()));
-      if (OB_FAIL(dst_col_stats.push_back(col_stat))) {
+      if (OB_UNLIKELY(col_stat->get_num_distinct() < 0)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("get unexpected error", KPC(col_stat), K(old_col_stats), K(ret));
+      } else if (OB_FAIL(dst_col_stats.push_back(col_stat))) {
         LOG_WARN("fail to push back table stats", K(ret));
       }
     }
@@ -1074,8 +1080,10 @@ int ObDbmsStatsUtils::prepare_gather_stat_param(const ObTableStatParam &param,
   gather_param.stat_level_ = stat_level;
   if (stat_level == SUBPARTITION_LEVEL) {
     gather_param.need_histogram_ = param.subpart_stat_param_.gather_histogram_;
+    gather_param.is_specify_partition_ = param.subpart_infos_.count() != param.all_subpart_infos_.count();
   } else if (stat_level == PARTITION_LEVEL) {
     gather_param.need_histogram_ = param.part_stat_param_.gather_histogram_;
+    gather_param.is_specify_partition_ = param.part_infos_.count() != param.all_part_infos_.count();
   } else if (stat_level == TABLE_LEVEL) {
     gather_param.need_histogram_ = param.global_stat_param_.gather_histogram_;
   }
@@ -1274,6 +1282,124 @@ int ObDbmsStatsUtils::check_all_cols_range_skew(const ObIArray<ObColumnStatParam
   return ret;
 }
 
+int ObDbmsStatsUtils::implicit_commit_before_gather_stats(sql::ObExecContext &ctx)
+{
+  int ret = OB_SUCCESS;
+  uint64_t optimizer_features_enable_version = 0;
+  if (OB_ISNULL(ctx.get_my_session())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected null", K(ret), K(ctx.get_my_session()));
+  } else if (OB_FAIL(ctx.get_my_session()->get_optimizer_features_enable_version(optimizer_features_enable_version))) {
+    LOG_WARN("failed to get_optimizer_features_enable_version", K(ret));
+  } else if (optimizer_features_enable_version < COMPAT_VERSION_4_2_4 ||
+             (optimizer_features_enable_version >= COMPAT_VERSION_4_3_0 &&
+              optimizer_features_enable_version < COMPAT_VERSION_4_3_2)) {
+    //do nothing
+  } else if (OB_FAIL(ObResultSet::implicit_commit_before_cmd_execute(*ctx.get_my_session(), ctx, stmt::T_ANALYZE))) {
+    LOG_WARN("failed to implicit commit before cmd execute", K(ret));
+  } else {/*do nothing*/}
+  return ret;
+}
+
+int ObDbmsStatsUtils::scale_col_stats(const uint64_t tenant_id,
+                                      const common::ObIArray<ObOptTableStat*> &tab_stats,
+                                      common::ObIArray<ObOptColumnStat*> &col_stats)
+{
+  int ret = OB_SUCCESS;
+  TabStatIndMap table_stats;
+  ObOptTableStat* table_stat = NULL;
+  ObOptColumnStat* col_stat = NULL;
+  if (OB_FAIL(table_stats.create(512,
+                                 "TabStatBkt",
+                                 "TabStatNode",
+                                 tenant_id))) {
+    LOG_WARN("fail to create table stats map", KR(ret));
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < tab_stats.count(); ++i) {
+    if (OB_ISNULL(table_stat = tab_stats.at(i))) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected table stat is null", KR(ret));
+    } else {
+      ObOptTableStat::Key key(tenant_id,
+                              table_stat->get_table_id(),
+                              table_stat->get_partition_id());
+      if (OB_FAIL(table_stats.set_refactored(key, table_stat))) {
+        LOG_WARN("fail to set table stat", KR(ret), K(key), KPC(table_stat));
+        if (OB_HASH_EXIST == ret) {
+          ret = OB_ENTRY_EXIST;
+        }
+      }
+    }
+  }
+  if (OB_SUCC(ret) && OB_FAIL(scale_col_stats(tenant_id,
+                                              table_stats,
+                                              col_stats))) {
+    LOG_WARN("failed to scale col stats", K(ret));
+  }
+  return ret;
+}
+
+int ObDbmsStatsUtils::scale_col_stats(const uint64_t tenant_id,
+                                      const TabStatIndMap &table_stats,
+                                      common::ObIArray<ObOptColumnStat*> &col_stats)
+{
+  int ret = OB_SUCCESS;
+  ObOptTableStat* table_stat = NULL;
+  ObOptColumnStat* col_stat = NULL;
+  for (int64_t i = 0; OB_SUCC(ret) && i < col_stats.count(); ++i) {
+    if (OB_ISNULL(col_stat = col_stats.at(i))) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("get unexpected error", K(ret), K(col_stat));
+    } else {
+      ObOptTableStat::Key key(tenant_id,
+                              col_stat->get_table_id(),
+                              col_stat->get_partition_id());
+      if (OB_FAIL(table_stats.get_refactored(key, table_stat))) {
+        if (OB_UNLIKELY(OB_HASH_NOT_EXIST != ret)) {
+          LOG_WARN("failed to find in hashmap", K(ret));
+        } else {
+          ret = OB_SUCCESS;
+        }
+      } else if (table_stat->get_sample_size() < table_stat->get_row_count() &&
+                 table_stat->get_row_count() > 0) {
+        double sample_value = static_cast<double>(table_stat->get_sample_size()) /
+                              static_cast<double>(table_stat->get_row_count());
+        if (sample_value >= 0.00000001 && sample_value < 1.0) {
+          double num_distinct = ObOptSelectivity::scale_distinct(table_stat->get_row_count(),
+                                                                 table_stat->get_sample_size(),
+                                                                 col_stat->get_num_distinct());
+          int64_t num_null = static_cast<int64_t>(col_stat->get_num_null() / sample_value);
+          num_null = num_null > table_stat->get_row_count() ? table_stat->get_row_count() : num_null;
+          col_stat->set_num_not_null(table_stat->get_row_count() - num_null);
+          col_stat->set_num_null(num_null);
+          col_stat->set_num_distinct(num_distinct);
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObDbmsStatsUtils::get_sys_online_estimate_percent(sql::ObExecContext &ctx,
+                                                    double &percent)
+{
+  int ret = OB_SUCCESS;
+  ObTableStatParam stat_param;
+  ObArenaAllocator tmp_alloc("ObDbmsStatsUtil", OB_MALLOC_NORMAL_BLOCK_SIZE, MTL_ID());
+  ObSEArray<ObStatPrefs*, 4> stat_prefs;
+  ObOnlineEstimatePercentPrefs *tmp_pref = NULL;
+  stat_param.allocator_ = &tmp_alloc;
+  if (OB_FAIL(new_stat_prefs(*stat_param.allocator_, ctx.get_my_session(), ObString(), tmp_pref))) {
+    LOG_WARN("failed to new stat prefs", K(ret));
+  } else if (OB_FAIL(stat_prefs.push_back(tmp_pref))) {
+    LOG_WARN("failed to push back", K(ret));
+  } else if (OB_FAIL(ObDbmsStatsPreferences::get_sys_default_stat_options(ctx, stat_prefs, stat_param))) {
+    LOG_WARN("failed to get sys default stat options", K(ret));
+  } else {
+    percent = stat_param.online_sample_percent_;
+  }
+  return ret;
+}
 
 }
 }

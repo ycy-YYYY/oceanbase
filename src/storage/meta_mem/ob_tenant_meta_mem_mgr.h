@@ -122,7 +122,7 @@ class ObTenantMetaMemMgr final
 {
 public:
   static const int64_t THE_SIZE_OF_HEADERS = sizeof(ObFIFOAllocator::NormalPageHeader) + sizeof(ObMetaObjBufferNode);
-  static const int64_t NORMAL_TABLET_POOL_SIZE = (ABLOCK_SIZE - ABLOCK_HEADER_SIZE) / 2 - AOBJECT_META_SIZE - THE_SIZE_OF_HEADERS; // 3952B
+  static const int64_t NORMAL_TABLET_POOL_SIZE = (ABLOCK_SIZE - ABLOCK_HEADER_SIZE) / 2 - AOBJECT_META_SIZE - AOBJECT_EXTRA_INFO_SIZE - THE_SIZE_OF_HEADERS; // 3824B
   static const int64_t LARGE_TABLET_POOL_SIZE = 64 * 1024L - THE_SIZE_OF_HEADERS; // 65,480B
 
   static const int64_t MIN_MODE_MAX_TABLET_CNT_IN_OBJ_POOL = 10000;
@@ -223,10 +223,6 @@ public:
       const ObTabletMapKey &key,
       ObLSHandle &ls_handle,
       ObTabletHandle &tablet_handle);
-  int acquire_msd_tablet(
-      const WashTabletPriority &priority,
-      const ObTabletMapKey &key,
-      ObTabletHandle &tablet_handle);
   int create_tmp_tablet(
       const WashTabletPriority &priority,
       const ObTabletMapKey &key,
@@ -252,6 +248,9 @@ public:
     const ObTabletMapKey &key,
     ObITabletFilterOp &op,
     ObTabletHandle &handle);
+  int build_tablet_handle_for_mds_scan(
+      ObTablet *tablet,
+      ObTabletHandle &tablet_handle);
 
   // NOTE: This interface return tablet handle, which couldn't be used by compare_and_swap_tablet.
   int get_tablet_with_allocator(

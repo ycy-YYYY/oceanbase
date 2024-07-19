@@ -5390,7 +5390,8 @@ ObBasePartition::ObBasePartition()
     partition_type_(PARTITION_TYPE_NORMAL),
     low_bound_val_(),
     tablet_id_(),
-    external_location_()
+    external_location_(),
+    split_source_tablet_id_()
 { }
 
 ObBasePartition::ObBasePartition(common::ObIAllocator *allocator)
@@ -5411,7 +5412,8 @@ ObBasePartition::ObBasePartition(common::ObIAllocator *allocator)
     partition_type_(PARTITION_TYPE_NORMAL),
     low_bound_val_(),
     tablet_id_(),
-    external_location_()
+    external_location_(),
+    split_source_tablet_id_()
 { }
 
 void ObBasePartition::reset()
@@ -5420,6 +5422,7 @@ void ObBasePartition::reset()
   table_id_ = OB_INVALID_ID;
   part_id_ = -1;
   tablet_id_.reset();
+  split_source_tablet_id_.reset();
   schema_version_ = OB_INVALID_VERSION;
   status_ = PARTITION_STATUS_ACTIVE;
   projector_ = NULL;
@@ -5445,6 +5448,7 @@ int ObBasePartition::assign(const ObBasePartition & src_part)
     tenant_id_ = src_part.tenant_id_;
     table_id_ = src_part.table_id_;
     tablet_id_ = src_part.tablet_id_;
+    split_source_tablet_id_ = src_part.split_source_tablet_id_;
     part_id_ = src_part.part_id_;
     schema_version_ = src_part.schema_version_;
     status_ = src_part.status_;
@@ -5595,7 +5599,7 @@ int ObBasePartition::set_list_vector_values_with_hex_str(
       // Sort each point in the partition list according to the rules
       if (OB_SUCC(ret)) {
         InnerPartListVectorCmp part_list_vector_op;
-        std::sort(list_row_values_.begin(), list_row_values_.end(), part_list_vector_op);
+        lib::ob_sort(list_row_values_.begin(), list_row_values_.end(), part_list_vector_op);
         if (OB_FAIL(part_list_vector_op.get_ret())) {
           LOG_WARN("fail to sort list row values", K(ret));
         }
@@ -5727,7 +5731,8 @@ OB_DEF_SERIALIZE(ObBasePartition)
               partition_type_,
               low_bound_val_,
               tablet_id_,
-              external_location_);
+              external_location_,
+              split_source_tablet_id_);
   return ret;
 }
 
@@ -5810,7 +5815,7 @@ OB_DEF_DESERIALIZE(ObBasePartition)
     LOG_WARN("fail to deserialze low_bound_val", KR(ret));
   }
   ObString external_location;
-  LST_DO_CODE(OB_UNIS_DECODE, tablet_id_, external_location);
+  LST_DO_CODE(OB_UNIS_DECODE, tablet_id_, external_location, split_source_tablet_id_);
   if (OB_SUCC(ret) && OB_FAIL(set_low_bound_val(low_bound_val))) {
     LOG_WARN("Fail to deep copy low_bound_val", K(ret), K(low_bound_val));
   } else if (OB_FAIL(deep_copy_str(external_location, external_location_))) {
@@ -5825,7 +5830,7 @@ OB_DEF_SERIALIZE_SIZE(ObBasePartition)
   LST_DO_CODE(OB_UNIS_ADD_LEN, tenant_id_, table_id_, part_id_,
       schema_version_, name_, high_bound_val_, status_,
       part_idx_, is_empty_partition_name_,
-      tablespace_id_, partition_type_, low_bound_val_, tablet_id_, external_location_);
+      tablespace_id_, partition_type_, low_bound_val_, tablet_id_, external_location_, split_source_tablet_id_);
   len += serialization::encoded_length_vi64(list_row_values_.count());
   for (int64_t i = 0; i < list_row_values_.count(); i ++) {
     len += list_row_values_.at(i).get_serialize_size();
@@ -7540,10 +7545,8 @@ int ObPartitionUtils::calc_hash_part_idx(const uint64_t val,
         partition_idx += powN;
       }
     }
-    LOG_TRACE("get hash part idx", K(lbt()), K(ret), K(val), K(part_num), K(N), K(powN), K(partition_idx));
   } else {
     partition_idx = val % part_num;
-    LOG_TRACE("get hash part idx", K(lbt()), K(ret), K(val), K(part_num), K(partition_idx));
   }
   return ret;
 }
@@ -8365,6 +8368,15 @@ DEF_TO_STRING(ObPrintPrivSet)
   if ((priv_set_ & OB_PRIV_CREATE_ROUTINE) && OB_SUCCESS == ret) {
     ret = BUF_PRINTF(" CREATE ROUTINE,");
   }
+  if ((priv_set_ & OB_PRIV_CREATE_TABLESPACE) && OB_SUCCESS == ret) {
+    ret = BUF_PRINTF(" CREATE TABLESPACE,");
+  }
+  if ((priv_set_ & OB_PRIV_SHUTDOWN) && OB_SUCCESS == ret) {
+    ret = BUF_PRINTF(" SHUTDOWN,");
+  }
+  if ((priv_set_ & OB_PRIV_RELOAD) && OB_SUCCESS == ret) {
+    ret = BUF_PRINTF(" RELOAD,");
+  }
   if (OB_SUCCESS == ret && pos > 1) {
     pos--; //Delete last ','
   }
@@ -8487,6 +8499,42 @@ int ObProxyInfo::assign(const ObProxyInfo &other)
         }
       }
     }
+  }
+  return ret;
+}
+
+int ObProxyInfo::add_role_id(const uint64_t role_id)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(allocator_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected error", K(ret));
+  }else if (0 == role_id_capacity_) {
+    if (NULL == (role_ids_ = static_cast<uint64_t*>(
+        allocator_->alloc(sizeof(uint64_t) * DEFAULT_ARRAY_CAPACITY)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("Fail to allocate memory for array_.", K(ret));
+    } else {
+      role_id_capacity_ = DEFAULT_ARRAY_CAPACITY;
+      MEMSET(role_ids_, 0, sizeof(uint64_t*) * DEFAULT_ARRAY_CAPACITY);
+    }
+  } else if (role_id_cnt_ >= role_id_capacity_) {
+    int64_t tmp_size = 2 * role_id_capacity_;
+    uint64_t *tmp = NULL;
+    if (NULL == (tmp = static_cast<uint64_t*>(
+        allocator_->alloc(sizeof(uint64_t) * tmp_size)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("Fail to allocate memory for array_, ", K(tmp_size), K(ret));
+    } else {
+      MEMCPY(tmp, role_ids_, sizeof(uint64_t) * role_id_capacity_);
+      free(role_ids_);
+      role_ids_ = tmp;
+      role_id_capacity_ = tmp_size;
+    }
+  }
+
+  if (OB_SUCC(ret)) {
+    role_ids_[role_id_cnt_++] = role_id;
   }
   return ret;
 }
@@ -8739,6 +8787,101 @@ bool ObUserInfo::is_valid() const
   return ObSchema::is_valid() && ObPriv::is_valid();
 }
 
+int ObUserInfo::add_proxy_info_(ObProxyInfo **&arr, uint64_t &capacity, uint64_t &cnt, const ObProxyInfo &proxy_info)
+{
+  int ret = OB_SUCCESS;
+  if (0 == capacity) {
+    if (NULL == (arr = static_cast<ObProxyInfo**>(
+        alloc(sizeof(ObProxyInfo*) * DEFAULT_ARRAY_CAPACITY)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_ERROR("Fail to allocate memory for array_.", KR(ret));
+    } else {
+      capacity = DEFAULT_ARRAY_CAPACITY;
+      MEMSET(arr, 0, sizeof(ObProxyInfo*) * DEFAULT_ARRAY_CAPACITY);
+    }
+  } else if (cnt >= capacity) {
+    int64_t tmp_size = 2 * capacity;
+    ObProxyInfo **tmp = NULL;
+    if (NULL == (tmp = static_cast<ObProxyInfo**>(
+        alloc(sizeof(ObProxyInfo*) * tmp_size)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_ERROR("Fail to allocate memory for array_, ", K(tmp_size), KR(ret));
+    } else {
+      MEMCPY(tmp, arr, sizeof(ObProxyInfo*) * capacity);
+      free(arr);
+      arr = tmp;
+      capacity = tmp_size;
+    }
+  }
+
+  if (OB_SUCC(ret)) {
+    ObProxyInfo *info = OB_NEWx(ObProxyInfo, get_allocator(), get_allocator());
+    if (NULL == info) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("failed to allocate memory", K(ret), K(get_allocator()));
+    } else if (OB_FAIL(info->assign(proxy_info))) {
+      LOG_WARN("failed to assign proxy info", K(ret));
+    } else {
+      arr[cnt++] = info;
+    }
+  }
+  return ret;
+}
+
+int ObUserInfo::add_proxied_user_info(const ObProxyInfo& proxy_info)
+{
+  return add_proxy_info_(proxied_user_info_, proxied_user_info_capacity_, proxied_user_info_cnt_, proxy_info);
+}
+
+int ObUserInfo::add_proxy_user_info(const ObProxyInfo& proxy_info)
+{
+  return add_proxy_info_(proxy_user_info_, proxy_user_info_capacity_, proxy_user_info_cnt_, proxy_info);
+}
+
+const ObProxyInfo* ObUserInfo::get_proxied_user_info_by_idx(uint64_t idx) const
+{
+  const ObProxyInfo *proxy_info = NULL;
+  if (idx < 0 || idx >= proxied_user_info_cnt_) {
+    proxy_info = NULL;
+  } else {
+    proxy_info = proxied_user_info_[idx];
+  }
+  return proxy_info;
+}
+
+ObProxyInfo* ObUserInfo::get_proxied_user_info_by_idx_for_update(uint64_t idx)
+{
+  ObProxyInfo *proxy_info = NULL;
+  if (idx < 0 || idx >= proxied_user_info_cnt_) {
+    proxy_info = NULL;
+  } else {
+    proxy_info = proxied_user_info_[idx];
+  }
+  return proxy_info;
+}
+
+const ObProxyInfo* ObUserInfo::get_proxy_user_info_by_idx(uint64_t idx) const
+{
+  const ObProxyInfo *proxy_info = NULL;
+  if (idx < 0 || idx >= proxy_user_info_cnt_) {
+    proxy_info = NULL;
+  } else {
+    proxy_info = proxy_user_info_[idx];
+  }
+  return proxy_info;
+}
+
+ObProxyInfo* ObUserInfo::get_proxy_user_info_by_idx_for_update(uint64_t idx)
+{
+  ObProxyInfo *proxy_info = NULL;
+  if (idx < 0 || idx >= proxy_user_info_cnt_) {
+    proxy_info = NULL;
+  } else {
+    proxy_info = proxy_user_info_[idx];
+  }
+  return proxy_info;
+}
+
 void ObUserInfo::reset()
 {
   user_name_.reset();
@@ -8753,6 +8896,12 @@ void ObUserInfo::reset()
   grantee_id_array_.reset();
   role_id_array_.reset();
   role_id_option_array_.reset();
+  proxied_user_info_ = NULL;
+  proxied_user_info_cnt_ = 0;
+  proxied_user_info_capacity_ = 0;
+  proxy_user_info_ = NULL;
+  proxy_user_info_cnt_ = 0;
+  proxy_user_info_capacity_ = 0;
   profile_id_ = OB_INVALID_ID;
   password_last_changed_timestamp_ = OB_INVALID_TIMESTAMP;
   max_connections_ = 0;
@@ -8947,6 +9096,19 @@ OB_DEF_DESERIALIZE(ObUserInfo)
     if (OB_SUCC(ret)) {
       LST_DO_CODE(OB_UNIS_DECODE, user_flags_);
     }
+  }
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(deserialize_proxy_info_array_(proxied_user_info_, proxied_user_info_cnt_, proxied_user_info_capacity_,
+                                              buf, data_len, pos))) {
+      LOG_WARN("deserialize proxi info array failed", K(ret));
+    } else if (OB_FAIL(deserialize_proxy_info_array_(proxy_user_info_, proxy_user_info_cnt_, proxy_user_info_capacity_,
+                                              buf, data_len, pos))) {
+      LOG_WARN("deserialize proxi info array failed", K(ret));
+    }
+  }
+
+  if (OB_SUCC(ret)) {
+    LST_DO_CODE(OB_UNIS_DECODE, user_flags_);
   }
 
   return ret;
@@ -11034,6 +11196,10 @@ void ObDbLinkBaseInfo::reset()
   authpwd_.reset();
   passwordx_.reset();
   authpwdx_.reset();
+  host_name_.reset();
+  host_port_ = 0;
+  reverse_host_name_.reset();
+  reverse_host_port_ = 0;
   reverse_cluster_name_.reset();
   reverse_tenant_name_.reset();
   reverse_user_name_.reset();
@@ -11051,7 +11217,7 @@ bool ObDbLinkBaseInfo::is_valid() const
       && !dblink_name_.empty()
       && !tenant_name_.empty()
       && !user_name_.empty()
-      && host_addr_.is_valid()
+      && ((!host_name_.empty() && 0 != host_port_) || host_addr_.is_valid())
       && (!password_.empty() || !encrypted_password_.empty());
 }
 
@@ -11235,7 +11401,11 @@ OB_SERIALIZE_MEMBER(ObDbLinkInfo,
                     plain_reverse_password_,
                     reverse_host_addr_,
                     database_name_,
-                    if_not_exist_);
+                    if_not_exist_,
+                    host_name_,
+                    host_port_,
+                    reverse_host_name_,
+                    reverse_host_port_);
 
 ObDbLinkSchema::ObDbLinkSchema(const ObDbLinkSchema &other)
   : ObDbLinkBaseInfo()
@@ -11257,6 +11427,8 @@ ObDbLinkSchema &ObDbLinkSchema::operator=(const ObDbLinkSchema &other)
     driver_proto_ = other.driver_proto_;
     if_not_exist_ = other.if_not_exist_;
     flag_ = other.flag_;
+    host_port_ = other.host_port_;
+    reverse_host_port_ = other.reverse_host_port_;
     if (OB_FAIL(deep_copy_str(other.dblink_name_, dblink_name_))) {
       LOG_WARN("Fail to deep copy dblink name", K(ret));
     } else if (OB_FAIL(deep_copy_str(other.cluster_name_, cluster_name_))) {
@@ -11295,6 +11467,10 @@ ObDbLinkSchema &ObDbLinkSchema::operator=(const ObDbLinkSchema &other)
       LOG_WARN("Fail to deep copy plain_reverse_password", K(ret), K(other.plain_reverse_password_));
     } else if (OB_FAIL(deep_copy_str(other.database_name_, database_name_))) {
       LOG_WARN("Fail to deep copy database_name", K(ret), K(other.database_name_));
+    } else if (OB_FAIL(deep_copy_str(other.host_name_, host_name_))) {
+      LOG_WARN("Fail to deep copy host_name", K(ret), K(other.host_name_));
+    } else if (OB_FAIL(deep_copy_str(other.reverse_host_name_, reverse_host_name_))) {
+      LOG_WARN("Fail to deep copy host_name", K(ret), K(other.reverse_host_name_));
     }
     host_addr_ = other.host_addr_;
     reverse_host_addr_ = other.reverse_host_addr_;
@@ -11334,7 +11510,11 @@ bool ObDbLinkSchema::operator==(const ObDbLinkSchema &other) const
        && plain_reverse_password_ == other.plain_reverse_password_
        && reverse_host_addr_ == other.reverse_host_addr_
        && database_name_ == other.database_name_
-       && if_not_exist_ == other.if_not_exist_);
+       && if_not_exist_ == other.if_not_exist_
+       && host_name_ == other.host_name_
+       && host_port_ == other.host_port_
+       && reverse_host_name_ == other.host_name_
+       && reverse_host_port_ == other.host_port_);
 }
 
 ObSynonymInfo::ObSynonymInfo(common::ObIAllocator *allocator):

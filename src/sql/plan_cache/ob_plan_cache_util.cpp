@@ -73,8 +73,9 @@ int ObGetAllCacheIdOp::operator()(common::hash::HashMapPair<ObCacheObjID, ObILib
   if (NULL == key_array_ || OB_ISNULL(entry.second)) {
     ret = common::OB_NOT_INIT;
     SQL_PC_LOG(WARN, "invalid argument", K(ret));
-  } else if (entry.second->get_ns() >= ObLibCacheNameSpace::NS_CRSR
-            && entry.second->get_ns() <= ObLibCacheNameSpace::NS_PKG) {
+  } else if ((entry.second->get_ns() >= ObLibCacheNameSpace::NS_CRSR
+            && entry.second->get_ns() <= ObLibCacheNameSpace::NS_PKG)
+            ||entry.second->get_ns() == ObLibCacheNameSpace::NS_CALLSTMT) {
     if (OB_ISNULL(entry.second)) {
       // do nothing
     } else if (!entry.second->added_lc()) {
@@ -523,6 +524,7 @@ int ObConfigInfoInPC::load_influence_plan_config()
   enable_newsort_ = GCONF._enable_newsort;
   is_strict_defensive_check_ = GCONF.enable_strict_defensive_check();
   is_enable_px_fast_reclaim_ = GCONF._enable_px_fast_reclaim;
+  bloom_filter_ratio_ = GCONF._bloom_filter_ratio;
 
   // For Tenant configs
   // tenant config use tenant_config to get configs
@@ -536,6 +538,7 @@ int ObConfigInfoInPC::load_influence_plan_config()
     min_cluster_version_ = GET_MIN_CLUSTER_VERSION();
     enable_spf_batch_rescan_ = tenant_config->_enable_spf_batch_rescan;
     enable_var_assign_use_das_ = tenant_config->_enable_var_assign_use_das;
+    enable_das_keep_order_ = tenant_config->_enable_das_keep_order;
   }
 
   return ret;
@@ -580,14 +583,20 @@ int ObConfigInfoInPC::serialize_configs(char *buf, int buf_len, int64_t &pos)
                                "%lu,", min_cluster_version_))) {
     SQL_PC_LOG(WARN, "failed to databuff_printf", K(ret), K(min_cluster_version_));
   } else if (OB_FAIL(databuff_printf(buf, buf_len, pos,
-                               "%d", is_enable_px_fast_reclaim_))) {
+                               "%d,", is_enable_px_fast_reclaim_))) {
     SQL_PC_LOG(WARN, "failed to databuff_printf", K(ret), K(is_enable_px_fast_reclaim_));
   } else if (OB_FAIL(databuff_printf(buf, buf_len, pos,
-                               "%d", enable_spf_batch_rescan_))) {
+                               "%d,", enable_spf_batch_rescan_))) {
     SQL_PC_LOG(WARN, "failed to databuff_printf", K(ret), K(enable_spf_batch_rescan_));
   } else if (OB_FAIL(databuff_printf(buf, buf_len, pos,
-                               "%d", enable_var_assign_use_das_))) {
+                               "%d,", enable_var_assign_use_das_))) {
     SQL_PC_LOG(WARN, "failed to databuff_printf", K(ret), K(enable_var_assign_use_das_));
+  } else if (OB_FAIL(databuff_printf(buf, buf_len, pos,
+                               "%d,", enable_das_keep_order_))) {
+    SQL_PC_LOG(WARN, "failed to databuff_printf", K(ret), K(enable_das_keep_order_));
+  } else if (OB_FAIL(databuff_printf(buf, buf_len, pos,
+                               "%d,", bloom_filter_ratio_))) {
+    SQL_PC_LOG(WARN, "failed to databuff_printf", K(ret), K(bloom_filter_ratio_));
   } else {
     // do nothing
   }

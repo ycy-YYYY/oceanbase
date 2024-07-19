@@ -97,6 +97,15 @@ class ObPhysicalPlanCtx
 public:
   explicit ObPhysicalPlanCtx(common::ObIAllocator &allocator);
   virtual ~ObPhysicalPlanCtx();
+  void destroy()
+  {
+    total_memstore_read_row_count_ = 0;
+    total_ssstore_read_row_count_ = 0;
+    // Member variables that need to request additional memory
+    // with another allocator should call destroy here.
+    subschema_ctx_.destroy();
+    all_local_session_vars_.destroy();
+  }
   inline void set_tenant_id(uint64_t tenant_id) { tenant_id_ = tenant_id; }
   inline void set_show_seed(bool show_seed) { is_show_seed_ = show_seed; }
   inline uint64_t get_tenant_id() { return tenant_id_; }
@@ -164,6 +173,15 @@ public:
   inline common::ObConsistencyLevel get_consistency_level() const
   {
     return consistency_level_;
+  }
+  bool check_consistency_level_validation(const bool contain_inner_table)
+  {
+    bool bool_ret = true;
+    if (contain_inner_table) {
+      // Statement which contain inner tables should be strong read;
+      bool_ret = (consistency_level_ == ObConsistencyLevel::STRONG);
+    }
+    return bool_ret;
   }
   void restore_param_store(const int64_t param_count);
   // param store
@@ -234,6 +252,22 @@ public:
   inline void add_affected_rows(int64_t affected_rows)
   {
     affected_rows_ += affected_rows;
+  }
+  inline void add_total_memstore_read_row_count(int64_t v)
+  {
+    total_memstore_read_row_count_ += v;
+  }
+  inline void add_total_ssstore_read_row_count(int64_t v)
+  {
+    total_ssstore_read_row_count_ += v;
+  }
+  inline int64_t get_total_memstore_read_row_count()
+  {
+    return total_memstore_read_row_count_;
+  }
+  inline int64_t get_total_ssstore_read_row_count()
+  {
+    return total_ssstore_read_row_count_;
   }
   int64_t get_found_rows() const
   {
@@ -477,8 +511,8 @@ public:
   ObIArray<ObArrayParamGroup> &get_array_param_groups() { return array_param_groups_; }
   int set_all_local_session_vars(ObIArray<ObLocalSessionVar> &all_local_session_vars);
   int get_local_session_vars(int64_t idx, const ObSolidifiedVarsContext *&local_vars);
-  common::ObIArray<uint64_t> &get_mview_ids() {  return mview_ids_; }
-  common::ObIArray<uint64_t> &get_last_refresh_scns() {  return last_refresh_scns_; }
+  common::ObFixedArray<uint64_t, common::ObIAllocator> &get_mview_ids() {  return mview_ids_; }
+  common::ObFixedArray<uint64_t, common::ObIAllocator> &get_last_refresh_scns() {  return last_refresh_scns_; }
   uint64_t get_last_refresh_scn(uint64_t mview_id) const;
   void set_tx_id(int64_t tx_id) { tx_id_ = tx_id; }
   int64_t get_tx_id() const { return tx_id_; }
@@ -640,6 +674,8 @@ private:
   bool hint_xa_trans_stop_check_lock_; // for dblink to stop check stmt lock in xa trans
   bool main_xa_trans_branch_; // for dblink to indicate weather this sql is executed in main_xa_trans_branch
   ObSEArray<uint64_t, 8> dblink_ids_;
+  int64_t total_memstore_read_row_count_;
+  int64_t total_ssstore_read_row_count_;
 };
 
 }

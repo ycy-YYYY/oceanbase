@@ -673,6 +673,27 @@ bool vt_mapping_init()
    }
 
    {
+   int64_t idx = OB_ALL_VIRTUAL_SCHEDULER_JOB_RUN_DETAIL_V2_REAL_AGENT_ORA_TID - start_idx;
+   VTMapping &tmp_vt_mapping = vt_mappings[idx];
+   tmp_vt_mapping.mapping_tid_ = OB_ALL_SCHEDULER_JOB_RUN_DETAIL_V2_TID;
+   tmp_vt_mapping.is_real_vt_ = true;
+   }
+
+   {
+   int64_t idx = OB_ALL_VIRTUAL_SCHEDULER_JOB_RUN_DETAIL_V2_REAL_AGENT_ORA_IDX_SCHEDULER_JOB_RUN_DETAIL_V2_TIME_REAL_AGENT_TID - start_idx;
+   VTMapping &tmp_vt_mapping = vt_mappings[idx];
+   tmp_vt_mapping.mapping_tid_ = OB_ALL_SCHEDULER_JOB_RUN_DETAIL_V2_IDX_SCHEDULER_JOB_RUN_DETAIL_V2_TIME_TID;
+   tmp_vt_mapping.is_real_vt_ = true;
+   }
+
+   {
+   int64_t idx = OB_ALL_VIRTUAL_SCHEDULER_JOB_RUN_DETAIL_V2_REAL_AGENT_ORA_IDX_SCHEDULER_JOB_RUN_DETAIL_V2_JOB_CLASS_TIME_REAL_AGENT_TID - start_idx;
+   VTMapping &tmp_vt_mapping = vt_mappings[idx];
+   tmp_vt_mapping.mapping_tid_ = OB_ALL_SCHEDULER_JOB_RUN_DETAIL_V2_IDX_SCHEDULER_JOB_RUN_DETAIL_V2_JOB_CLASS_TIME_TID;
+   tmp_vt_mapping.is_real_vt_ = true;
+   }
+
+   {
    int64_t idx = OB_ALL_VIRTUAL_SEQUENCE_OBJECT_REAL_AGENT_ORA_TID - start_idx;
    VTMapping &tmp_vt_mapping = vt_mappings[idx];
    tmp_vt_mapping.mapping_tid_ = OB_ALL_SEQUENCE_OBJECT_TID;
@@ -697,6 +718,13 @@ bool vt_mapping_init()
    int64_t idx = OB_ALL_VIRTUAL_SEQUENCE_VALUE_REAL_AGENT_ORA_TID - start_idx;
    VTMapping &tmp_vt_mapping = vt_mappings[idx];
    tmp_vt_mapping.mapping_tid_ = OB_ALL_SEQUENCE_VALUE_TID;
+   tmp_vt_mapping.is_real_vt_ = true;
+   }
+
+   {
+   int64_t idx = OB_ALL_VIRTUAL_SPATIAL_REFERENCE_SYSTEMS_REAL_AGENT_ORA_TID - start_idx;
+   VTMapping &tmp_vt_mapping = vt_mappings[idx];
+   tmp_vt_mapping.mapping_tid_ = OB_ALL_SPATIAL_REFERENCE_SYSTEMS_TID;
    tmp_vt_mapping.is_real_vt_ = true;
    }
 
@@ -1250,6 +1278,27 @@ bool vt_mapping_init()
    int64_t idx = OB_ALL_VIRTUAL_TYPE_REAL_AGENT_ORA_IDX_TYPE_NAME_REAL_AGENT_TID - start_idx;
    VTMapping &tmp_vt_mapping = vt_mappings[idx];
    tmp_vt_mapping.mapping_tid_ = OB_ALL_TYPE_IDX_TYPE_NAME_TID;
+   tmp_vt_mapping.is_real_vt_ = true;
+   }
+
+   {
+   int64_t idx = OB_ALL_VIRTUAL_USER_PROXY_INFO_REAL_AGENT_ORA_TID - start_idx;
+   VTMapping &tmp_vt_mapping = vt_mappings[idx];
+   tmp_vt_mapping.mapping_tid_ = OB_ALL_USER_PROXY_INFO_TID;
+   tmp_vt_mapping.is_real_vt_ = true;
+   }
+
+   {
+   int64_t idx = OB_ALL_VIRTUAL_USER_PROXY_INFO_REAL_AGENT_ORA_IDX_USER_PROXY_INFO_PROXY_USER_ID_REAL_AGENT_TID - start_idx;
+   VTMapping &tmp_vt_mapping = vt_mappings[idx];
+   tmp_vt_mapping.mapping_tid_ = OB_ALL_USER_PROXY_INFO_IDX_USER_PROXY_INFO_PROXY_USER_ID_TID;
+   tmp_vt_mapping.is_real_vt_ = true;
+   }
+
+   {
+   int64_t idx = OB_ALL_VIRTUAL_USER_PROXY_ROLE_INFO_REAL_AGENT_ORA_TID - start_idx;
+   VTMapping &tmp_vt_mapping = vt_mappings[idx];
+   tmp_vt_mapping.mapping_tid_ = OB_ALL_USER_PROXY_ROLE_INFO_TID;
    tmp_vt_mapping.is_real_vt_ = true;
    }
 

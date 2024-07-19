@@ -128,6 +128,35 @@ int ObLSTxService::get_tx_scheduler(const transaction::ObTransID &tx_id,
   return ret;
 }
 
+int ObLSTxService::get_tx_start_session_id(const transaction::ObTransID &tx_id, uint32_t &session_id) const
+{
+  int ret = OB_SUCCESS;
+  int tmp_ret = OB_SUCCESS;
+  if (OB_ISNULL(mgr_)) {
+    ret = OB_NOT_INIT;
+    TRANS_LOG(WARN, "not init", K(ret));
+  } else {
+    ObPartTransCtx *ctx;
+    if (OB_FAIL(mgr_->get_tx_ctx_directly_from_hash_map(tx_id, ctx))) {
+      if (OB_TRANS_CTX_NOT_EXIST == ret) {
+        ret = OB_SUCCESS;
+        TRANS_LOG(INFO, "ctx not existed on this LS", K(tx_id), K(ls_id_));
+      } else {
+        TRANS_LOG(WARN, "get ctx failed", K(ret), K(tx_id), K(ls_id_));
+      }
+    } else if (OB_ISNULL(ctx)) {
+      ret = OB_BAD_NULL_ERROR;
+      TRANS_LOG(WARN, "get ctx is null", K(ret), K(tx_id), K(ls_id_));
+    } else {
+      session_id = ctx->get_session_id();
+      if (OB_TMP_FAIL(mgr_->revert_tx_ctx(ctx))) {
+        TRANS_LOG(ERROR, "fail to revert tx", K(ret), K(tmp_ret), K(tx_id), KPC(ctx));
+      }
+    }
+  }
+  return ret;
+}
+
 int ObLSTxService::revert_tx_ctx(ObTransCtx *ctx) const
 {
   int ret = OB_SUCCESS;
@@ -241,7 +270,7 @@ int ObLSTxService::revert_store_ctx(storage::ObStoreCtx &store_ctx) const
     ObLSHandle ls_handle = store_ctx.mvcc_acc_ctx_.get_tx_table_guards().src_ls_handle_;
     if (!ls_handle.is_valid()) {
       TRANS_LOG(ERROR, "src tx guard is valid when src ls handle not valid", K(store_ctx));
-      if (OB_TMP_FAIL(MTL(ObLSService*)->get_ls(src_tx_table_guard.get_ls_id(), ls_handle, ObLSGetMod::STORAGE_MOD))) {
+      if (OB_TMP_FAIL(MTL(ObLSService*)->get_ls(src_tx_table_guard.get_ls_id(), ls_handle, ObLSGetMod::TRANS_MOD))) {
         TRANS_LOG(ERROR, "get_ls failed", KR(tmp_ret), K(src_tx_table_guard));
       } else if (OB_TMP_FAIL(ls_handle.get_ls()->get_tx_svr()->end_request_for_transfer())) {
         TRANS_LOG(ERROR, "end request for transfer", KR(tmp_ret), K(src_tx_table_guard));
@@ -618,7 +647,13 @@ int ObLSTxService::flush(SCN &recycle_scn)
         has_gen_diagnose_trace = true;
         MTL(ObCheckpointDiagnoseMgr*)->acquire_trace_id(ls_id_, trace_id);
       }
-      TRANS_LOG(INFO, "common_checkpoints flush", K(trace_id), K(ls_id_), K(has_gen_diagnose_trace), K(common_checkpoints_[i]));
+      TRANS_LOG(INFO,
+                "common_checkpoints flush",
+                K(i),
+                K(trace_id),
+                K(ls_id_),
+                K(has_gen_diagnose_trace),
+                K(common_checkpoints_[i]));
       if (OB_SUCCESS != (tmp_ret = common_checkpoints_[i]->flush(recycle_scn, trace_id))) {
         TRANS_LOG(WARN, "obCommonCheckpoint flush failed", K(tmp_ret), K(common_checkpoints_[i]));
       }
@@ -653,6 +688,7 @@ int ObLSTxService::get_common_checkpoint_info(
   for (int i = 1; i < ObCommonCheckpointType::MAX_BASE_TYPE; i++) {
     ObCommonCheckpoint *common_checkpoint = common_checkpoints_[i];
     if (OB_ISNULL(common_checkpoint)) {
+      // ignore ret
       TRANS_LOG(WARN, "the common_checkpoint should not be null", K(i));
     } else {
       ObCommonCheckpointVTInfo info;
@@ -697,9 +733,11 @@ int ObLSTxService::unregister_common_checkpoint(const ObCommonCheckpointType &ty
   } else {
     WLockGuard guard(rwlock_);
     if (OB_ISNULL(common_checkpoints_[type])) {
+      // ignore ret
       STORAGE_LOG(WARN, "common_checkpoint is null, no need unregister", K(type),
                   K(common_checkpoint));
     } else if (common_checkpoints_[type] != common_checkpoint) {
+      ret = OB_ERR_UNEXPECTED;
       STORAGE_LOG(WARN, "common checkpoint not equal, not unregister", K(type),
                   K(common_checkpoints_[type]), K(common_checkpoint));
     } else {
@@ -899,6 +937,18 @@ int ObLSTxService::print_all_tx_ctx(const int64_t print_num)
   return ret;
 }
 
+int ObLSTxService::retry_apply_start_working_log()
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(mgr_)) {
+    ret = OB_NOT_INIT;
+    TRANS_LOG(WARN, "not init", KR(ret), K_(ls_id));
+  } else {
+    ret = mgr_->retry_apply_start_working_log();
+  }
+  return ret;
+}
+
 int ObLSTxService::set_max_replay_commit_version(share::SCN commit_version)
 {
   int ret = OB_SUCCESS;
@@ -924,25 +974,28 @@ int ObLSTxService::check_tx_blocked(bool &tx_blocked) const
   }
   return ret;
 }
+int ObLSTxService::filter_tx_need_transfer(ObIArray<ObTabletID> &tablet_list,
+                                           const share::SCN data_end_scn,
+                                           ObIArray<transaction::ObTransID> &move_tx_ids)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(mgr_->filter_tx_need_transfer(tablet_list, data_end_scn, move_tx_ids))) {
+    TRANS_LOG(WARN, "for each tx ctx error", KR(ret));
+  }
+  return ret;
+}
 
-int ObLSTxService::transfer_out_tx_op(int64_t except_tx_id,
-                                      const share::SCN data_end_scn,
-                                      const share::SCN op_scn,
-                                      transaction::NotifyType op_type,
-                                      bool is_replay,
-                                      share::ObLSID dest_ls_id,
-                                      int64_t transfer_epoch,
+int ObLSTxService::transfer_out_tx_op(const ObTransferOutTxParam &param,
                                       int64_t &active_tx_count,
                                       int64_t &op_tx_count)
 {
   int ret = OB_SUCCESS;
   int64_t start_time = ObTimeUtility::current_time();
-  if (OB_FAIL(mgr_->transfer_out_tx_op(except_tx_id, data_end_scn, op_scn, op_type, is_replay,
-          dest_ls_id, transfer_epoch, active_tx_count, op_tx_count))) {
+  if (OB_FAIL(mgr_->transfer_out_tx_op(param, active_tx_count, op_tx_count))) {
     TRANS_LOG(WARN, "for each tx ctx error", KR(ret));
   }
   int64_t end_time = ObTimeUtility::current_time();
-  LOG_INFO("transfer_out_tx_op", KR(ret), K(op_type), "cost", end_time - start_time, K(active_tx_count), K(op_tx_count));
+  LOG_INFO("transfer_out_tx_op", KR(ret), "cost", end_time - start_time, K(active_tx_count), K(op_tx_count));
   return ret;
 }
 
@@ -961,18 +1014,17 @@ int ObLSTxService::wait_tx_write_end(ObTimeoutCtx &timeout_ctx)
 int ObLSTxService::collect_tx_ctx(const ObLSID dest_ls_id,
                                   const SCN log_scn,
                                   const ObIArray<ObTabletID> &tablet_list,
-                                  int64_t &tx_count,
+                                  const ObIArray<ObTransID> &move_tx_ids,
                                   int64_t &collect_count,
                                   ObIArray<ObTxCtxMoveArg> &res)
 {
   int ret = OB_SUCCESS;
   int64_t start_time = ObTimeUtility::current_time();
-  if (OB_FAIL(mgr_->collect_tx_ctx(dest_ls_id, log_scn, tablet_list, tx_count, collect_count, res))) {
+  if (OB_FAIL(mgr_->collect_tx_ctx(dest_ls_id, log_scn, tablet_list, move_tx_ids, collect_count, res))) {
     TRANS_LOG(WARN, "for each tx ctx error", KR(ret));
   }
   int64_t end_time = ObTimeUtility::current_time();
-  LOG_INFO("collect_tx_ctx", KR(ret), K(ls_id_), "cost_us", end_time - start_time,
-      K(tx_count), K(collect_count));
+  LOG_INFO("collect_tx_ctx", KR(ret), K(ls_id_), "cost_us", end_time - start_time, K(collect_count));
   return ret;
 }
 

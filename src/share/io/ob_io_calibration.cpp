@@ -172,7 +172,7 @@ int ObIOAbility::add_measure_item(const ObIOBenchResult &item)
   } else if (OB_FAIL(measure_items_[static_cast<int>(item.mode_)].push_back(item))) {
     LOG_WARN("push back measure_items failed", K(ret), K(item));
   } else {
-    std::sort(measure_items_[static_cast<int>(item.mode_)].begin(), measure_items_[static_cast<int>(item.mode_)].end(),
+    lib::ob_sort(measure_items_[static_cast<int>(item.mode_)].begin(), measure_items_[static_cast<int>(item.mode_)].end(),
               sort_fn);
   }
   return ret;
@@ -405,7 +405,8 @@ void ObIOBenchRunner::run1()
     io_info.buf_ = ObIOMode::READ == load_.mode_ ? nullptr : write_buf_;
     io_info.user_data_buf_ = ObIOMode::READ == load_.mode_ ? read_buf_ : nullptr;
     io_info.flag_.set_mode(load_.mode_);
-    io_info.flag_.set_group_id(ObIOModule::CALIBRATION_IO);
+    io_info.flag_.set_resource_group_id(THIS_WORKER.get_group_id());
+    io_info.flag_.set_sys_module_id(ObIOModule::CALIBRATION_IO);
     io_info.flag_.set_wait_event(ObIOMode::READ == load_.mode_ ?
         ObWaitEventIds::DB_FILE_DATA_READ : ObWaitEventIds::DB_FILE_COMPACT_WRITE);
     io_info.flag_.set_unlimited(true);

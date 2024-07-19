@@ -715,7 +715,7 @@ bool ObLogJoin::is_scan_operator(log_op_def::ObLogOpType type)
 {
   return LOG_TABLE_SCAN == type || LOG_SUBPLAN_SCAN == type ||
          LOG_FUNCTION_TABLE == type || LOG_UNPIVOT == type ||
-         LOG_TEMP_TABLE_ACCESS == type || LOG_JSON_TABLE == type;
+         LOG_TEMP_TABLE_ACCESS == type || LOG_JSON_TABLE == type || LOG_VALUES_TABLE_ACCESS == type;
 }
 
 int ObLogJoin::append_used_join_hint(ObIArray<const ObHint*> &used_hints)
@@ -919,7 +919,7 @@ int ObLogJoin::print_join_tables_in_hint(const ObDMLStmt &stmt,
         return false;
       }
     };
-    std::sort(join_tables.begin(), join_tables.end(), cmp_func);
+    lib::ob_sort(join_tables.begin(), join_tables.end(), cmp_func);
     for (int64_t i = 0; OB_SUCC(ret) && i < join_tables.count(); ++i) {
       if (OB_ISNULL(table = join_tables.at(i))) {
         ret = OB_ERR_UNEXPECTED;
@@ -1425,6 +1425,13 @@ int ObLogJoin::check_if_disable_batch(ObLogicalOperator* root, bool &can_use_bat
     }
   } else if (log_op_def::LOG_SET == root->get_type()) {
     ObLogSet *log_set = static_cast<ObLogSet *>(root);
+    if (log_set->get_set_op() != ObSelectStmt::UNION) {
+      if (GET_MIN_CLUSTER_VERSION() < CLUSTER_VERSION_4_3_1_0) {
+        // if the min cluster version is less than 4.3.1.0, don't uses NLJ group-rescan because the old version don't adaptive group-rescan
+        can_use_batch_nlj = false;
+        LOG_TRACE("updrade stage don't support group-rescan if the min cluster version is less than 4.3.1.0 for distinct and except operator");
+      }
+    }
     for (int64_t i = 0; OB_SUCC(ret) && can_use_batch_nlj && i < root->get_num_of_child(); ++i) {
       ObLogicalOperator *child = root->get_child(i);
       if (OB_ISNULL(child)) {
@@ -1506,6 +1513,28 @@ int ObLogJoin::get_card_without_filter(double &card)
     card = get_card() / path->other_cond_sel_;
   } else {
     card = 1.0;
+  }
+  return ret;
+}
+
+int ObLogJoin::check_use_child_ordering(bool &used, int64_t &inherit_child_ordering_index)
+{
+  int ret = OB_SUCCESS;
+  used = true;
+  inherit_child_ordering_index = first_child;
+  if (HASH_JOIN == get_join_algo()) {
+    inherit_child_ordering_index = -1;
+    used = false;
+  } else if (NESTED_LOOP_JOIN == get_join_algo()) {
+    used = false;
+    if (CONNECT_BY_JOIN == get_join_type()) {
+      inherit_child_ordering_index = -1;
+    } else {
+      inherit_child_ordering_index = first_child;
+    }
+  } else if (MERGE_JOIN == get_join_algo()) {
+    used = true;
+    inherit_child_ordering_index = first_child;
   }
   return ret;
 }

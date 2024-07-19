@@ -251,7 +251,9 @@ ObGetMergeTablesResult::ObGetMergeTablesResult()
     is_simplified_(false),
     scn_range_(),
     error_location_(nullptr),
-    snapshot_info_()
+    snapshot_info_(),
+    is_backfill_(false),
+    backfill_scn_()
 {
 }
 
@@ -259,7 +261,8 @@ bool ObGetMergeTablesResult::is_valid() const
 {
   return scn_range_.is_valid()
       && (is_simplified_ || handle_.get_count() >= 1)
-      && merge_version_ >= 0;
+      && merge_version_ >= 0
+      && (!is_backfill_ || backfill_scn_.is_valid());
 }
 
 void ObGetMergeTablesResult::reset_handle_and_range()
@@ -285,6 +288,8 @@ void ObGetMergeTablesResult::reset()
   error_location_ = nullptr;
   is_simplified_ = false;
   snapshot_info_.reset();
+  is_backfill_ = false;
+  backfill_scn_.reset();
 }
 
 int ObGetMergeTablesResult::copy_basic_info(const ObGetMergeTablesResult &src)
@@ -300,6 +305,8 @@ int ObGetMergeTablesResult::copy_basic_info(const ObGetMergeTablesResult &src)
     scn_range_ = src.scn_range_;
     error_location_ = src.error_location_;
     is_simplified_ = src.is_simplified_;
+    is_backfill_ = src.is_backfill_;
+    backfill_scn_ = src.backfill_scn_;
   }
   return ret;
 }
@@ -317,6 +324,12 @@ int ObGetMergeTablesResult::assign(const ObGetMergeTablesResult &src)
   }
   return ret;
 }
+
+share::SCN ObGetMergeTablesResult::get_merge_scn() const
+{
+  return is_backfill_ ? backfill_scn_ : scn_range_.end_scn_;
+}
+
 ObDDLTableStoreParam::ObDDLTableStoreParam()
   : keep_old_ddl_sstable_(true),
     ddl_start_scn_(SCN::min_scn()),
@@ -339,6 +352,23 @@ bool ObDDLTableStoreParam::is_valid() const
     && data_format_version_ >= 0;
 }
 
+UpdateUpperTransParam::UpdateUpperTransParam()
+  : new_upper_trans_(nullptr),
+    last_minor_end_scn_()
+{
+  last_minor_end_scn_.set_min();
+}
+
+UpdateUpperTransParam::~UpdateUpperTransParam()
+{
+  reset();
+}
+
+void UpdateUpperTransParam::reset()
+{
+  new_upper_trans_ = nullptr;
+  last_minor_end_scn_.set_min();
+}
 
 ObUpdateTableStoreParam::ObUpdateTableStoreParam(
     const int64_t snapshot_version,
@@ -358,7 +388,33 @@ ObUpdateTableStoreParam::ObUpdateTableStoreParam(
     allow_duplicate_sstable_(false),
     need_check_transfer_seq_(false),
     transfer_seq_(-1),
-    merge_type_(MERGE_TYPE_MAX)
+    merge_type_(MERGE_TYPE_MAX),
+    upper_trans_param_()
+{
+  clog_checkpoint_scn_.set_min();
+}
+
+ObUpdateTableStoreParam::ObUpdateTableStoreParam(
+    const int64_t snapshot_version,
+    const int64_t multi_version_start,
+    const ObStorageSchema *storage_schema,
+    const int64_t rebuild_seq,
+    const UpdateUpperTransParam upper_trans_param)
+  : sstable_(nullptr),
+    snapshot_version_(snapshot_version),
+    clog_checkpoint_scn_(),
+    multi_version_start_(multi_version_start),
+    need_report_(false),
+    storage_schema_(storage_schema),
+    rebuild_seq_(rebuild_seq),
+    update_with_major_flag_(false),
+    need_check_sstable_(false),
+    ddl_info_(),
+    allow_duplicate_sstable_(false),
+    need_check_transfer_seq_(false),
+    transfer_seq_(-1),
+    merge_type_(MERGE_TYPE_MAX),
+    upper_trans_param_(upper_trans_param)
 {
   clog_checkpoint_scn_.set_min();
 }
@@ -389,7 +445,8 @@ ObUpdateTableStoreParam::ObUpdateTableStoreParam(
     allow_duplicate_sstable_(allow_duplicate_sstable),
     need_check_transfer_seq_(need_check_transfer_seq),
     transfer_seq_(transfer_seq),
-    merge_type_(merge_type)
+    merge_type_(merge_type),
+    upper_trans_param_()
 {
   clog_checkpoint_scn_ = clog_checkpoint_scn;
 }
@@ -416,7 +473,8 @@ ObUpdateTableStoreParam::ObUpdateTableStoreParam(
     allow_duplicate_sstable_(false),
     need_check_transfer_seq_(false),
     transfer_seq_(-1),
-    merge_type_(merge_type)
+    merge_type_(merge_type),
+    upper_trans_param_()
 {
   clog_checkpoint_scn_.set_min();
 }
@@ -446,7 +504,6 @@ ObBatchUpdateTableStoreParam::ObBatchUpdateTableStoreParam()
     is_transfer_replace_(false),
     start_scn_(SCN::min_scn()),
     tablet_meta_(nullptr),
-    update_ddl_sstable_(false),
     restore_status_(ObTabletRestoreStatus::FULL)
 {
 }
@@ -458,7 +515,6 @@ void ObBatchUpdateTableStoreParam::reset()
   is_transfer_replace_ = false;
   start_scn_.set_min();
   tablet_meta_ = nullptr;
-  update_ddl_sstable_ = false;
   restore_status_ = ObTabletRestoreStatus::FULL;
 }
 
@@ -482,7 +538,6 @@ int ObBatchUpdateTableStoreParam::assign(
     is_transfer_replace_ = param.is_transfer_replace_;
     start_scn_ = param.start_scn_;
     tablet_meta_ = param.tablet_meta_;
-    update_ddl_sstable_ = param.update_ddl_sstable_;
     restore_status_ = param.restore_status_;
 #ifdef ERRSIM
     errsim_point_info_ = param.errsim_point_info_;

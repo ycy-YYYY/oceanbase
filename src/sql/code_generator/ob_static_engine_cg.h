@@ -40,9 +40,13 @@ class ObMergeIntersectSpec;
 class ObMergeExceptSpec;
 class ObRecursiveUnionAllSpec;
 class ObHashSetSpec;
+class ObHashSetVecSpec;
 class ObHashUnionSpec;
+class ObHashUnionVecSpec;
 class ObHashIntersectSpec;
+class ObHashIntersectVecSpec;
 class ObHashExceptSpec;
+class ObHashExceptVecSpec;
 class ObCountSpec;
 class ObExprValuesSpec;
 class ObTableMergeSpec;
@@ -131,6 +135,9 @@ struct ObDASScanCtDef;
 struct InsertAllTableInfo;
 class ObHashDistinctVecSpec;
 class ObSortVecSpec;
+class ObLogValuesTableAccess;
+class ObValuesTableAccessSpec;
+
 typedef common::ObList<uint64_t, common::ObIAllocator> DASTableIdList;
 typedef common::ObSEArray<common::ObSEArray<int64_t, 8, common::ModulePageAllocator, true>,
                           1, common::ModulePageAllocator, true> RowParamMap;
@@ -191,7 +198,7 @@ public:
                                        ObLogicalOperator *op,
                                        bool is_root_job = true);
   inline static void exprs_not_support_vectorize(const ObIArray<ObRawExpr *> &exprs,
-                                         bool &found);
+                                                 const bool is_column_store_tbl, bool &found);
   inline uint64_t get_cur_cluster_version() { return cur_cluster_version_; }
 
   // detect physical operator type from logic operator.
@@ -226,7 +233,8 @@ private:
                             const bool in_root_job,
                             const bool is_subplan,
                             bool &check_eval_once,
-                            const bool need_check_output_datum);
+                            const bool need_check_output_datum,
+                            const common::ObCompressorType compress_type);
   int clear_all_exprs_specific_flag(const ObIArray<ObRawExpr *> &exprs, ObExprInfoFlag flag);
   int mark_expr_self_produced(ObRawExpr *expr);
   int mark_expr_self_produced(const ObIArray<ObRawExpr *> &exprs);
@@ -267,13 +275,18 @@ private:
   int generate_spec(ObLogLimit &op, ObLimitVecSpec &spec, const bool in_root_job);
 
   int generate_spec(ObLogDistinct &op, ObMergeDistinctSpec &spec, const bool in_root_job);
+  int generate_spec(ObLogDistinct &op, ObMergeDistinctVecSpec &spec, const bool in_root_job);
   int generate_spec(ObLogDistinct &op, ObHashDistinctSpec &spec, const bool in_root_job);
   int generate_spec(ObLogDistinct &op, ObHashDistinctVecSpec &spec, const bool in_root_job);
 
   int generate_spec(ObLogSet &op, ObHashUnionSpec &spec, const bool in_root_job);
+  int generate_spec(ObLogSet &op, ObHashUnionVecSpec &spec, const bool in_root_job);
   int generate_spec(ObLogSet &op, ObHashIntersectSpec &spec, const bool in_root_job);
+  int generate_spec(ObLogSet &op, ObHashIntersectVecSpec &spec, const bool in_root_job);
   int generate_spec(ObLogSet &op, ObHashExceptSpec &spec, const bool in_root_job);
+  int generate_spec(ObLogSet &op, ObHashExceptVecSpec &spec, const bool in_root_job);
   int generate_hash_set_spec(ObLogSet &op, ObHashSetSpec &spec);
+  int generate_hash_set_spec(ObLogSet &op, ObHashSetVecSpec &spec);
 
   int generate_spec(ObLogSet &op, ObMergeUnionSpec &spec, const bool in_root_job);
   int generate_spec(ObLogSet &op, ObMergeIntersectSpec &spec, const bool in_root_job);
@@ -352,6 +365,7 @@ private:
   int set_partition_range_info(ObLogTableScan &op, ObTableScanSpec &spec);
 
   int generate_spec(ObLogExprValues &op, ObExprValuesSpec &spec, const bool in_root_job);
+  int generate_spec(ObLogValuesTableAccess &op, ObValuesTableAccessSpec &spec, const bool in_root_job);
 
   int generate_merge_with_das(ObLogMerge &op, ObTableMergeSpec &spec, const bool in_root_job);
 
@@ -405,6 +419,8 @@ private:
 
   int generate_spec(ObLogWindowFunction &op, ObWindowFunctionSpec &spec, const bool in_root_job);
 
+  int generate_spec(ObLogWindowFunction &op, ObWindowFunctionVecSpec &spec, const bool in_root_job);
+
   int generate_spec(ObLogTableScan &op, ObRowSampleScanSpec &spec, const bool in_root_job);
   int generate_spec(ObLogTableScan &op, ObBlockSampleScanSpec &spec, const bool in_root_job);
 
@@ -450,6 +466,7 @@ private:
     const ObIArray<ObExpr*> &sort_exprs);
 
   int fill_compress_type(ObLogSort &op, ObCompressorType &compr_type);
+  int get_query_compress_type(const ObLogPlan &log_plan, ObCompressorType &compress_type);
   int check_not_support_cmp_type(
     const ObSortCollations &collations,
     const ObIArray<ObExpr*> &sort_exprs);
@@ -548,6 +565,10 @@ private:
   int check_window_functions_order(const ObIArray<ObWinFunRawExpr *> &winfunc_exprs);
 
   int prepare_runtime_filter_cmp_info(ObLogJoinFilter &join_filter_create, ObJoinFilterSpec &spec);
+
+  template<bool USE_RICH_FORMAT>
+  int prepare_topn_runtime_filter_info(ObLogSort &op, ObOpSpec &spec);
+
   int append_child_output_no_dup(const bool is_store_sortkey_separately,
                                  const ObIArray<ObExpr *> &child_output_exprs,
                                  ObIArray<ObExpr *> &sk_exprs, ObIArray<ObExpr *> &addon_exprs);
@@ -560,6 +581,7 @@ private:
 
   int extract_all_mview_ids(const ObIArray<ObRawExpr *> &exprs);
   int extract_all_mview_ids(const ObRawExpr *expr);
+  int check_is_insert_overwrite_stmt(const ObLogPlan *plan, bool &is_insert_overwrite);
 private:
   struct BatchExecParamCache {
     BatchExecParamCache(ObExecParamRawExpr* expr, ObOpSpec* spec, bool is_left)

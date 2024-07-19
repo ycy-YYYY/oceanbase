@@ -644,6 +644,7 @@ int ObPlanSet::remove_cache_obj_entry(const ObCacheObjID obj_id)
   ObPCVSet *pcv_set = NULL;
   if (OB_ISNULL(get_plan_cache_value())
      || OB_ISNULL(pcv_set = get_plan_cache_value()->get_pcv_set())) {
+    ret = OB_ERR_UNEXPECTED;
     LOG_WARN("invalid argument", K(pcv_set));
   } else if (NULL == (pc = get_plan_cache())) {
     LOG_WARN("invalid argument", K(pc));
@@ -1340,16 +1341,16 @@ int ObSqlPlanSet::init_new_set(const ObPlanCacheCtx &pc_ctx,
   need_try_plan_ = 0;
   has_duplicate_table_ = false;
 #ifdef OB_BUILD_SPM
-  bool is_spm_on = false;
+  int64_t spm_mode = 0;
 #endif
   const ObSQLSessionInfo *session_info = sql_ctx.session_info_;
   if (OB_ISNULL(session_info)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid null plan cache or session info", K(ret), K(session_info));
 #ifdef OB_BUILD_SPM
-  } else if (OB_FAIL(session_info->get_use_plan_baseline(is_spm_on))) {
-    LOG_WARN("failed to get spm configs", K(ret));
-  } else if (FALSE_IT(is_spm_closed_ = (!is_spm_on))) {
+  } else if (OB_FAIL(session_info->get_spm_mode(spm_mode))) {
+    LOG_WARN("failed to get spm mode", K(ret));
+  } else if (FALSE_IT(is_spm_closed_ = (0 == spm_mode))) {
     // do nothing
 #endif
   } else if (OB_ISNULL(pc_malloc_)) {

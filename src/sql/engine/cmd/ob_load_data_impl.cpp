@@ -2777,7 +2777,12 @@ int ObLoadDataSPImpl::ToolBox::init(ObExecContext &ctx, ObLoadDataStmt &load_stm
     file_read_param.session_         = ctx.get_my_session();
     file_read_param.timeout_ts_      = THIS_WORKER.get_timeout_ts();
 
-    if (OB_FAIL(ObFileReader::open(file_read_param, ctx.get_allocator(), file_reader))) {
+    if (OB_UNLIKELY(ObLoadFileLocation::OSS == load_file_storage &&
+                    ObLoadDataFormat::CSV != load_args.access_info_.get_load_data_format())) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_WARN("load data format not support", KR(ret), K(load_args.access_info_));
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "non-csv format in load data is");
+    } else if (OB_FAIL(ObFileReader::open(file_read_param, ctx.get_allocator(), file_reader))) {
       LOG_WARN("failed to open file.", KR(ret), K(file_read_param), K(load_args.file_name_));
 
     } else if (!file_reader->seekable()) {
@@ -3080,10 +3085,12 @@ int ObLoadDataSPImpl::ToolBox::init(ObExecContext &ctx, ObLoadDataStmt &load_stm
     }
   }
 
-  if (OB_SUCC(ret)) {
+  int64_t buf_len = DEFAULT_BUF_LENGTH;
+  bool need_extend = true;
+  while (OB_SUCC(ret) && need_extend) {
     char *buf = NULL;
-    int64_t buf_len = DEFAULT_BUF_LENGTH;
     int64_t pos = 0;
+    buf_len *= 2;
     if (OB_ISNULL(buf = static_cast<char*>(ctx.get_allocator().alloc(buf_len)))) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
       LOG_WARN("no memory", K(ret), K(buf_len));
@@ -3113,6 +3120,14 @@ int ObLoadDataSPImpl::ToolBox::init(ObExecContext &ctx, ObLoadDataStmt &load_stm
       OZ (databuff_printf(buf, buf_len, pos, "Load query: \n%.*s\n",
                                 cur_query_str.length(), cur_query_str.ptr()));
       OX (load_info.assign_ptr(buf, pos));
+    }
+    if (OB_SUCC(ret)) {
+      need_extend = false;
+    } else {
+      if (OB_SIZE_OVERFLOW == ret) {
+        ret = OB_SUCCESS;
+        need_extend = true;
+      }
     }
   }
 

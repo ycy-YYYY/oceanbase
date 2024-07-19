@@ -12,10 +12,13 @@
 
 #pragma once
 
+#include "lib/ob_define.h"
+#include "share/io/ob_io_define.h"
 #include "common/object/ob_object.h"
 #include "observer/table_load/ob_table_load_struct.h"
 #include "share/table/ob_table_load_array.h"
 #include "share/table/ob_table_load_define.h"
+#include "share/table/ob_table_load_dml_stat.h"
 #include "share/table/ob_table_load_sql_statistics.h"
 #include "share/table/ob_table_load_row_array.h"
 #include "observer/table_load/resource/ob_table_load_resource_rpc_struct.h"
@@ -44,7 +47,8 @@ class ObTableLoadCoordinator
 public:
   ObTableLoadCoordinator(ObTableLoadTableCtx *ctx);
   static bool is_ctx_inited(ObTableLoadTableCtx *ctx);
-  static int init_ctx(ObTableLoadTableCtx *ctx, const common::ObIArray<int64_t> &idx_array,
+  static int init_ctx(ObTableLoadTableCtx *ctx,
+                      const common::ObIArray<uint64_t> &column_ids,
                       ObTableLoadExecCtx *exec_ctx);
   static void abort_ctx(ObTableLoadTableCtx *ctx);
   int init();
@@ -64,11 +68,21 @@ private:
   int gen_apply_arg(ObDirectLoadResourceApplyArg &apply_arg);
   int pre_begin_peers(ObDirectLoadResourceApplyArg &apply_arg);
   int confirm_begin_peers();
+  int commit_peers(table::ObTableLoadSqlStatistics &sql_statistics,
+                   table::ObTableLoadDmlStat &dml_stats);
+  int build_table_stat_param(ObTableStatParam &param,
+                             common::ObIAllocator &allocator);
+  int write_sql_stat(table::ObTableLoadSqlStatistics &sql_statistics,
+                     table::ObTableLoadDmlStat &dml_stats);
+  int heart_beat_peer();
+private:
+  int add_check_begin_result_task();
+  int check_peers_begin_result(bool &is_finish);
+  class CheckBeginResultTaskProcessor;
+  class CheckBeginResultTaskCallback;
+public:
   int pre_merge_peers();
   int start_merge_peers();
-  int commit_peers(table::ObTableLoadSqlStatistics &sql_statistics);
-  int write_sql_stat(table::ObTableLoadSqlStatistics &sql_statistics);
-  int heart_beat_peer();
 private:
   int add_check_merge_result_task();
   int check_peers_merge_result(bool &is_finish);
@@ -97,10 +111,8 @@ private:
 public:
   int finish_trans_peers(ObTableLoadCoordinatorTrans *trans);
 private:
-  int add_check_peers_trans_commit_task(ObTableLoadCoordinatorTrans *trans);
   int check_peers_trans_commit(ObTableLoadCoordinatorTrans *trans, bool &is_commit);
-  class CheckPeersTransCommitTaskProcessor;
-  class CheckPeersTransCommitTaskCallback;
+  int check_trans_commit(ObTableLoadCoordinatorTrans *trans);
 
 // write interface
 public:

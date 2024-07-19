@@ -20,6 +20,7 @@
 #include "storage/access/ob_store_row_iterator.h"
 #include "storage/blocksstable/ob_block_sstable_struct.h"
 #include "storage/ddl/ob_direct_insert_sstable_ctx_new.h"
+#include "storage/direct_load/ob_direct_load_trans_param.h"
 
 namespace oceanbase
 {
@@ -32,26 +33,6 @@ namespace storage
 {
 class ObDirectLoadInsertTableContext;
 
-struct ObDirectLoadTransParam
-{
-public:
-  ObDirectLoadTransParam() : tx_desc_(nullptr) {}
-  ~ObDirectLoadTransParam() {}
-  void reset()
-  {
-    tx_desc_ = nullptr;
-    tx_id_.reset();
-    tx_seq_.reset();
-  }
-  bool is_valid() const { return nullptr != tx_desc_ && tx_id_.is_valid() && tx_seq_.is_valid(); }
-  TO_STRING_KV(KPC_(tx_desc), K_(tx_id), K_(tx_seq));
-
-public:
-  transaction::ObTxDesc *tx_desc_;
-  transaction::ObTransID tx_id_;
-  transaction::ObTxSEQ tx_seq_;
-};
-
 struct ObDirectLoadInsertTableParam
 {
 public:
@@ -59,7 +40,6 @@ public:
   ~ObDirectLoadInsertTableParam();
   bool is_valid() const;
   TO_STRING_KV(K_(table_id),
-               K_(lob_meta_tid),
                K_(schema_version),
                K_(snapshot_version),
                K_(ddl_task_id),
@@ -77,11 +57,11 @@ public:
                K_(trans_param),
                KP_(datum_utils),
                KP_(col_descs),
-               KP_(cmp_funcs));
+               KP_(cmp_funcs),
+               K_(online_sample_percent));
 
 public:
   uint64_t table_id_; // dest_table_id
-  uint64_t lob_meta_tid_; // dest_table_lob_meta_tid
   int64_t schema_version_;
   int64_t snapshot_version_;
   int64_t ddl_task_id_;
@@ -100,6 +80,7 @@ public:
   const blocksstable::ObStorageDatumUtils *datum_utils_;
   const common::ObIArray<share::schema::ObColDesc> *col_descs_;
   const blocksstable::ObStoreCmpFuncs *cmp_funcs_;
+  double online_sample_percent_;
 };
 
 struct ObDirectLoadInsertTabletWriteCtx
@@ -153,6 +134,7 @@ public:
 
   OB_INLINE bool has_lob_storage() const { return get_lob_column_count() > 0; }
   OB_INLINE bool need_rescan() const { return nullptr != param_ ? (!param_->is_incremental_ && param_->is_column_store_) : false; }
+  OB_INLINE bool need_del_lob() const { return nullptr != param_ ? (param_->is_incremental_ && param_->lob_column_count_ > 0) : false; }
 
 public:
   int init(ObDirectLoadInsertTableContext *table_ctx,
@@ -165,6 +147,7 @@ public:
   int get_write_ctx(ObDirectLoadInsertTabletWriteCtx &write_ctx);
   int get_lob_write_ctx(ObDirectLoadInsertTabletWriteCtx &write_ctx);
   int init_datum_row(blocksstable::ObDatumRow &datum_row);
+  int init_lob_datum_row(blocksstable::ObDatumRow &datum_row, const bool is_delete = true);
   int open_sstable_slice(const blocksstable::ObMacroDataSeq &start_seq, int64_t &slice_id);
   int close_sstable_slice(const int64_t slice_id);
   int fill_sstable_slice(const int64_t &slice_id, ObIStoreRowIterator &iter,
@@ -174,6 +157,9 @@ public:
   int fill_lob_sstable_slice(ObIAllocator &allocator, const int64_t &lob_slice_id,
                              share::ObTabletCacheInterval &pk_interval,
                              blocksstable::ObDatumRow &datum_row);
+  int fill_lob_meta_sstable_slice(const int64_t &lob_slice_id,
+                                  ObIStoreRowIterator &iter,
+                                  int64_t &affected_rows);
   int calc_range(const int64_t thread_cnt);
   int fill_column_group(const int64_t thread_cnt, const int64_t thread_id);
 
@@ -190,13 +176,14 @@ public:
                K_(start_scn),
                K_(handle),
                K_(row_count),
+               K_(open_err),
                K_(is_open),
+               K_(is_create),
                K_(is_cancel));
 private:
   int get_pk_interval(uint64_t count, share::ObTabletCacheInterval &pk_interval);
   int get_lob_pk_interval(uint64_t count, share::ObTabletCacheInterval &pk_interval);
   int refresh_pk_cache(const common::ObTabletID &tablet_id, share::ObTabletCacheInterval &pk_cache);
-  int check_lob_meta_empty();
 private:
   ObDirectLoadInsertTableContext *table_ctx_;
   const ObDirectLoadInsertTableParam *param_;
@@ -244,6 +231,7 @@ public:
   OB_INLINE int64_t get_context_id() const { return ddl_ctrl_.context_id_; }
 
   OB_INLINE bool need_rescan() const { return (!param_.is_incremental_ && param_.is_column_store_); }
+  OB_INLINE bool need_del_lob() const { return (param_.is_incremental_ && param_.lob_column_count_ > 0); }
 
   int64_t get_sql_stat_column_count() const;
   int get_sql_statistics(table::ObTableLoadSqlStatistics *&sql_statistics);

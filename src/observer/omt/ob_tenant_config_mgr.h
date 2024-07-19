@@ -48,6 +48,7 @@ public:
    * Requires: check is_valid().
    */
   ObTenantConfig *operator->() { return config_; }
+  void trace_all_config() const;
 private:
   ObTenantConfig *config_;
 };
@@ -142,7 +143,8 @@ public:
   int64_t get_tenant_config_version(uint64_t tenant_id);
   void get_lease_request(share::ObLeaseRequest &lease_request);
   int get_lease_response(share::ObLeaseResponse &lease_response);
-  int get_all_tenant_config_info(common::ObArray<TenantConfigInfo> &config_info);
+  int get_all_tenant_config_info(common::ObArray<TenantConfigInfo> &config_info,
+                                 common::ObIAllocator *allocator);
   int got_versions(const common::ObIArray<std::pair<uint64_t, int64_t> > &versions);
   int got_version(uint64_t tenant_id, int64_t version, const bool remove_repeat = true);
   int update_local(uint64_t tenant_id, int64_t expected_version);

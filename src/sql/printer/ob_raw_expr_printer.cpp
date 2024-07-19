@@ -1024,6 +1024,8 @@ int ObRawExprPrinter::print(ObAggFunRawExpr *expr)
     switch (type) {
     case T_FUN_COUNT:
       SET_SYMBOL_IF_EMPTY("count");
+    case T_FUN_COUNT_SUM:
+      SET_SYMBOL_IF_EMPTY("count_sum");
     case T_FUN_MAX:
       SET_SYMBOL_IF_EMPTY("max");
     case T_FUN_MIN:
@@ -1182,6 +1184,39 @@ int ObRawExprPrinter::print(ObAggFunRawExpr *expr)
     case T_FUN_SYS_ST_ASMVT: {
       if (OB_FAIL(print_st_asmvt(expr))) {
         LOG_WARN("fail to print st asmvt.", K(ret));
+      }
+      break;
+    }
+    case T_FUN_SYS_RB_BUILD_AGG: {
+      if (1 != expr->get_param_count()) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("param count should be equal 1", K(ret), K(expr->get_param_count()));
+      } else {
+        DATA_PRINTF("rb_build_agg(");
+        PRINT_EXPR(expr->get_param_expr(0));
+        DATA_PRINTF(")");
+      }
+      break;
+    }
+    case T_FUN_SYS_RB_OR_AGG: {
+      if (1 != expr->get_param_count()) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("param count should be equal 1", K(ret), K(expr->get_param_count()));
+      } else {
+        DATA_PRINTF("rb_or_agg(");
+        PRINT_EXPR(expr->get_param_expr(0));
+        DATA_PRINTF(")");
+      }
+      break;
+    }
+    case T_FUN_SYS_RB_AND_AGG: {
+      if (1 != expr->get_param_count()) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("param count should be equal 1", K(ret), K(expr->get_param_count()));
+      } else {
+        DATA_PRINTF("rb_and_agg(");
+        PRINT_EXPR(expr->get_param_expr(0));
+        DATA_PRINTF(")");
       }
       break;
     }
@@ -3998,8 +4033,9 @@ int ObRawExprPrinter::print(ObPseudoColumnRawExpr *expr)
         }
         break;
       }
-      case T_PSEUDO_EXTERNAL_FILE_URL:
       case T_PSEUDO_PARTITION_LIST_COL:
+      case T_PSEUDO_EXTERNAL_FILE_URL:
+      case T_PSEUDO_EXTERNAL_FILE_ROW:
       case T_PSEUDO_EXTERNAL_FILE_COL: {
         if (!expr->get_table_name().empty()) {
           PRINT_IDENT(expr->get_table_name());
@@ -4614,6 +4650,10 @@ int ObRawExprPrinter::print_cast_type(ObRawExpr *expr)
           }
           PRINT_IDENT_WITH_QUOT(dest_info->get_type_name());
         }
+        break;
+      }
+      case T_ROARINGBITMAP: {
+        DATA_PRINTF("roaringbitmap");
         break;
       }
       default: {

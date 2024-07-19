@@ -346,7 +346,7 @@ int ObStatTopKHist::build_histogram_from_topk_items(ObIAllocator &allocator,
   }
   if (OB_SUCC(ret) && tmp.count() > 0) {
     ObBucketCompare cmp;
-    std::sort(&tmp.at(0),
+    lib::ob_sort(&tmp.at(0),
               &tmp.at(0) + tmp.count(),
               CopyableBucketComparer(cmp));
     if (OB_FAIL(cmp.ret_)) {
@@ -509,7 +509,8 @@ void ObGlobalTableStat::add(int64_t rc, int64_t rs, int64_t ds, int64_t mac, int
 }
 
 int ObGlobalTableStat::add(int64_t rc, int64_t rs, int64_t ds, int64_t mac, int64_t mic,
-                           ObIArray<int64_t> &cg_macro_arr, ObIArray<int64_t> &cg_micro_arr)
+                           ObIArray<int64_t> &cg_macro_arr, ObIArray<int64_t> &cg_micro_arr,
+                           int64_t scnt, int64_t mcnt)
 {
   // skip empty partition
   int ret = OB_SUCCESS;
@@ -520,6 +521,8 @@ int ObGlobalTableStat::add(int64_t rc, int64_t rs, int64_t ds, int64_t mac, int6
     macro_block_count_ += mac;
     micro_block_count_ += mic;
     part_cnt_ ++;
+    sstable_row_cnt_ += scnt;
+    memtable_row_cnt_ += mcnt;
     if (cg_macro_arr.empty()) {
       //do nothing
     } else if (cg_macro_cnt_arr_.empty()) {

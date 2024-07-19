@@ -380,7 +380,8 @@ ObGCHandler::ObGCHandler() : is_inited_(false),
                              gc_start_ts_(OB_INVALID_TIMESTAMP),
                              block_tx_ts_(OB_INVALID_TIMESTAMP),
                              block_log_debug_time_(OB_INVALID_TIMESTAMP),
-                             log_sync_stopped_(false)
+                             log_sync_stopped_(false),
+                             last_print_dba_log_ts_(OB_INVALID_TIMESTAMP)
 {
   rec_scn_.set_max();
 }
@@ -393,6 +394,7 @@ ObGCHandler::~ObGCHandler()
 void ObGCHandler::reset()
 {
   WLockGuard wlock_guard(rwlock_);
+  last_print_dba_log_ts_ = OB_INVALID_TIMESTAMP;
   gc_seq_invalid_member_ = -1;
   ls_ = NULL;
   gc_start_ts_ = OB_INVALID_TIMESTAMP;
@@ -1005,6 +1007,7 @@ int ObGCHandler::submit_log_(const ObGCLSLOGType log_type, bool &is_success)
   } else if (OB_FAIL(get_gts_(GET_GTS_TIMEOUT_US, ref_scn))) {
     CLOG_LOG(WARN, "failed to get gts", K(ret), K(ref_scn));
   } else {
+    int64_t start_ts = ObTimeUtility::current_time();
     {
       const bool allow_compression = false;
       ObSpinLockGuard guard(rec_scn_lock_);
@@ -1020,6 +1023,7 @@ int ObGCHandler::submit_log_(const ObGCLSLOGType log_type, bool &is_success)
       // 此处需要考虑能否做成异步
       bool is_finished = false;
       int64_t WAIT_TIME = 10 * 1000L; // 10ms
+      constexpr int64_t MIN = 60 * 1000 * 1000;
       while (!is_finished) {
         bool wait_for_update_ls_gc_state = false;
         if (cb.is_succeed()) {
@@ -1047,6 +1051,11 @@ int ObGCHandler::submit_log_(const ObGCLSLOGType log_type, bool &is_success)
           if (REACH_TIME_INTERVAL(2 * 1000 * 1000L)) {
             CLOG_LOG_RET(WARN, OB_ERR_TOO_MUCH_TIME, "GC ls log wait cb too much time",
                          K(wait_for_update_ls_gc_state), K(log_type), K(ls_id), K(scn));
+          }
+          int64_t cost_ts = ObTimeUtility::current_time() - start_ts;
+          if (cost_ts >= 10 * MIN && palf_reach_time_interval(10 * MIN, last_print_dba_log_ts_)) {
+            LOG_DBA_ERROR(OB_ERR_TOO_MUCH_TIME, "msg", "wait log sync cost too much time, can not drop replica!!!",
+                          K(start_ts), K(cost_ts));
           }
         }
       }
@@ -1293,13 +1302,15 @@ int ObGCHandler::diagnose(GCDiagnoseInfo &diagnose_info) const
   int ret = OB_SUCCESS;
   if (IS_NOT_INIT) {
     CLOG_LOG(WARN, "GC handler not init");
-  } else {
-    RLockGuard wlock_guard(rwlock_);
+  } else if (true == rwlock_.try_rdlock()){
     if (OB_FAIL(ls_->get_gc_state(diagnose_info.gc_state_))) {
       CLOG_LOG(WARN, "get_gc_state failed", K(ls_->get_ls_id()));
     } else {
       diagnose_info.gc_start_ts_ = gc_start_ts_;
     }
+    rwlock_.unlock();
+  } else {
+    CLOG_LOG(WARN, "try_lock failed", KP(ls_));
   }
   return ret;
 }
@@ -1664,7 +1675,8 @@ void ObGarbageCollector::gc_check_ls_status_(ObGCCandidateArray &gc_candidates)
           CLOG_LOG(WARN, "get next log stream failed", K(ret));
         }
       } else if (OB_ISNULL(ls)) {
-        CLOG_LOG(ERROR, "log stream is NULL", KP(ls));
+        ret = OB_ERR_UNEXPECTED;
+        CLOG_LOG(ERROR, "log stream is NULL", K(ret), KP(ls));
       } else if (OB_UNLIKELY(!ls->is_create_committed())) {
         CLOG_LOG(INFO, "ls is not committed, just ignore", K(ls));
       } else if (OB_SUCCESS != (tmp_ret = gc_check_ls_status_(*ls, gc_candidates))) {
@@ -1790,6 +1802,7 @@ void ObGarbageCollector::execute_gc_(ObGCCandidateArray &gc_candidates)
       } else if (NOT_IN_LEADER_MEMBER_LIST == gc_reason) {
         ObLogHandler *log_handler = NULL;
         if (OB_ISNULL(log_handler = ls->get_log_handler())) {
+          tmp_ret = OB_ERR_UNEXPECTED;
           CLOG_LOG(ERROR, "log_handler is NULL", K(tmp_ret), K(id));
         } else if (!log_handler->is_sync_enabled() || !log_handler->is_replay_enabled()) {
           gc_handler->set_log_sync_stopped();

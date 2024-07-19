@@ -131,6 +131,7 @@ public:
   virtual int get_leader_config_version(palf::LogConfigVersion &config_version) const = 0;
   //  get leader from election, used only for non_palf_leader rebuilding.
   virtual int get_election_leader(common::ObAddr &addr) const = 0;
+  virtual int get_parent(common::ObAddr &parent) const = 0;
   virtual int change_replica_num(const common::ObMemberList &member_list,
                                  const int64_t curr_replica_num,
                                  const int64_t new_replica_num,
@@ -197,6 +198,7 @@ public:
   virtual int offline() = 0;
   virtual int online(const palf::LSN &lsn, const share::SCN &scn) = 0;
   virtual bool is_offline() const = 0;
+  virtual int is_replay_fatal_error(bool &has_fatal_error) = 0;
 };
 
 class ObLogHandler : public ObILogHandler, public ObLogHandlerBase
@@ -429,6 +431,13 @@ public:
   //   OB_NOT_INIT
   //   OB_LEADER_NOT_EXIST
   int get_election_leader(common::ObAddr &addr) const override final;
+  // @brief, get parent
+  // @param[out] addr: address of parent
+  // retval:
+  //   OB_SUCCESS
+  //   OB_NOT_INIT
+  //   OB_ENTRY_NOT_EXIST: parent is invalid
+  int get_parent(common::ObAddr &parent) const override final;
   // PalfBaseInfo include the 'base_lsn' and the 'prev_log_info' of sliding window.
   // @param[in] const LSN&, base_lsn of ls.
   // @param[out] PalfBaseInfo&, palf_base_info
@@ -744,6 +753,13 @@ public:
   int offline() override final;
   int online(const palf::LSN &lsn, const share::SCN &scn) override final;
   bool is_offline() const override final;
+  // @brief: check there's a fatal error in replay service.
+  // @param[out] has_fatal_error.
+  // @return:
+  // OB_NOT_INIT: not inited
+  // OB_NOT_RUNNING: in stop state
+  // OB_EAGAIN: try lock failed, need retry.
+  int is_replay_fatal_error(bool &has_fatal_error);
 private:
   static constexpr int64_t MIN_CONN_TIMEOUT_US = 5 * 1000 * 1000;     // 5s
   const int64_t MAX_APPEND_RETRY_INTERNAL = 500 * 1000L;

@@ -14,6 +14,7 @@
 #include <thread>
 #define private public
 #define protected public
+#include "storage/tx/ob_committer_define.h"
 #include "storage/tx/ob_multi_data_source.h"
 #include "storage/tx/ob_trans_define.h"
 #include "storage/tx/ob_trans_part_ctx.h"
@@ -142,6 +143,7 @@ public:
     auto test_name = test_info->name();
     MTL_MEM_ALLOC_MGR.init();
     _TRANS_LOG(INFO, ">>>> starting test : %s", test_name);
+    LOG_INFO(">>>>>>starting>>>>>>>>", K(test_name));
   }
   virtual void TearDown() override
   {
@@ -151,6 +153,7 @@ public:
     _TRANS_LOG(INFO, ">>>> tearDown test : %s", test_name);
     ObClockGenerator::destroy();
     ObMallocAllocator::get_instance()->recycle_tenant_allocator(1001);
+    LOG_INFO(">>>>>teardown>>>>>>>>", K(test_name));
   }
   MsgBus bus_;
 };
@@ -172,7 +175,7 @@ TEST_F(ObTestRegisterMDS, basic)
 
   ASSERT_EQ(OB_SUCCESS, n1->start_tx(tx, tx_param));
   ASSERT_EQ(OB_SUCCESS, n1->txs_.register_mds_into_tx(tx, n1->ls_id_, ObTxDataSourceType::DDL_TRANS,
-                                                      mds_str, strlen(mds_str)));
+                                                      mds_str, strlen(mds_str), 0));
   n2->wait_all_redolog_applied();
   ASSERT_EQ(OB_SUCCESS, n1->commit_tx(tx, n1->ts_after_ms(500)));
 
@@ -201,7 +204,7 @@ TEST_F(ObTestRegisterMDS, basic_big_mds)
 
   ASSERT_EQ(OB_SUCCESS, n1->start_tx(tx, tx_param));
   ASSERT_EQ(OB_SUCCESS, n1->txs_.register_mds_into_tx(tx, n1->ls_id_, ObTxDataSourceType::DDL_TRANS,
-                                                      mds_str, char_count));
+                                                      mds_str, char_count, 0));
   n1->wait_all_redolog_applied();
 
   // TRANS_LOG(INFO, "try commit tx with expired_time", K(n1->ts_after_ms(0)),K(n1->ts_after_ms()))
@@ -230,7 +233,7 @@ TEST_F(ObTestRegisterMDS, notify_mds_error)
 
   NOTIFY_MDS_ERRSIM = true;
   ASSERT_EQ(OB_ERR_UNEXPECTED, n1->txs_.register_mds_into_tx(tx, n1->ls_id_, ObTxDataSourceType::DDL_TRANS,
-                                                      mds_str, strlen(mds_str)));
+                                                      mds_str, strlen(mds_str), 0));
   NOTIFY_MDS_ERRSIM = false;
 
   n2->wait_all_redolog_applied();

@@ -477,6 +477,7 @@ public:
             || stmt_type == stmt::T_ALTER_PROFILE
             || stmt_type == stmt::T_DROP_PROFILE
             || stmt_type == stmt::T_ALTER_USER_PROFILE
+            || stmt_type == stmt::T_ALTER_USER_PROXY
             || stmt_type == stmt::T_ALTER_USER_PRIMARY_ZONE
             || stmt_type == stmt::T_ALTER_USER
             //
@@ -541,6 +542,10 @@ public:
   const share::schema::ObReferenceObjTable *get_ref_obj_table() const;
   share::schema::ObReferenceObjTable *get_ref_obj_table();
   virtual int init_stmt(TableHashAllocator &table_hash_alloc, ObWrapperAllocator &wrapper_alloc) { return common::OB_SUCCESS; }
+  virtual int check_is_simple_lock_stmt(bool &is_valid) const {
+    is_valid = false;
+    return common::OB_SUCCESS;
+  };
 protected:
   void print_indentation(FILE *fp, int32_t level) const;
 

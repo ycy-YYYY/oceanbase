@@ -68,6 +68,7 @@ class ObIRawExprCopier;
 class ObSelectStmt;
 class ObRTDatumArith;
 class ObLogicalOperator;
+class ObInListInfo;
 extern ObRawExpr *USELESS_POINTER;
 
 // If is_stack_overflow is true, the printing will not continue
@@ -201,16 +202,21 @@ extern ObRawExpr *USELESS_POINTER;
    || ((op) == T_FUN_SYS_JSON_CONTAINS_PATH) \
    || ((op) == T_FUN_SYS_JSON_QUOTE) \
    || ((op) == T_FUN_SYS_JSON_UNQUOTE) \
+   || ((op) == T_FUN_SYS_JSON_QUERY) \
    || ((op) == T_FUN_SYS_JSON_OVERLAPS) \
    || ((op) == T_FUN_SYS_JSON_MEMBER_OF) \
    || ((op) == T_FUN_SYS_JSON_VALUE))
 
 // JSON_CONTAINS & JSON_OVERLAPS not support yet
 #define IS_JSON_DOMAIN_OP(op) \
-  (((op) == T_FUN_SYS_JSON_MEMBER_OF) /*\
-    || ((op) == T_FUN_SYS_JSON_OVERLAPS) \
-    || ((op) == T_FUN_SYS_JSON_CONTAINS)*/) \
+  ((op) == T_FUN_SYS_JSON_MEMBER_OF \
+  || (op) == T_FUN_SYS_JSON_OVERLAPS \
+  || (op) == T_FUN_SYS_JSON_CONTAINS)
 
+#define IS_MULTIVALUE_EXPR(op) \
+  (((op) == T_FUN_SYS_JSON_MEMBER_OF) \
+   || ((op) == T_FUN_SYS_JSON_OVERLAPS) \
+   || ((op) == T_FUN_SYS_JSON_CONTAINS))
 
 // ObSqlBitSet is a simple bitset, in order to avoid memory exposure
 // ObBitSet is too large just for a simple bitset
@@ -449,7 +455,10 @@ public:
       SQL_RESV_LOG(WARN, "negative bitmap member not allowed", K(ret), K(index));
     } else {
       int64_t pos = index >> PER_BITSETWORD_MOD_BITS;
-      if (OB_UNLIKELY(pos >= desc_.cap_)) {
+      if (OB_UNLIKELY(pos + 1 > INT16_MAX)) {
+        ret = OB_SIZE_OVERFLOW;
+        SQL_RESV_LOG(WARN, "ObSqlBitSet pos overflow", K(ret), K(index), K(pos));
+      } else if (OB_UNLIKELY(pos >= desc_.cap_)) {
         int64_t new_word_cnt = pos * 2;
         if (OB_FAIL(alloc_new_buf(new_word_cnt))) {
           SQL_RESV_LOG(WARN, "failed to alloc new buf", K(ret));
@@ -1166,7 +1175,7 @@ public:
 
   int check_param_num() const;
 
-  TO_STRING_KV(K_(access_name), K_(access_index), K_(type), K_(params));
+  TO_STRING_KV(K_(access_name), K_(access_index), K_(type), K_(params), K_(udf_info));
 
   AccessNameType type_;
   common::ObString access_name_;
@@ -1602,6 +1611,7 @@ class ObPseudoColumnRawExpr;
 class ObOpRawExpr;
 class ObWinFunRawExpr;
 class ObUserVarIdentRawExpr;
+class ObDMLResolver;
 struct ObUDFInfo;
 class ObMatchFunRawExpr;
 template <typename ExprFactoryT>
@@ -1630,6 +1640,7 @@ struct ObResolveContext
     udf_info_(NULL),
     op_exprs_(NULL),
     user_var_exprs_(nullptr),
+    inlist_infos_(NULL),
     is_extract_param_type_(true),
     param_list_(NULL),
     prepare_param_count_(0),
@@ -1647,6 +1658,8 @@ struct ObResolveContext
     view_ref_id_(OB_INVALID_ID),
     is_variable_allowed_(true),
     is_expanding_view_(false),
+    is_need_print_(false),
+    is_from_show_resolver_(false),
     is_in_system_view_(false),
     match_exprs_(NULL)
   {
@@ -1669,6 +1682,7 @@ struct ObResolveContext
   common::ObIArray<ObUDFInfo> *udf_info_;
   common::ObIArray<ObOpRawExpr*> *op_exprs_;
   common::ObIArray<ObUserVarIdentRawExpr*> *user_var_exprs_;
+  common::ObIArray<ObInListInfo> *inlist_infos_;
   //由于单测expr resolver中包含一些带？的表达式case，
   //所以为expr resolver ctx增添一个配置变量isextract_param_type
   //如果配置该参数为true，那么遇到？将为其填上真实的参数类型，
@@ -1695,6 +1709,8 @@ struct ObResolveContext
   uint64_t view_ref_id_;
   bool is_variable_allowed_;
   bool is_expanding_view_;
+  bool is_need_print_;
+  bool is_from_show_resolver_;
   bool is_in_system_view_;
   common::ObIArray<ObMatchFunRawExpr*> *match_exprs_;
 };
@@ -1708,7 +1724,8 @@ enum ExplicitedRefType {
   REF_BY_NORMAL = 1 << 0,
   REF_BY_PART_EXPR = 1 << 1,
   REF_BY_VIRTUAL_GEN_COL = 1<< 2,
-  REF_BY_STORED_GEN_COL = 1 << 3
+  REF_BY_STORED_GEN_COL = 1 << 3,
+  REF_BY_MATCH_EXPR = 1 << 4
 };
 class ObRawExpr : virtual public jit::expr::ObIRawExpr
 {
@@ -1952,7 +1969,9 @@ public:
   bool is_deterministic() const { return is_deterministic_; }
   bool is_bool_expr() const;
   bool is_spatial_expr() const;
+  bool is_oracle_spatial_expr() const;
   bool is_json_domain_expr() const;
+  bool is_multivalue_expr() const;
   ObRawExpr* get_json_domain_param_expr();
   bool is_geo_expr() const;
   bool is_domain_expr() const;
@@ -1972,7 +1991,10 @@ public:
     may_add_interval_part_ = flag;
   }
   bool is_wrappered_json_extract() const {
-   return (type_ == T_FUN_SYS_JSON_UNQUOTE && OB_NOT_NULL(get_param_expr(0)) && get_param_expr(0)->type_ == T_FUN_SYS_JSON_EXTRACT);
+   return (type_ == T_FUN_SYS_JSON_UNQUOTE &&
+           OB_NOT_NULL(get_param_expr(0)) &&
+           (get_param_expr(0)->type_ == T_FUN_SYS_JSON_EXTRACT ||
+            get_param_expr(0)->type_ == T_FUN_SYS_JSON_VALUE));
   }
   bool extract_multivalue_json_expr(const ObRawExpr*& json_expr) const;
   bool is_multivalue_define_json_expr() const;
@@ -2006,6 +2028,8 @@ public:
   int extract_local_session_vars_recursively(ObIArray<const share::schema::ObSessionSysVar *> &var_array);
   void set_local_session_var_id(int64_t idx) { local_session_var_id_ = idx; }
   int64_t get_local_session_var_id() { return local_session_var_id_; }
+
+  int has_exec_param(bool &bool_ret) const;
 
 private:
   const ObRawExpr *get_same_identify(const ObRawExpr *e,
@@ -2070,7 +2094,7 @@ inline void ObRawExpr::unset_result_flag(uint32_t result_flag)
 inline int ObRawExpr::add_relation_id(int64_t rel_idx)
 {
   int ret = common::OB_SUCCESS;
-  if (rel_idx < 0) {
+  if (OB_UNLIKELY(rel_idx < 0)) {
     ret = common::OB_INVALID_ARGUMENT;
   } else {
     ret = rel_ids_.add_member(rel_idx);
@@ -3371,7 +3395,7 @@ public:
     order_items_(),
     separator_param_expr_(NULL),
     udf_meta_(),
-    is_nested_aggr_(false),
+    expr_in_inner_stmt_(false),
     is_need_deserialize_row_(false),
     pl_agg_udf_expr_(NULL)
   {
@@ -3385,7 +3409,7 @@ public:
     order_items_(),
     separator_param_expr_(NULL),
     udf_meta_(),
-    is_nested_aggr_(false),
+    expr_in_inner_stmt_(false),
     is_need_deserialize_row_(false),
     pl_agg_udf_expr_(NULL)
   {
@@ -3400,7 +3424,7 @@ public:
     order_items_(),
     separator_param_expr_(NULL),
     udf_meta_(),
-    is_nested_aggr_(false),
+    expr_in_inner_stmt_(false),
     is_need_deserialize_row_(false),
     pl_agg_udf_expr_(NULL)
   {
@@ -3419,8 +3443,8 @@ public:
   bool is_param_distinct() const;
   void set_param_distinct(bool is_distinct);
   void set_separator_param_expr(ObRawExpr *separator_param_expr);
-  bool is_nested_aggr() const;
-  void set_in_nested_aggr(bool is_nested);
+  bool in_inner_stmt() const;
+  void set_nested_aggr_inner_stmt(bool inner_stmt);
   int add_order_item(const OrderItem &order_item);
   virtual void clear_child() override;
   virtual void reset();
@@ -3432,6 +3456,7 @@ public:
   virtual ObRawExpr *&get_param_expr(int64_t index);
   inline int64_t get_real_param_count() const { return real_param_exprs_.count(); }
   inline const common::ObIArray<ObRawExpr*> &get_real_param_exprs() const { return real_param_exprs_; }
+  int get_param_exprs(common::ObIArray<ObRawExpr*> &param_exprs);
   inline common::ObIArray<ObRawExpr*> &get_real_param_exprs_for_update() { return real_param_exprs_; }
   virtual int do_visit(ObRawExprVisitor &visitor) override;
   inline ObRawExpr *get_separator_param_expr() const { return separator_param_expr_; }
@@ -3477,8 +3502,9 @@ public:
                                             N_ORDER_BY, order_items_,
                                             N_SEPARATOR_PARAM_EXPR, separator_param_expr_,
                                             K_(udf_meta),
-                                            K_(is_nested_aggr),
+                                            K_(expr_in_inner_stmt),
                                             K_(pl_agg_udf_expr));
+
 private:
   DISALLOW_COPY_AND_ASSIGN(ObAggFunRawExpr);
   // real_param_exprs_.count() == 0 means '*'
@@ -3489,7 +3515,7 @@ private:
   ObRawExpr *separator_param_expr_;
   //use for udf function info
   share::schema::ObUDFMeta udf_meta_;
-  bool is_nested_aggr_;
+  bool expr_in_inner_stmt_;
   bool is_need_deserialize_row_;// for topk histogram and hybrid histogram computation
   ObRawExpr *pl_agg_udf_expr_;//for pl agg udf expr
 };
@@ -3540,9 +3566,9 @@ inline bool ObAggFunRawExpr::is_param_distinct() const
 {
   return distinct_;
 }
-inline bool ObAggFunRawExpr::is_nested_aggr() const
+inline bool ObAggFunRawExpr::in_inner_stmt() const
 {
-  return is_nested_aggr_;
+  return expr_in_inner_stmt_;
 }
 inline bool ObAggFunRawExpr::contain_nested_aggr() const
 {
@@ -3555,7 +3581,7 @@ inline bool ObAggFunRawExpr::contain_nested_aggr() const
   return ret;
 }
 inline void ObAggFunRawExpr::set_param_distinct(bool is_distinct) { distinct_ = is_distinct; }
-inline void ObAggFunRawExpr::set_in_nested_aggr(bool is_nested) { is_nested_aggr_ = is_nested; }
+inline void ObAggFunRawExpr::set_nested_aggr_inner_stmt(bool inner_stmt) { expr_in_inner_stmt_ = inner_stmt; }
 inline void ObAggFunRawExpr::set_separator_param_expr(ObRawExpr *separator_param_expr)
 {
   separator_param_expr_ = separator_param_expr;
@@ -4711,22 +4737,26 @@ public:
   bool is_cte_query_type() const { return T_CTE_SEARCH_COLUMN == type_ || T_CTE_CYCLE_COLUMN == type_; }
   void set_cte_cycle_value(ObRawExpr *v, ObRawExpr *d_v) {cte_cycle_value_ = v; cte_cycle_default_value_ = d_v; };
   void get_cte_cycle_value(ObRawExpr *&v, ObRawExpr *&d_v) {v = cte_cycle_value_; d_v = cte_cycle_default_value_; };
-  void set_table_id(int64_t table_id) { table_id_ = table_id; }
-  int64_t get_table_id() const { return table_id_; }
+  void set_table_id(uint64_t table_id) { table_id_ = table_id; }
+  uint64_t get_table_id() const { return table_id_; }
   void set_table_name(const common::ObString &table_name) { table_name_ = table_name; }
   const common::ObString & get_table_name() const { return table_name_; }
+  void set_data_access_path(const common::ObString &data_access_path) { data_access_path_ = data_access_path; }
+  const common::ObString & get_data_access_path() const { return data_access_path_; }
 
   VIRTUAL_TO_STRING_KV(N_ITEM_TYPE, type_,
                        N_RESULT_TYPE, result_type_,
                        N_EXPR_INFO, info_,
                        N_REL_ID, rel_ids_,
                        N_TABLE_ID, table_id_,
-                       N_TABLE_NAME, table_name_);
+                       N_TABLE_NAME, table_name_,
+                       K_(data_access_path));
 private:
   ObRawExpr *cte_cycle_value_;
   ObRawExpr *cte_cycle_default_value_;
-  int64_t table_id_;
+  uint64_t table_id_;
   common::ObString table_name_;
+  common::ObString data_access_path_; //for external table column
   DISALLOW_COPY_AND_ASSIGN(ObPseudoColumnRawExpr);
 };
 

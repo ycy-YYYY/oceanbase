@@ -184,11 +184,17 @@ struct VecTCHashCalc<VEC_TC_LOB, HashMethod, hash_v2>
       const ObLobLocator *lob_locator_v1 = reinterpret_cast<const ObLobLocator *>(data);
       in_data.assign_ptr(lob_locator_v1->get_payload_ptr(), lob_locator_v1->payload_size_);
     } else if (loc.is_valid()) {
-      ObTextStringIter text_iter(ObLongTextType, CS_TYPE_BINARY, raw_data, true);
-      if (OB_FAIL(text_iter.init(0, NULL, &allocator))) {
-        COMMON_LOG(WARN, "Lob: str iter init failed ", K(ret), K(text_iter));
-      } else if (OB_FAIL(text_iter.get_full_data(in_data))) {
-        COMMON_LOG(WARN, "Lob: str iter get full data failed ", K(ret), K(text_iter));
+      const ObLobCommon* lob = reinterpret_cast<const ObLobCommon*>(data);
+      // fast path for disk inrow lob
+      if (data_len != 0 && !lob->is_mem_loc_ && lob->in_row_) {
+        in_data.assign_ptr(lob->get_inrow_data_ptr(), static_cast<int32_t>(lob->get_byte_size(data_len)));
+      } else {
+        ObTextStringIter text_iter(ObLongTextType, CS_TYPE_BINARY, raw_data, true);
+        if (OB_FAIL(text_iter.init(0, NULL, &allocator))) {
+          COMMON_LOG(WARN, "Lob: str iter init failed ", K(ret), K(text_iter));
+        } else if (OB_FAIL(text_iter.get_full_data(in_data))) {
+          COMMON_LOG(WARN, "Lob: str iter get full data failed ", K(ret), K(text_iter));
+        }
       }
     } else { // not v1 or v2 lob
       ret = OB_INVALID_ARGUMENT;
@@ -321,6 +327,7 @@ struct VecTCHashCalc<VEC_TC_ROWID, HashMethod, hash_v2>
     return ret;
   }
 };
+
 
 template<VecValueTypeClass vec_type, typename HashMethod, bool hash_v2,  typename hash_type>
 struct VecTCHashCalcWithHashType
@@ -632,7 +639,17 @@ struct VecTCCmpCalc<VEC_TC_FIXED_DOUBLE, VEC_TC_FIXED_DOUBLE>
     const double l = *reinterpret_cast<const double *>(l_v);
     const double r = *reinterpret_cast<const double *>(r_v);
     const double P = 5 / LOG_10[l_meta.get_scale() + 1];
-    if (l == r || fabs(l - r) < P) {
+    if (isnan(l) || isnan(r)) {
+      if (isnan(l) && isnan(r)) {
+        cmp_ret = 0;
+      } else if (isnan(l)) {
+        // l is nan, r is not nan:left always bigger than right
+        cmp_ret = 1;
+      } else {
+        // l is not nan, r is nan, left always less than right
+        cmp_ret = -1;
+      }
+    } else if (l == r || fabs(l - r) < P) {
       cmp_ret = 0;
     } else {
       cmp_ret = (l < r ? -1: 1);
@@ -774,6 +791,7 @@ struct VecTCCmpCalc<VEC_TC_UDT, VEC_TC_UDT>
     return ret;
   }
 };
+
 
 // null type comparison
 
